@@ -1,0 +1,23 @@
+prune tests
+prune examples
+prune third_party
+prune checkpoints
+prune scripts
+prune devtools
+prune experiments
+prune parity
+prune benchmarks
+exclude Makefile
+exclude docs/verification.md
+
+prune sam3_mlx/agent
+prune sam3_mlx/eval
+prune sam3_mlx/perflib/triton
+
+include README.md
+include docs/technical.md
+include docs/usage.md
+
+global-exclude .DS_Store
+global-exclude __pycache__
+global-exclude *.py[cod]

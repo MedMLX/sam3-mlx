@@ -1,0 +1,547 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates. All Rights Reserved
+
+"""Postprocessor compatibility classes for the MLX port."""
+
+from __future__ import annotations
+
+from collections.abc import Callable, Mapping, Sequence
+from typing import Literal, Never, Protocol, TypeAlias, cast
+
+import mlx.core as mx
+import numpy as np
+from numpy.typing import NDArray
+
+from sam3_mlx.eval._unsupported import raise_unsupported
+from sam3_mlx.mlx_runtime import evaluate_boundary, mlx_array
+from sam3_mlx.mlx_runtime import to_numpy as _to_numpy
+from sam3_mlx.model.data_misc import interpolate
+from sam3_mlx import rle as _masks_ops
+
+MLX_EVAL_POSTPROCESSORS_BASE_COMMIT = "e30678519ff456845aafc13b705fe0ea0a3db028"
+
+ArrayValue: TypeAlias = mx.array | NDArray[np.generic]
+OutputValue: TypeAlias = ArrayValue | list[_masks_ops.CocoRle] | None
+ImageResult: TypeAlias = dict[str, OutputValue]
+ImageResults: TypeAlias = list[ImageResult]
+ModelOutputs: TypeAlias = Mapping[str, object]
+
+
+class _Metadata(Protocol):
+    original_size: object
+    original_category_id: object
+    original_image_id: object
+    coco_image_id: object
+
+
+_rle_encode = _masks_ops.rle_encode
+_raise_unsupported = cast(Callable[[str], Never], raise_unsupported)
+
+
+def _to_output_array(value: NDArray[np.generic], *, to_cpu: bool) -> ArrayValue:
+    return value if to_cpu else mlx_array(value)
+
+
+def _sigmoid_np(value: object) -> NDArray[np.float32]:
+    value = np.asarray(value, dtype=np.float32)
+    return np.where(
+        value >= 0,
+        1 / (1 + np.exp(-value)),
+        np.exp(value) / (1 + np.exp(value)),
+    )
+
+
+def _item(value: object) -> object:
+    array = _to_numpy(value)
+    if array.shape == ():
+        return array.item()
+    if array.size == 1:
+        return array.reshape(-1)[0].item()
+    raise ValueError(f"Expected scalar value, got shape {array.shape}.")
+
+
+def _box_cxcywh_to_xyxy_np(boxes: NDArray[np.float32]) -> NDArray[np.float32]:
+    x_c, y_c, w, h = np.moveaxis(np.asarray(boxes, dtype=np.float32), -1, 0)
+    return np.stack(
+        [x_c - 0.5 * w, y_c - 0.5 * h, x_c + 0.5 * w, y_c + 0.5 * h],
+        axis=-1,
+    )
+
+
+def _as_size_tuple(size: object) -> tuple[int, int]:
+    size_np = _to_numpy(size, dtype=np.int64).reshape(-1)
+    if size_np.size != 2:
+        raise ValueError(
+            f"Expected image size with 2 entries, got shape {size_np.shape}."
+        )
+    return int(size_np[0]), int(size_np[1])
+
+
+def _resize_mask_block(
+    mask_block: NDArray[np.float32], size: tuple[int, int]
+) -> NDArray[np.bool_]:
+    if mask_block.ndim == 3:
+        mask_block = mask_block[:, None, :, :]
+        squeeze_channel = True
+    elif mask_block.ndim == 4:
+        squeeze_channel = False
+    else:
+        raise ValueError(
+            f"Expected mask block with rank 3 or 4, got {mask_block.shape}."
+        )
+
+    masks_mx = mlx_array(mask_block, dtype=mx.float32)
+    resized = (
+        mx.sigmoid(
+            interpolate(masks_mx, size=size, mode="bilinear", align_corners=False)
+        )
+        > 0.5
+    )
+    evaluate_boundary(resized)
+    resized_np = np.asarray(resized, dtype=np.bool_)
+    if squeeze_channel:
+        resized_np = resized_np[:, 0]
+    return resized_np.astype(bool, copy=False)
+
+
+def _concat_values(left: OutputValue, right: OutputValue) -> OutputValue:
+    if left is None:
+        return right
+    if right is None:
+        return left
+    if isinstance(left, list):
+        if not isinstance(right, list):
+            raise TypeError("RLE results can only be concatenated with RLE results.")
+        return left + right
+    return np.concatenate([_to_numpy(left), _to_numpy(right)], axis=0)
+
+
+def _take_value(value: OutputValue, indices: NDArray[np.int64]) -> OutputValue:
+    if value is None:
+        return None
+    if isinstance(value, list):
+        return [value[int(index)] for index in indices.tolist()]
+    return _to_numpy(value)[indices]
+
+
+class PostProcessNullOp:
+    def __init__(self, **kwargs: object) -> None:
+        del kwargs
+
+    def forward(self, input: object) -> None:
+        del input
+        return None
+
+    def process_results(self, **kwargs: object) -> object:
+        return kwargs["find_stages"]
+
+    def __call__(self, input: object) -> None:
+        return self.forward(input)
+
+
+class PostProcessImage:
+    """Convert SAM3 image outputs into the official evaluator result shape."""
+
+    def __init__(
+        self,
+        max_dets_per_img: int,
+        iou_type: Literal["bbox", "segm"] = "bbox",
+        to_cpu: bool = True,
+        use_original_ids: bool = False,
+        use_original_sizes_box: bool = False,
+        use_original_sizes_mask: bool = False,
+        convert_mask_to_rle: bool = False,
+        always_interpolate_masks_on_gpu: bool = True,
+        use_presence: bool = True,
+        detection_threshold: float = -1.0,
+    ) -> None:
+        self.max_dets_per_img = max_dets_per_img
+        self.iou_type = iou_type
+        self.to_cpu = to_cpu
+        self.use_original_ids = use_original_ids
+        self.use_original_sizes_box = use_original_sizes_box
+        self.use_original_sizes_mask = use_original_sizes_mask
+        self.convert_mask_to_rle = convert_mask_to_rle
+        self.always_interpolate_masks_on_gpu = always_interpolate_masks_on_gpu
+        self.use_presence = use_presence
+        self.detection_threshold = detection_threshold
+
+    def forward(
+        self,
+        outputs: ModelOutputs,
+        target_sizes_boxes: object,
+        target_sizes_masks: object,
+        forced_labels: object | None = None,
+        consistent: bool = False,
+        ret_tensordict: bool = False,
+    ) -> ImageResults:
+        if ret_tensordict:
+            _raise_unsupported("eval.postprocessors.PostProcessImage.ret_tensordict")
+
+        out_bbox = outputs["pred_boxes"] if "pred_boxes" in outputs else None
+        out_logits = _to_numpy(outputs["pred_logits"], dtype=np.float32)
+        pred_masks = outputs["pred_masks"] if self.iou_type == "segm" else None
+
+        out_probs = _sigmoid_np(out_logits)
+        if self.use_presence:
+            presence = _sigmoid_np(outputs["presence_logit_dec"])
+            if presence.ndim == 1:
+                presence = presence[:, None]
+            out_probs = out_probs * presence[:, :, None]
+
+        target_sizes_boxes_np = _to_numpy(target_sizes_boxes, dtype=np.int64)
+        target_sizes_masks_np = _to_numpy(target_sizes_masks, dtype=np.int64)
+        if target_sizes_boxes_np.ndim != 2 or target_sizes_boxes_np.shape[1] != 2:
+            raise AssertionError("target_sizes_boxes must have shape (B, 2).")
+        if target_sizes_masks_np.ndim != 2 or target_sizes_masks_np.shape[1] != 2:
+            raise AssertionError("target_sizes_masks must have shape (B, 2).")
+
+        boxes, scores, labels, keep = self._process_boxes_and_labels(
+            target_sizes_boxes_np,
+            forced_labels,
+            out_bbox,
+            out_probs,
+        )
+        out_masks = self._process_masks(
+            target_sizes_masks_np,
+            pred_masks,
+            consistent=consistent,
+            keep=keep,
+        )
+
+        if boxes is None:
+            if out_masks is None:
+                raise AssertionError("PostProcessImage requires boxes or masks.")
+            batch_size = len(out_masks)
+            boxes = [None] * batch_size
+            scores = [None] * batch_size
+            labels = [None] * batch_size
+        if scores is None or labels is None:
+            raise AssertionError("Box, score, and label results must be aligned.")
+
+        results: dict[str, Sequence[OutputValue]] = {
+            "scores": scores,
+            "labels": labels,
+            "boxes": boxes,
+        }
+        if out_masks is not None:
+            results["masks_rle" if self.convert_mask_to_rle else "masks"] = out_masks
+
+        return [
+            dict(zip(results.keys(), per_image_values))
+            for per_image_values in zip(*results.values())
+        ]
+
+    __call__ = forward
+
+    def _process_masks(
+        self,
+        target_sizes: object,
+        pred_masks: object | None,
+        consistent: bool = True,
+        keep: NDArray[np.bool_] | None = None,
+    ) -> list[ArrayValue] | list[list[_masks_ops.CocoRle]] | None:
+        if pred_masks is None:
+            return None
+
+        pred_masks_np = _to_numpy(pred_masks, dtype=np.float32)
+        if pred_masks_np.ndim != 4:
+            raise AssertionError("pred_masks must have shape (B, Q, H, W).")
+
+        if consistent:
+            if keep is not None:
+                _raise_unsupported(
+                    "eval.postprocessors.PostProcessImage.keep_consistent_masks"
+                )
+            unique_sizes = np.unique(_to_numpy(target_sizes, dtype=np.int64), axis=0)
+            if unique_sizes.shape[0] != 1:
+                raise AssertionError(
+                    "consistent=True requires equal target mask sizes."
+                )
+            resized_masks = _resize_mask_block(
+                pred_masks_np, _as_size_tuple(unique_sizes[0])
+            )
+            if self.convert_mask_to_rle:
+                return [
+                    _rle_encode(resized_masks[i]) for i in range(resized_masks.shape[0])
+                ]
+            return [
+                _to_output_array(resized_masks[i], to_cpu=self.to_cpu)
+                for i in range(resized_masks.shape[0])
+            ]
+
+        out_masks: list[ArrayValue] | list[list[_masks_ops.CocoRle]] = []
+        target_sizes_np = _to_numpy(target_sizes, dtype=np.int64)
+        if keep is not None and len(keep) != len(pred_masks_np):
+            raise AssertionError("keep and pred_masks batch dimensions must match.")
+        for batch_index, mask in enumerate(pred_masks_np):
+            if keep is not None:
+                mask = mask[_to_numpy(keep[batch_index], dtype=bool)]
+            resized = _resize_mask_block(
+                mask, _as_size_tuple(target_sizes_np[batch_index])
+            )
+            if self.convert_mask_to_rle:
+                cast(list[list[_masks_ops.CocoRle]], out_masks).append(
+                    _rle_encode(resized)
+                )
+            else:
+                out_masks.append(_to_output_array(resized, to_cpu=self.to_cpu))
+        return out_masks
+
+    def _process_boxes_and_labels(
+        self,
+        target_sizes: NDArray[np.int64],
+        forced_labels: object | None,
+        out_bbox: object | None,
+        out_probs: object,
+    ) -> tuple[
+        list[ArrayValue] | None,
+        list[ArrayValue] | None,
+        list[ArrayValue] | None,
+        NDArray[np.bool_] | None,
+    ]:
+        if out_bbox is None:
+            return None, None, None, None
+        out_bbox_np = _to_numpy(out_bbox, dtype=np.float32)
+        out_probs_np = _to_numpy(out_probs, dtype=np.float32)
+        if len(out_probs_np) != len(target_sizes):
+            raise AssertionError(
+                "prediction and target-size batch dimensions mismatch."
+            )
+
+        labels = np.argmax(out_probs_np, axis=-1).astype(np.int64)
+        scores = np.take_along_axis(out_probs_np, labels[..., None], axis=-1).squeeze(
+            -1
+        )
+        if forced_labels is None:
+            labels = np.ones_like(labels, dtype=np.int64)
+        else:
+            forced = _to_numpy(forced_labels, dtype=np.int64).reshape(-1, 1)
+            labels = np.broadcast_to(forced, labels.shape).astype(np.int64, copy=False)
+
+        boxes = _box_cxcywh_to_xyxy_np(out_bbox_np)
+        img_h = target_sizes[:, 0].astype(np.float32)
+        img_w = target_sizes[:, 1].astype(np.float32)
+        scale = np.stack([img_w, img_h, img_w, img_h], axis=1)
+        boxes = boxes * scale[:, None, :]
+
+        keep = None
+        if self.detection_threshold > 0:
+            keep = scores > self.detection_threshold
+            boxes = [box[keep_i] for box, keep_i in zip(boxes, keep)]
+            scores = [score[keep_i] for score, keep_i in zip(scores, keep)]
+            labels = [label[keep_i] for label, keep_i in zip(labels, keep)]
+        else:
+            boxes = [box for box in boxes]
+            scores = [score for score in scores]
+            labels = [label for label in labels]
+
+        boxes = [_to_output_array(box, to_cpu=self.to_cpu) for box in boxes]
+        scores = [_to_output_array(score, to_cpu=self.to_cpu) for score in scores]
+        labels = [_to_output_array(label, to_cpu=self.to_cpu) for label in labels]
+        return boxes, scores, labels, keep
+
+    def process_results(
+        self,
+        find_stages: Sequence[ModelOutputs],
+        find_metadatas: Sequence[_Metadata],
+        **kwargs: object,
+    ) -> dict[object, ImageResult]:
+        del kwargs
+        loss_stages = getattr(find_stages, "loss_stages", None)
+        if isinstance(loss_stages, Sequence):
+            stage_indices = [int(index) for index in cast(Sequence[int], loss_stages)]
+            find_metadatas = [find_metadatas[index] for index in stage_indices]
+        if len(find_stages) != len(find_metadatas):
+            raise AssertionError("find_stages and find_metadatas length mismatch.")
+
+        results: dict[object, ImageResult] = {}
+        for outputs, meta in zip(find_stages, find_metadatas):
+            original_size = _to_numpy(meta.original_size, dtype=np.int64)
+            unit_size = np.ones_like(original_size, dtype=np.int64)
+            img_size_for_boxes = (
+                original_size if self.use_original_sizes_box else unit_size
+            )
+            img_size_for_masks = (
+                original_size if self.use_original_sizes_mask else unit_size
+            )
+            detection_results = self(
+                outputs,
+                img_size_for_boxes,
+                img_size_for_masks,
+                forced_labels=(
+                    meta.original_category_id if self.use_original_ids else None
+                ),
+            )
+            ids = (
+                meta.original_image_id if self.use_original_ids else meta.coco_image_id
+            )
+            ids_np = _to_numpy(ids).reshape(-1)
+            if len(detection_results) != len(ids_np):
+                raise AssertionError("detection result and metadata lengths mismatch.")
+
+            for img_id, result in zip(ids_np, detection_results):
+                img_id = _item(img_id)
+                if img_id not in results:
+                    results[img_id] = result
+                    continue
+                if set(results[img_id].keys()) != set(result.keys()):
+                    raise AssertionError("result keys mismatch for duplicate image id.")
+                for key, value in result.items():
+                    results[img_id][key] = _concat_values(results[img_id][key], value)
+
+        for img_id, result in results.items():
+            del img_id
+            scores = result.get("scores")
+            if (
+                self.max_dets_per_img > 0
+                and scores is not None
+                and len(scores) > self.max_dets_per_img
+            ):
+                topk = np.argsort(_to_numpy(scores))[::-1][: self.max_dets_per_img]
+                for key, value in list(result.items()):
+                    result[key] = _take_value(value, topk)
+
+        return results
+
+
+class PostProcessAPIVideo(PostProcessImage):
+    def __init__(
+        self,
+        max_dets_per_img: int,
+        iou_type: Literal["bbox", "segm"] = "bbox",
+        to_cpu: bool = True,
+        convert_mask_to_rle: bool = False,
+        always_interpolate_masks_on_gpu: bool = True,
+        prob_thresh: float = 0.5,
+        use_presence: bool = False,
+        use_original_ids: bool = False,
+        use_original_sizes_box: bool = False,
+        use_original_sizes_mask: bool = False,
+        detection_threshold: float = -1.0,
+    ) -> None:
+        super().__init__(
+            max_dets_per_img=max_dets_per_img,
+            iou_type=iou_type,
+            convert_mask_to_rle=False,
+            always_interpolate_masks_on_gpu=always_interpolate_masks_on_gpu,
+            use_presence=use_presence,
+            to_cpu=to_cpu,
+            use_original_ids=use_original_ids,
+            use_original_sizes_box=use_original_sizes_box,
+            use_original_sizes_mask=use_original_sizes_mask,
+            detection_threshold=detection_threshold,
+        )
+        self.EXPECTED_KEYS = ["pred_logits", "pred_boxes", "pred_masks"]
+        self.convert_mask_to_rle_for_video = convert_mask_to_rle
+        self.to_cpu_for_video = to_cpu
+        self.prob_thresh = prob_thresh
+
+    def process_results(
+        self,
+        find_stages: Sequence[ModelOutputs],
+        find_metadatas: Sequence[_Metadata],
+        **kwargs: object,
+    ) -> dict[object, ImageResult]:
+        del find_stages, find_metadatas, kwargs
+        _raise_unsupported("eval.postprocessors.PostProcessAPIVideo.process_results")
+
+
+class PostProcessTracking(PostProcessImage):
+    def __init__(
+        self,
+        max_dets_per_img: int,
+        iou_type: Literal["bbox", "segm"] = "bbox",
+        force_single_mask: bool = False,
+        to_cpu: bool = True,
+        use_original_ids: bool = False,
+        use_original_sizes_box: bool = False,
+        use_original_sizes_mask: bool = False,
+        convert_mask_to_rle: bool = False,
+        always_interpolate_masks_on_gpu: bool = True,
+        use_presence: bool = True,
+        detection_threshold: float = -1.0,
+    ) -> None:
+        super().__init__(
+            max_dets_per_img=max_dets_per_img,
+            iou_type=iou_type,
+            to_cpu=to_cpu,
+            use_original_ids=use_original_ids,
+            use_original_sizes_box=use_original_sizes_box,
+            use_original_sizes_mask=use_original_sizes_mask,
+            convert_mask_to_rle=convert_mask_to_rle,
+            always_interpolate_masks_on_gpu=always_interpolate_masks_on_gpu,
+            use_presence=use_presence,
+            detection_threshold=detection_threshold,
+        )
+        self.force_single_mask = force_single_mask
+
+    def process_results(
+        self,
+        find_stages: Sequence[ModelOutputs],
+        find_metadatas: Sequence[_Metadata],
+        **kwargs: object,
+    ) -> dict[object, ImageResult]:
+        del find_stages, find_metadatas, kwargs
+        _raise_unsupported("eval.postprocessors.PostProcessTracking.process_results")
+
+
+class PostProcessCounting:
+    """Small NumPy-compatible counting postprocessor."""
+
+    def __init__(
+        self,
+        use_original_ids: bool = False,
+        threshold: float = 0.5,
+        use_presence: bool = False,
+    ) -> None:
+        self.use_original_ids = use_original_ids
+        self.threshold = threshold
+        self.use_presence = use_presence
+
+    def forward(
+        self, outputs: ModelOutputs, target_sizes: object
+    ) -> list[dict[str, int]]:
+        del target_sizes
+        logits = _to_numpy(outputs["pred_logits"], dtype=np.float32).squeeze(-1)
+        scores = _sigmoid_np(logits)
+        if self.use_presence:
+            presence = _sigmoid_np(outputs["presence_logit_dec"])
+            if presence.ndim == 1:
+                presence = presence[:, None]
+            scores = scores * presence
+        counts = (scores > self.threshold).sum(axis=1)
+        return [{"count": int(count)} for count in counts]
+
+    __call__ = forward
+
+    def process_results(
+        self,
+        find_stages: Sequence[ModelOutputs],
+        find_metadatas: Sequence[_Metadata],
+        **kwargs: object,
+    ) -> dict[object, dict[str, int]]:
+        del kwargs
+        if len(find_stages) != len(find_metadatas):
+            raise AssertionError("find_stages and find_metadatas length mismatch.")
+        results: dict[object, dict[str, int]] = {}
+        for outputs, meta in zip(find_stages, find_metadatas):
+            detection_results = self(outputs, meta.original_size)
+            ids = (
+                meta.original_image_id if self.use_original_ids else meta.coco_image_id
+            )
+            ids_np = _to_numpy(ids).reshape(-1)
+            if len(detection_results) != len(ids_np):
+                raise AssertionError("count result and metadata lengths mismatch.")
+            for img_id, result in zip(ids_np, detection_results):
+                results[_item(img_id)] = result
+        return results
+
+
+__all__ = [
+    "MLX_EVAL_POSTPROCESSORS_BASE_COMMIT",
+    "PostProcessAPIVideo",
+    "PostProcessCounting",
+    "PostProcessImage",
+    "PostProcessNullOp",
+    "PostProcessTracking",
+]

@@ -1,0 +1,630 @@
+from pathlib import Path
+import sys
+import pytest
+from importlib import import_module
+from typing import Callable, Protocol
+
+import mlx.core as mx
+
+import sam3_mlx
+from sam3_mlx._unsupported import (
+    REASONS,
+    UNSUPPORTED_METADATA_ATTR,
+    Sam3MlxUnsupportedError,
+    raise_unsupported,
+    unsupported_function,
+)
+from sam3_mlx.agent import _unsupported as agent_unsupported
+from sam3_mlx.eval import _unsupported as eval_unsupported
+from sam3_mlx.perflib import fa3
+from sam3_mlx.perflib.triton.connected_components import connected_components_triton
+from sam3_mlx.perflib.triton import connected_components as triton_cc
+from sam3_mlx.perflib.triton import nms as triton_nms
+from sam3_mlx.perflib.triton.nms import nms_triton
+
+BLOCKED_ACCELERATOR = "cu" + "da"
+DynamicCallable = Callable[..., object]
+
+
+class _UnsupportedHelper(Protocol):
+    def raise_unsupported(self, feature: str) -> object: ...
+
+
+def _assert_unsupported(
+    call: Callable[[], object],
+    *,
+    reason: str,
+    feature_fragment: str,
+    message: str,
+) -> Sam3MlxUnsupportedError:
+    with pytest.raises(Sam3MlxUnsupportedError, match=message) as exc_info:
+        call()
+
+    assert exc_info.value.reason == reason
+    assert feature_fragment in exc_info.value.feature
+    return exc_info.value
+
+
+def test_canonical_unsupported_error_preserves_notimplemented_contract() -> None:
+    assert sam3_mlx.Sam3MlxUnsupportedError is Sam3MlxUnsupportedError
+
+    with pytest.raises(
+        Sam3MlxUnsupportedError,
+        match=(
+            r"sam3_mlx\.example is not supported in sam3_mlx "
+            r"\(triton-kernel\).*Use sam3_mlx\.native instead"
+        ),
+    ) as exc_info:
+        raise_unsupported(
+            "sam3_mlx.example",
+            reason="triton-kernel",
+            alternative="sam3_mlx.native",
+            detail="Triton kernels are unavailable in MLX.",
+            upstream_commit="2814fa6",
+        )
+
+    error = exc_info.value
+    assert isinstance(error, NotImplementedError)
+    assert error.feature == "sam3_mlx.example"
+    assert error.reason == "triton-kernel"
+    assert error.alternative == "sam3_mlx.native"
+    assert error.detail == "Triton kernels are unavailable in MLX."
+    assert error.upstream_commit == "2814fa6"
+
+
+def test_unknown_reason_is_rejected_at_construction() -> None:
+    assert "triton-kernel" in REASONS
+
+    with pytest.raises(ValueError, match="Unknown unsupported reason"):
+        raise_unsupported("sam3_mlx.bad", reason="triton-ish")
+
+
+@pytest.mark.parametrize(
+    ("helper", "reason", "message"),
+    [
+        (agent_unsupported, "agent-llm", "external LLM services"),
+        (eval_unsupported, "eval-stack", "evaluation surface"),
+    ],
+)
+def test_domain_helpers_raise_canonical_error(
+    helper: _UnsupportedHelper, reason: str, message: str
+) -> None:
+    with pytest.raises(Sam3MlxUnsupportedError, match=message) as exc_info:
+        helper.raise_unsupported("domain.feature")
+
+    assert exc_info.value.feature == "domain.feature"
+    assert exc_info.value.reason == reason
+    assert exc_info.value.upstream_commit == "2814fa619404a722d03e9a012e083e4f293a4e53"
+
+
+def test_unsupported_function_metadata_and_raise_contract():
+    @unsupported_function(
+        "sam3_mlx.decorated",
+        reason="torch-compile",
+        alternative="compile=False",
+        detail="torch.compile is unavailable in MLX.",
+    )
+    def decorated(value: object) -> object:
+        return value
+
+    info = getattr(decorated, UNSUPPORTED_METADATA_ATTR)
+    assert info.feature == "sam3_mlx.decorated"
+    assert info.reason == "torch-compile"
+    assert info.alternative == "compile=False"
+
+    with pytest.raises(Sam3MlxUnsupportedError, match="torch.compile is unavailable"):
+        decorated(object())
+
+
+@pytest.mark.parametrize(
+    ("fn", "feature", "alternative"),
+    [
+        (
+            nms_triton,
+            "sam3_mlx.perflib.triton.nms.nms_triton",
+            "sam3_mlx.model.sam3_multiplex_detector_utils",
+        ),
+        (
+            connected_components_triton,
+            "sam3_mlx.perflib.triton.connected_components.connected_components_triton",
+            "sam3_mlx.perflib.connected_components",
+        ),
+    ],
+)
+def test_triton_public_functions_fail_with_canonical_triton_kernel_error(
+    fn: DynamicCallable, feature: str, alternative: str
+) -> None:
+    info = getattr(fn, UNSUPPORTED_METADATA_ATTR)
+    assert info.feature == feature
+    assert info.reason == "triton-kernel"
+    assert info.alternative == alternative
+
+    with pytest.raises(Sam3MlxUnsupportedError, match="Triton kernels") as exc_info:
+        fn(None, None, None)
+
+    assert exc_info.value.feature == feature
+    assert exc_info.value.reason == "triton-kernel"
+    assert exc_info.value.alternative == alternative
+
+
+@pytest.mark.parametrize(
+    ("fn", "args"),
+    [
+        (triton_nms._nms_suppression_kernel, (None, None, 0, 0, 0)),
+        (triton_cc._any_combine, (None, None)),
+        (triton_cc.tl_any, (None,)),
+        (triton_cc._init_labels_kernel, (None, None, 0, 0)),
+        (triton_cc.find, (None, None, None)),
+        (triton_cc.union, (None, None, None, None)),
+        (
+            triton_cc._merge_helper,
+            (
+                None,
+                None,
+                0,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                0,
+                0,
+                0,
+                0,
+            ),
+        ),
+        (triton_cc._local_prop_kernel, (None, None, 0, 0, 0, 0)),
+        (triton_cc._pointer_jump_kernel, (None, None, 0, 0)),
+        (triton_cc._count_labels_kernel, (None, None, 0, 0)),
+        (triton_cc._broadcast_sizes_kernel, (None, None, None, 0, 0)),
+    ],
+)
+def test_private_triton_kernel_shims_preserve_fail_fast_metadata(
+    fn: DynamicCallable, args: tuple[object, ...]
+) -> None:
+    info = getattr(fn, UNSUPPORTED_METADATA_ATTR)
+    assert info.reason == "triton-kernel"
+    assert info.upstream_commit == "2814fa619404a722d03e9a012e083e4f293a4e53"
+
+    with pytest.raises(Sam3MlxUnsupportedError, match="Triton kernels"):
+        fn(*args)
+
+
+@pytest.mark.parametrize(
+    ("call", "args", "feature", "reason", "message"),
+    [
+        (
+            fa3.flash_attn_func_op,
+            (None, None, None),
+            "flash_attn_func_op",
+            "flash-attn-3",
+            "FlashAttention 3",
+        ),
+    ],
+)
+def test_migrated_helper_islands_raise_canonical_error(
+    call: DynamicCallable,
+    args: tuple[object, ...],
+    feature: str,
+    reason: str,
+    message: str,
+) -> None:
+    with pytest.raises(Sam3MlxUnsupportedError, match=message) as exc_info:
+        call(*args)
+
+    assert exc_info.value.feature == feature
+    assert exc_info.value.reason == reason
+
+
+CANONICAL_UPSTREAM_COMMIT = "2814fa619404a722d03e9a012e083e4f293a4e53"
+
+# Keep load-bearing public guards registered. Update this list when promoting
+# or deliberately removing an @unsupported_function decorator.
+REQUIRED_REGISTRY_FEATURES = frozenset(
+    {
+        "sam3_mlx.perflib.triton.nms.nms_triton",
+        "sam3_mlx.perflib.triton.connected_components.connected_components_triton",
+    }
+)
+
+
+def test_registry_walker_returns_bounded_well_formed_entries() -> None:
+    from sam3_mlx._unsupported import unsupported_features
+
+    import_errors: list[tuple[str, BaseException]] = []
+    features = unsupported_features(
+        on_import_error=lambda n, e: import_errors.append((n, e))
+    )
+
+    assert not import_errors, f"Unexpected import errors: {import_errors!r}"
+
+    feature_names = {info.feature for info in features}
+    missing = REQUIRED_REGISTRY_FEATURES - feature_names
+    assert not missing, (
+        f"Required @unsupported_function entries disappeared from the registry: {sorted(missing)}"
+    )
+    # This floor catches removal of a whole module's decorators while allowing
+    # deliberate one-off cleanup.
+    assert len(features) >= len(REQUIRED_REGISTRY_FEATURES) + 10, (
+        f"Registry has only {len(features)} entries; expected at least "
+        f"{len(REQUIRED_REGISTRY_FEATURES) + 10}. Did a module's decorators get stripped?"
+    )
+
+    for info in features:
+        assert info.reason in REASONS, (
+            f"{info.feature} has unknown reason {info.reason!r}"
+        )
+        assert info.feature.startswith("sam3_mlx."), info.feature
+        assert info.upstream_commit == CANONICAL_UPSTREAM_COMMIT, (
+            f"{info.feature} pinned to {info.upstream_commit!r}, "
+            f"expected canonical {CANONICAL_UPSTREAM_COMMIT!r}"
+        )
+        if info.alternative is not None:
+            assert info.alternative.startswith("sam3_mlx."), (
+                f"{info.feature} has alternative {info.alternative!r}; "
+                "alternatives must point at an in-package replacement."
+            )
+
+    features_again = unsupported_features()
+    assert [f.feature for f in features_again] == [f.feature for f in features], (
+        "Walker output should be deterministic across calls."
+    )
+
+
+def test_registry_walker_propagates_import_errors_without_opt_in(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    package = tmp_path / "registry_probe"
+    package.mkdir()
+    (package / "__init__.py").write_text("")
+    (package / "broken.py").write_text(
+        "raise ImportError('intentional registry import failure')\n"
+    )
+    monkeypatch.setattr(sys, "path", [str(tmp_path), *sys.path])
+
+    from sam3_mlx._unsupported import unsupported_features
+
+    with pytest.raises(ImportError, match="intentional registry import failure"):
+        unsupported_features("registry_probe")
+
+
+def test_registry_entries_raise_when_invoked() -> None:
+    import importlib
+
+    from sam3_mlx._unsupported import unsupported_features
+
+    for info in unsupported_features():
+        module_name, _, attr = info.feature.rpartition(".")
+        module = importlib.import_module(module_name)
+        fn = getattr(module, attr)
+        with pytest.raises(Sam3MlxUnsupportedError) as exc_info:
+            fn()
+        # Match advertised metadata to the exception fields, not only feature/reason.
+        assert exc_info.value.feature == info.feature
+        assert exc_info.value.reason == info.reason
+        assert exc_info.value.alternative == info.alternative, (
+            f"{info.feature}: alternative drift "
+            f"(advertised={info.alternative!r}, raised={exc_info.value.alternative!r})"
+        )
+        assert exc_info.value.upstream_commit == info.upstream_commit, (
+            f"{info.feature}: upstream_commit drift "
+            f"(advertised={info.upstream_commit!r}, raised={exc_info.value.upstream_commit!r})"
+        )
+
+
+def test_torch_compile_guard_raises_canonical_error() -> None:
+    from sam3_mlx.model.sam3_video_inference import Sam3VideoInference
+
+    with pytest.raises(Sam3MlxUnsupportedError, match="torch.compile") as exc_info:
+        Sam3VideoInference(image_model=None, compile_model=True)
+
+    assert exc_info.value.feature == (
+        "sam3_mlx.model.sam3_video_inference.Sam3VideoInference(compile_model=True)"
+    )
+    assert exc_info.value.reason == "torch-compile"
+
+
+@pytest.mark.parametrize(
+    ("call", "reason", "feature_fragment", "message"),
+    [
+        (
+            lambda: import_module("sam3_mlx.model_builder").build_sam3_image_model(
+                device="tpu",
+                load_from_HF=False,
+            ),
+            "unsupported-device",
+            "device='tpu'",
+            "explicit MLX runtime",
+        ),
+        (
+            lambda: import_module("sam3_mlx.model_builder").build_sam3_video_predictor(
+                gpus_to_use=[0],
+                load_from_HF=False,
+            ),
+            "video-multi-gpu",
+            "gpus_to_use",
+            "not supported",
+        ),
+        # The tracker predictor builds a real MLX layer; deferred paths are
+        # covered by tests/port/tracker/test_tracker_predictor.py.
+    ],
+)
+def test_model_builder_runtime_guards_raise_canonical_error(
+    call: Callable[[], object],
+    reason: str,
+    feature_fragment: str,
+    message: str,
+) -> None:
+    error = _assert_unsupported(
+        call,
+        reason=reason,
+        feature_fragment=feature_fragment,
+        message=message,
+    )
+    assert error.upstream_commit == "2814fa619404a722d03e9a012e083e4f293a4e53"
+
+
+@pytest.mark.parametrize(
+    ("call", "reason", "feature_fragment", "message"),
+    [
+        (
+            lambda: import_module(
+                "sam3_mlx.model.model_misc"
+            ).MultiheadAttentionWrapper(
+                dims=4,
+                num_heads=2,
+            )(
+                mx.zeros((1, 2, 4)),
+                mx.zeros((1, 2, 4)),
+                mx.zeros((1, 2, 4)),
+                use_fa3=True,
+            ),
+            "flash-attn-3",
+            "MultiheadAttentionWrapper(use_fa3=True)",
+            "FlashAttention 3",
+        ),
+        (
+            lambda: import_module(
+                "sam3_mlx.model.model_misc"
+            ).MultiheadAttentionWrapper(
+                dims=4,
+                num_heads=2,
+            )(
+                mx.zeros((1, 2, 4)),
+                mx.zeros((1, 2, 4)),
+                mx.zeros((1, 2, 4)),
+                attn_type=import_module(
+                    "sam3_mlx.model.model_misc"
+                ).AttentionType.Xformer,
+            ),
+            "xformers",
+            "MultiheadAttentionWrapper(attn_type='Xformer')",
+            "xformers",
+        ),
+        (
+            lambda: import_module("sam3_mlx.sam.transformer").Attention(
+                embedding_dim=4,
+                num_heads=2,
+                use_fa3=True,
+            ),
+            "flash-attn-3",
+            "Attention(use_fa3=True)",
+            "FlashAttention 3",
+        ),
+        (
+            lambda: import_module("sam3_mlx.model.decoder").functional_attention(
+                mx.zeros((1, 1, 4)),
+                mx.zeros((1, 1, 4)),
+                mx.zeros((1, 1, 4)),
+                num_heads=2,
+                use_fa3=True,
+                rope_k_repeat=False,
+            ),
+            "flash-attn-3",
+            "functional_attention(use_fa3=True)",
+            "FlashAttention 3",
+        ),
+        (
+            lambda: import_module("sam3_mlx.model.decoder").SimpleRoPEAttention(
+                d_model=4, num_heads=2, use_fa3=True
+            ),
+            "flash-attn-3",
+            "SimpleRoPEAttention(use_fa3=True)",
+            "FlashAttention 3",
+        ),
+    ],
+)
+def test_attention_runtime_guards_raise_canonical_error(
+    call: Callable[[], object],
+    reason: str,
+    feature_fragment: str,
+    message: str,
+) -> None:
+    error = _assert_unsupported(
+        call,
+        reason=reason,
+        feature_fragment=feature_fragment,
+        message=message,
+    )
+    assert error.upstream_commit == "2814fa619404a722d03e9a012e083e4f293a4e53"
+
+
+def test_real_rope_all_keys_excluded_guard_raises_canonical_error() -> None:
+    from sam3_mlx.model.decoder import functional_attention
+
+    error = _assert_unsupported(
+        lambda: functional_attention(
+            mx.zeros((1, 1, 4)),
+            mx.zeros((1, 1, 4)),
+            mx.zeros((1, 1, 4)),
+            num_heads=2,
+            num_k_exclude_rope=1,
+            freqs_cis=mx.zeros((1, 2)),
+            use_rope_real=True,
+            rope_k_repeat=False,
+        ),
+        reason="video-multiplex",
+        feature_fragment="use_rope_real=True",
+        message="Real RoPE",
+    )
+    assert error.upstream_commit == "2814fa619404a722d03e9a012e083e4f293a4e53"
+
+
+def test_video_inference_device_guard_raises_canonical_error() -> None:
+    from sam3_mlx.model.sam3_video_inference import Sam3VideoInference
+
+    error = _assert_unsupported(
+        lambda: Sam3VideoInference(image_model=None).to(BLOCKED_ACCELERATOR),
+        reason="unsupported-device",
+        feature_fragment=f"device='{BLOCKED_ACCELERATOR}'",
+        message="explicit MLX runtime",
+    )
+    assert error.upstream_commit == "2814fa619404a722d03e9a012e083e4f293a4e53"
+
+
+@pytest.mark.parametrize(
+    ("call", "reason", "feature_fragment", "message"),
+    [
+        (
+            lambda: import_module("sam3_mlx.sam.rope").init_t_xy(
+                1,
+                1,
+                device=BLOCKED_ACCELERATOR,
+            ),
+            "unsupported-device",
+            f"device='{BLOCKED_ACCELERATOR}'",
+            "RoPE helpers",
+        ),
+        (
+            lambda: import_module("sam3_mlx.model.sam3_image_processor").Sam3Processor(
+                model=None,
+                device="tpu",
+            ),
+            "unsupported-device",
+            "device='tpu'",
+            "explicit MLX runtime",
+        ),
+        (
+            lambda: import_module(
+                "sam3_mlx.model.sam3_video_predictor"
+            ).Sam3VideoPredictorMultiGPU(),
+            "video-multi-gpu",
+            "Sam3VideoPredictorMultiGPU",
+            "multi-GPU",
+        ),
+        (
+            lambda: import_module("sam3_mlx.model.io_utils").TorchCodecDecoder(
+                source="video.mp4"
+            ),
+            "torchcodec",
+            "TorchCodecDecoder",
+            "TorchCodec",
+        ),
+        (
+            lambda: (
+                import_module("sam3_mlx.model.sam1_task_predictor")
+                .SAM3InteractiveImageModel()
+                .forward_image(mx.zeros((1, 3, 16, 16)))
+            ),
+            "image-interactivity",
+            "forward_image",
+            "attached",
+        ),
+
+    ],
+)
+def test_runtime_surface_guards_raise_canonical_error(
+    call: Callable[[], object],
+    reason: str,
+    feature_fragment: str,
+    message: str,
+) -> None:
+    error = _assert_unsupported(
+        call,
+        reason=reason,
+        feature_fragment=feature_fragment,
+        message=message,
+    )
+    assert error.upstream_commit == "2814fa619404a722d03e9a012e083e4f293a4e53"
+
+
+@pytest.mark.parametrize(
+    ("call", "reason", "feature_fragment", "message"),
+    [
+        (
+            lambda: (
+                import_module("sam3_mlx.model.data_misc")
+                .NestedTensor(
+                    mx.zeros((1, 1)),
+                    None,
+                )
+                .to("cpu")
+            ),
+            "unsupported-device",
+            "NestedTensor.to(device='cpu')",
+            "explicit MLX device",
+        ),
+        (
+            lambda: import_module("sam3_mlx.agent.helpers.boxes").BoxMode.convert(
+                [0.0, 0.0, 10.0, 20.0],
+                import_module("sam3_mlx.agent.helpers.boxes").BoxMode.XYXY_ABS,
+                import_module("sam3_mlx.agent.helpers.boxes").BoxMode.XYWHA_ABS,
+            ),
+            "port-gap",
+            "BoxMode.convert",
+            "not supported yet",
+        ),
+        (
+            lambda: import_module("sam3_mlx.model.edt").edt_kernel(),
+            "triton-kernel",
+            "edt_kernel",
+            "Triton kernel",
+        ),
+        (
+            lambda: import_module("sam3_mlx.model.necks").Sam3DualViTDetNeck(
+                trunk=type("Trunk", (), {"channel_list": [8]})(),
+                position_encoding=None,
+                d_model=4,
+                scale_factors=(3.0,),
+            ),
+            "port-gap",
+            "scale_factor=3.0",
+            "Scale factor 3.0",
+        ),
+        (
+            lambda: import_module(
+                "sam3_mlx.perflib.associate_det_trk"
+            ).associate_det_trk(
+                mx.zeros((1, 4, 4)),
+                mx.zeros((1, 5, 4)),
+            ),
+            "port-gap",
+            "mask_resize=True",
+            "mask resizing",
+        ),
+        (
+            lambda: import_module("sam3_mlx.visualization_utils").save_masklet_video(
+                video_frames=None,
+                outputs=None,
+                out_path="out.mp4",
+            ),
+            "port-gap",
+            "save_masklet_video",
+            "video encoding",
+        ),
+    ],
+)
+def test_misc_port_boundary_guards_raise_canonical_error(
+    call: Callable[[], object],
+    reason: str,
+    feature_fragment: str,
+    message: str,
+) -> None:
+    error = _assert_unsupported(
+        call,
+        reason=reason,
+        feature_fragment=feature_fragment,
+        message=message,
+    )
+    assert error.upstream_commit == "2814fa619404a722d03e9a012e083e4f293a4e53"

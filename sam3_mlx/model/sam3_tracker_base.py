@@ -1,0 +1,1448 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates. All Rights Reserved
+
+"""MLX port of the official SAM3 SAM2-style memory tracker base.
+
+Ported from the official SAM3 ``sam3_tracker_base`` at upstream commit
+``2814fa619404a722d03e9a012e083e4f293a4e53``.
+
+``Sam3TrackerBase`` tracks objects frame by frame. For each frame ``track_step`` fuses
+the current image features with memories of earlier frames, runs the SAM prompt
+encoder and mask decoder, and encodes the prediction as a new memory. Image features
+passed to ``track_step`` are sequence-first ``(H*W, B, C)`` lists (last entry lowest
+resolution); masks and SAM-head tensors are NCHW. ``forward``, ``__call__``,
+``compile_all_components=True`` and ``track_step`` with
+``offload_output_to_cpu_for_eval=True`` raise the unsupported-feature error.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Mapping, Sequence
+from typing import (
+    NoReturn,
+    NotRequired,
+    Protocol,
+    Required,
+    TypeAlias,
+    TypedDict,
+    cast,
+    overload,
+)
+
+import mlx.core as mx
+from mlx import nn
+import numpy as np
+
+from sam3_mlx._unsupported import raise_unsupported
+from sam3_mlx.mlx_runtime import is_mlx_array as _is_mlx_array
+import sam3_mlx.model.data_misc as _data_misc
+from sam3_mlx.model.image_backbone_contract import (
+    BackboneFeatureOutput,
+    ImageBackboneOutput,
+    SamMaskDecoderExtraArgs,
+)
+import sam3_mlx.model.sam3_tracker_utils as _tracker_utils
+from sam3_mlx.model.memory import MemoryEncoderOutput
+from sam3_mlx.model.temporal_memory import memory_trim_plan, previous_memory_frame_index
+from sam3_mlx.sam.mask_decoder import MaskDecoder, MLP
+from sam3_mlx.sam.prompt_encoder import PromptEncoder
+from sam3_mlx.sam.transformer import TwoWayTransformer
+
+
+# a large negative value as a placeholder score for missing objects
+NO_OBJ_SCORE = -1024.0
+
+ArrayLike: TypeAlias = mx.array | np.ndarray
+
+
+class PointInputs(TypedDict):
+    """Point prompts: ``point_coords`` ``(B, N, 2)`` as (x, y) and ``point_labels`` ``(B, N)`` (1 foreground, 0 background, -1 padding)."""
+
+    point_coords: mx.array
+    point_labels: mx.array
+
+
+class _NumpyPointInputs(TypedDict):
+    point_coords: np.ndarray
+    point_labels: np.ndarray
+
+
+class TrackerStoredFrameOutput(TypedDict):
+    """Per-frame result kept in the output dictionaries between steps.
+
+    ``pred_masks`` is ``(B, 1, h, w)`` low-resolution mask logits, ``obj_ptr``
+    ``(B, hidden_dim)`` the object pointer, ``object_score_logits`` ``(B, 1)``, and
+    ``maskmem_features`` / ``maskmem_pos_enc`` the encoded memory (None when no memory
+    was computed, or after trimming). ``iou_score`` / ``eff_iou_score`` are only set
+    with memory selection.
+    """
+
+    pred_masks: Required[mx.array]
+    obj_ptr: Required[mx.array]
+    object_score_logits: Required[mx.array]
+    iou_score: NotRequired[mx.array]
+    eff_iou_score: NotRequired[mx.array]
+    maskmem_features: Required[mx.array | None]
+    maskmem_pos_enc: Required[list[mx.array] | None]
+    point_inputs: NotRequired[PointInputs | None]
+    mask_inputs: NotRequired[mx.array | None]
+
+
+class TrackerFrameOutput(TrackerStoredFrameOutput):
+    """Stored output plus the high-resolution mask logits returned by ``track_step``."""
+
+    pred_masks_high_res: Required[mx.array]
+
+
+class _TrackerFrameOutputPartial(TypedDict, total=False):
+    pred_masks: mx.array
+    pred_masks_high_res: mx.array
+    obj_ptr: mx.array
+    object_score_logits: mx.array
+    iou_score: mx.array
+    eff_iou_score: mx.array
+    maskmem_features: mx.array | None
+    maskmem_pos_enc: list[mx.array] | None
+    point_inputs: PointInputs | None
+    mask_inputs: mx.array | None
+
+
+class _MemoryFrameOutput(TypedDict):
+    maskmem_features: mx.array
+    maskmem_pos_enc: list[mx.array]
+    obj_ptr: mx.array
+    object_score_logits: mx.array
+    pred_masks: mx.array
+
+
+class TrackerOutputState(TypedDict):
+    """Outputs by frame index: prompted (conditioning) frames and propagated frames."""
+
+    cond_frame_outputs: dict[int, TrackerStoredFrameOutput]
+    non_cond_frame_outputs: dict[int, TrackerStoredFrameOutput]
+
+
+class TrackingBackboneOutput(TypedDict):
+    """Backbone features (NCHW per level) plus the per-frame prompt plan for a tracking run."""
+
+    backbone_fpn: list[mx.array] | None
+    vision_pos_enc: list[mx.array] | None
+    num_frames: int
+    init_cond_frames: list[int]
+    frames_not_in_init_cond: list[int]
+    frames_to_add_correction_pt: list[int]
+    point_inputs_per_frame: dict[int, PointInputs]
+    mask_inputs_per_frame: dict[int, mx.array]
+
+
+class TrackerBaseOptions(TypedDict, total=False):
+    """Keyword options accepted by ``Sam3TrackerBase`` (see its docstring)."""
+
+    num_maskmem: int
+    image_size: int
+    backbone_stride: int
+    max_cond_frames_in_attn: int
+    keep_first_cond_frame: bool
+    multimask_output_in_sam: bool
+    multimask_min_pt_num: int
+    multimask_max_pt_num: int
+    multimask_output_for_tracking: bool
+    forward_backbone_per_frame_for_eval: bool
+    memory_temporal_stride_for_eval: int
+    offload_output_to_cpu_for_eval: bool
+    trim_past_non_cond_mem_for_eval: bool
+    non_overlap_masks_for_mem_enc: bool
+    max_obj_ptrs_in_encoder: int
+    sam_mask_decoder_extra_args: SamMaskDecoderExtraArgs | None
+    compile_all_components: bool
+    use_memory_selection: bool
+    mf_threshold: float
+
+
+class _WeightedArray(Protocol):
+    weight: mx.array
+
+
+class _ArrayModule(Protocol):
+    def __call__(self, x: mx.array) -> mx.array: ...
+
+
+class _ImageBackbone(Protocol):
+    def forward_image(self, img_batch: mx.array) -> ImageBackboneOutput: ...
+
+
+class _TrackerEncoder(Protocol):
+    def __call__(
+        self,
+        *,
+        src: list[mx.array],
+        src_key_padding_mask: list[mx.array | None],
+        src_pos: list[mx.array],
+        prompt: mx.array,
+        prompt_pos: mx.array,
+        prompt_key_padding_mask: mx.array | None,
+        feat_sizes: list[tuple[int, int]],
+        num_obj_ptr_tokens: int,
+    ) -> dict[str, mx.array]: ...
+
+
+class _TrackerTransformer(Protocol):
+    decoder: object | None
+    d_model: int
+    encoder: _TrackerEncoder
+
+
+class _MaskMemoryEncoder(Protocol):
+    def __call__(
+        self,
+        pix_feat: mx.array,
+        masks: mx.array,
+        skip_mask_sigmoid: bool = False,
+    ) -> MemoryEncoderOutput: ...
+
+
+class _TrackerFindInput(Protocol):
+    img_ids: mx.array
+
+
+class _TrackerInput(Protocol):
+    img_batch: mx.array
+    find_inputs: Sequence[_TrackerFindInput]
+
+
+class _OptionalTrackerAttributes(Protocol):
+    cond_frame_spatial_embedding: mx.array | None
+    cond_frame_obj_ptr_embedding: mx.array | None
+    iter_use_prev_mask_pred: bool
+    add_all_frames_to_correct_as_cond: bool
+
+
+class _Interpolate(Protocol):
+    def __call__(
+        self,
+        input: mx.array,
+        size: tuple[int, int] | None = None,
+        scale_factor: float | tuple[float, float] | None = None,
+        mode: str = "nearest",
+        align_corners: bool | None = None,
+        antialias: bool = False,
+    ) -> mx.array: ...
+
+
+class _SinePositionEncoding(Protocol):
+    def __call__(
+        self, pos_inds: mx.array, dim: int, temperature: int = 10000
+    ) -> mx.array: ...
+
+
+class _SelectClosestCondFrames(Protocol):
+    def __call__(
+        self,
+        frame_idx: int,
+        cond_frame_outputs: Mapping[int, TrackerStoredFrameOutput],
+        max_cond_frame_num: int,
+        keep_first_cond_frame: bool = False,
+    ) -> tuple[
+        dict[int, TrackerStoredFrameOutput],
+        dict[int, TrackerStoredFrameOutput],
+    ]: ...
+
+
+_interpolate = cast(_Interpolate, getattr(_data_misc, "interpolate"))
+_get_1d_sine_pe = cast(_SinePositionEncoding, getattr(_tracker_utils, "get_1d_sine_pe"))
+_select_closest_cond_frames = cast(
+    _SelectClosestCondFrames,
+    getattr(_tracker_utils, "select_closest_cond_frames"),
+)
+
+
+def _trunc_normal(shape: tuple[int, ...], std: float = 0.02) -> mx.array:
+    """Truncated-normal init: mean 0, standard deviation ``std``, truncated at +/-2 std.
+
+    Similar to timm's ``trunc_normal_``, whose default cutoffs are absolute (+/-2)
+    rather than in units of ``std``.
+
+    These tensors are learned parameters that the checkpoint overwrites at load
+    time; the init only matters when the module is exercised without weights.
+    """
+
+    return mx.random.truncated_normal(lower=-2.0, upper=2.0, shape=shape) * std
+
+
+def _unsupported_tracker_base(method: str) -> NoReturn:
+    raise_unsupported(
+        f"sam3_mlx.model.sam3_tracker_base.Sam3TrackerBase.{method}",
+        reason="video-tracker",
+        detail=(
+            "Several Sam3TrackerBase slices are ported, but this tracker "
+            "method remains outside the current MLX runtime increment."
+        ),
+        alternative=(
+            "sam3_mlx.model.sam3_tracker_utils or "
+            "sam3_mlx.model.sam3_video_inference.Sam3VideoInference"
+        ),
+    )
+
+
+class Sam3TrackerBase(nn.Module):
+    """Memory-based single-object tracker (SAM2 style) on top of the SAM3 backbone.
+
+    Args:
+        backbone: Image backbone with ``forward_image``; None when features are
+            supplied by the caller.
+        transformer: Encoder-only transformer (``decoder is None``) fusing current
+            features with memories.
+        maskmem_backbone: Memory encoder (``SimpleMaskEncoder``).
+        num_maskmem: Number of memory slots, counting the current frame.
+        image_size: Square model input size in pixels.
+        backbone_stride: Stride of the backbone output; SAM embeddings are
+            ``image_size // backbone_stride`` square.
+        max_cond_frames_in_attn: Maximum conditioning frames attended to; -1 for all.
+        keep_first_cond_frame: Always keep the earliest conditioning frame when
+            limiting.
+        multimask_output_in_sam: Allow multimask output from the SAM head.
+        multimask_min_pt_num: Fewest prompt points for which multimask output is used.
+        multimask_max_pt_num: Most prompt points for which multimask output is used.
+        multimask_output_for_tracking: Also allow multimask output on propagated
+            (non-initial) frames.
+        memory_temporal_stride_for_eval: Frame stride between memory frames at
+            inference.
+        trim_past_non_cond_mem_for_eval: Drop memory features of old frames once
+            they leave the memory window.
+        non_overlap_masks_for_mem_enc: Suppress overlapping objects before memory
+            encoding.
+        max_obj_ptrs_in_encoder: Maximum object pointers attended to.
+        sam_mask_decoder_extra_args: Extra ``MaskDecoder`` arguments (dynamic
+            multimask selection by stability).
+        use_memory_selection: Choose memory frames by object and IoU score
+            (SAM2Long-style, see ``frame_filter``) with threshold ``mf_threshold``.
+        forward_backbone_per_frame_for_eval: Stored but not read by this class.
+        offload_output_to_cpu_for_eval, compile_all_components: Kept for upstream
+            signature parity; both are unsupported (see the module docstring).
+    """
+
+    def __init__(
+        self,
+        backbone: object | None,
+        transformer: object,
+        maskmem_backbone: object,
+        num_maskmem: int = 7,  # default: 1 current frame + 6 previous frames
+        image_size: int = 1008,
+        backbone_stride: int = 14,  # stride of the image backbone output
+        max_cond_frames_in_attn: int = -1,
+        keep_first_cond_frame: bool = False,
+        multimask_output_in_sam: bool = False,
+        multimask_min_pt_num: int = 1,
+        multimask_max_pt_num: int = 1,
+        multimask_output_for_tracking: bool = False,
+        forward_backbone_per_frame_for_eval: bool = False,
+        memory_temporal_stride_for_eval: int = 1,
+        offload_output_to_cpu_for_eval: bool = False,
+        trim_past_non_cond_mem_for_eval: bool = False,
+        non_overlap_masks_for_mem_enc: bool = False,
+        max_obj_ptrs_in_encoder: int = 16,
+        sam_mask_decoder_extra_args: SamMaskDecoderExtraArgs | None = None,
+        compile_all_components: bool = False,
+        use_memory_selection: bool = False,
+        mf_threshold: float = 0.01,
+    ) -> None:
+        super().__init__()
+
+        # Part 1: the image backbone
+        self.backbone: _ImageBackbone | None = (
+            None if backbone is None else cast(_ImageBackbone, backbone)
+        )
+        self.num_feature_levels = 3
+        self.max_obj_ptrs_in_encoder = max_obj_ptrs_in_encoder
+        # Downsample GT mask prompts to stride 4 and scale them to SAM logits
+        # before passing them to the mask decoder.
+        self.mask_downsample = nn.Conv2d(1, 1, kernel_size=4, stride=4)
+
+        # Part 2: encoder-only transformer fusing current frame visual features
+        # with memories from past frames
+        tracker_transformer = cast(_TrackerTransformer, transformer)
+        assert tracker_transformer.decoder is None, "transformer should be encoder-only"
+        self.transformer = tracker_transformer
+        self.hidden_dim: int = tracker_transformer.d_model
+
+        # Part 3: memory encoder for the previous frame's outputs
+        self.maskmem_backbone = cast(_MaskMemoryEncoder, maskmem_backbone)
+        self.mem_dim = self.hidden_dim
+        out_proj = getattr(self.maskmem_backbone, "out_proj", None)
+        if out_proj is not None and hasattr(out_proj, "weight"):
+            # Read the compressed memory width when available.
+            weighted_out_proj = cast(_WeightedArray, out_proj)
+            self.mem_dim = weighted_out_proj.weight.shape[0]
+        self.num_maskmem = num_maskmem  # Number of memories accessible
+
+        # Temporal encoding of the memories
+        self.maskmem_tpos_enc = _trunc_normal((num_maskmem, 1, 1, self.mem_dim))
+
+        # Use a token when no previous memory is available.
+        self.no_mem_embed = _trunc_normal((1, 1, self.hidden_dim))
+        self.no_mem_pos_enc = _trunc_normal((1, 1, self.hidden_dim))
+        # Convert mask logits to values for the memory encoder.
+        self.sigmoid_scale_for_mem_enc = 20.0
+        self.sigmoid_bias_for_mem_enc = -10.0
+        self.non_overlap_masks_for_mem_enc = non_overlap_masks_for_mem_enc
+        self.memory_temporal_stride_for_eval = memory_temporal_stride_for_eval
+        # Multimask output from the SAM head is used only for prompted frames whose
+        # point count is within [multimask_min_pt_num, multimask_max_pt_num]
+        # (see ``_use_multimask``).
+        self.multimask_output_in_sam = multimask_output_in_sam
+        self.multimask_min_pt_num = multimask_min_pt_num
+        self.multimask_max_pt_num = multimask_max_pt_num
+        self.multimask_output_for_tracking = multimask_output_for_tracking
+
+        # Part 4: SAM-style prompt encoder and mask decoder
+        self.image_size = image_size
+        self.backbone_stride = backbone_stride
+        self.low_res_mask_size = self.image_size // self.backbone_stride * 4
+        # Resize masks to the expected input size.
+        self.input_mask_size = self.low_res_mask_size * 4
+        self.forward_backbone_per_frame_for_eval = forward_backbone_per_frame_for_eval
+        self.offload_output_to_cpu_for_eval = offload_output_to_cpu_for_eval
+        self.trim_past_non_cond_mem_for_eval = trim_past_non_cond_mem_for_eval
+        self.sam_mask_decoder_extra_args = sam_mask_decoder_extra_args
+        self.no_obj_ptr = _trunc_normal((1, self.hidden_dim))
+        self.no_obj_embed_spatial = _trunc_normal((1, self.mem_dim))
+
+        self.sam_prompt_embed_dim: int
+        self.sam_image_embedding_size: int
+        self.sam_prompt_encoder: PromptEncoder
+        self.sam_mask_decoder: MaskDecoder
+        self.obj_ptr_proj: _ArrayModule
+        self.obj_ptr_tpos_proj: _ArrayModule
+
+        self._build_sam_heads()
+        self.max_cond_frames_in_attn = max_cond_frames_in_attn
+        self.keep_first_cond_frame = keep_first_cond_frame
+
+        # Use frame filtering according to SAM2Long
+        self.use_memory_selection = use_memory_selection
+        self.mf_threshold = mf_threshold
+
+        self.compile_all_components = compile_all_components
+        if self.compile_all_components:
+            self._compile_all_components()
+
+    @property
+    def device(self) -> str:
+        """Always ``"mlx"``."""
+        return "mlx"
+
+    def _build_sam_heads(self) -> None:
+        """Build SAM-style prompt encoder and mask decoder."""
+        self.sam_prompt_embed_dim = self.hidden_dim
+        self.sam_image_embedding_size = self.image_size // self.backbone_stride
+
+        self.sam_prompt_encoder = PromptEncoder(
+            embed_dim=self.sam_prompt_embed_dim,
+            image_embedding_size=(
+                self.sam_image_embedding_size,
+                self.sam_image_embedding_size,
+            ),
+            input_image_size=(self.image_size, self.image_size),
+            mask_in_chans=16,
+        )
+        self.sam_mask_decoder = MaskDecoder(
+            num_multimask_outputs=3,
+            transformer=TwoWayTransformer(
+                depth=2,
+                embedding_dim=self.sam_prompt_embed_dim,
+                mlp_dim=2048,
+                num_heads=8,
+            ),
+            transformer_dim=self.sam_prompt_embed_dim,
+            iou_head_depth=3,
+            iou_head_hidden_dim=256,
+            use_high_res_features=True,
+            iou_prediction_use_sigmoid=True,
+            pred_obj_scores=True,
+            pred_obj_scores_mlp=True,
+            use_multimask_token_for_obj_ptr=True,
+            **(self.sam_mask_decoder_extra_args or {}),
+        )
+        # Keep the upstream MLP shape for object-pointer checkpoints.
+        self.obj_ptr_proj = MLP(self.hidden_dim, self.hidden_dim, self.hidden_dim, 3)
+        # Project temporal positions to the memory width.
+        self.obj_ptr_tpos_proj = nn.Linear(self.hidden_dim, self.mem_dim)
+
+    def _get_tpos_enc(
+        self,
+        rel_pos_list: Sequence[int],
+        device: object | None = None,
+        max_abs_pos: int | None = None,
+        dummy: bool = False,
+    ) -> mx.array:
+        """Return the projected temporal position encoding ``(len(rel_pos_list), mem_dim)``.
+
+        Relative positions are divided by ``max_abs_pos - 1`` (1 if not given),
+        sine-encoded to ``hidden_dim`` and projected to the memory width. With
+        ``dummy`` a zero array of the same shape is returned.
+        """
+        del device  # MLX runtime is explicit; no torch-style device movement.
+        if dummy:
+            return mx.zeros((len(rel_pos_list), self.mem_dim))
+
+        t_diff_max = max_abs_pos - 1 if max_abs_pos is not None else 1
+        pos_enc = mx.array(list(rel_pos_list), dtype=mx.float32) / t_diff_max
+        pos_enc = _get_1d_sine_pe(pos_enc, dim=self.hidden_dim)
+        return self.obj_ptr_tpos_proj(pos_enc)
+
+    def _forward_sam_heads(
+        self,
+        backbone_features: mx.array,
+        point_inputs: PointInputs | None = None,
+        mask_inputs: mx.array | None = None,
+        high_res_features: list[mx.array] | None = None,
+        multimask_output: bool = False,
+        gt_masks: mx.array | None = None,
+    ) -> tuple[
+        mx.array,
+        mx.array,
+        mx.array,
+        mx.array,
+        mx.array,
+        mx.array,
+        mx.array,
+    ]:
+        """Forward SAM prompt encoder + mask decoder for one frame.
+
+        ``backbone_features`` is [B, C, H, W] with C=hidden_dim and
+        H=W=image_size/backbone_stride.
+        Returns the 7-tuple (low_res_multimasks, high_res_multimasks, ious,
+        low_res_masks, high_res_masks, obj_ptr, object_score_logits). The
+        ``*_masks`` entries are the best-IoU candidate ``(B, 1, h, w)`` and the
+        ``*_multimasks`` entries all candidates; the high-resolution ones are resized
+        to ``image_size``. Where the object score is not positive the mask logits
+        are set to ``NO_OBJ_SCORE`` and the object pointer falls back to
+        ``no_obj_ptr``. ``gt_masks`` is accepted and unused.
+        """
+        del gt_masks
+        B = backbone_features.shape[0]
+        assert backbone_features.shape[1] == self.sam_prompt_embed_dim
+        assert backbone_features.shape[2] == self.sam_image_embedding_size
+        assert backbone_features.shape[3] == self.sam_image_embedding_size
+
+        # a) Handle point prompts
+        if point_inputs is not None:
+            sam_point_coords = point_inputs["point_coords"]
+            sam_point_labels = point_inputs["point_labels"]
+            assert sam_point_coords.shape[0] == B and sam_point_labels.shape[0] == B
+        else:
+            # Pad with an empty point (label -1) when none are provided.
+            sam_point_coords = mx.zeros((B, 1, 2))
+            sam_point_labels = -mx.ones((B, 1), dtype=mx.int32)
+
+        # b) Handle mask prompts
+        if mask_inputs is not None:
+            assert len(mask_inputs.shape) == 4 and tuple(mask_inputs.shape[:2]) == (
+                B,
+                1,
+            )
+            if tuple(mask_inputs.shape[-2:]) != tuple(
+                self.sam_prompt_encoder.mask_input_size
+            ):
+                sam_mask_prompt = _interpolate(
+                    mask_inputs.astype(mx.float32),
+                    size=self.sam_prompt_encoder.mask_input_size,
+                    align_corners=False,
+                    mode="bilinear",
+                )
+            else:
+                sam_mask_prompt = mask_inputs
+        else:
+            # SAM's prompt encoder adds a learned no_mask_embed in this case
+            sam_mask_prompt = None
+
+        sparse_embeddings, dense_embeddings = self.sam_prompt_encoder(
+            points=(sam_point_coords, sam_point_labels),
+            boxes=None,
+            masks=sam_mask_prompt,
+        )
+        image_pe = self.sam_prompt_encoder.get_dense_pe()
+        (
+            low_res_multimasks,
+            ious,
+            sam_output_tokens,
+            object_score_logits,
+        ) = self.sam_mask_decoder(
+            image_embeddings=backbone_features,
+            image_pe=image_pe,
+            sparse_prompt_embeddings=sparse_embeddings,
+            dense_prompt_embeddings=dense_embeddings,
+            multimask_output=multimask_output,
+            repeat_image=False,  # the image is already batched
+            high_res_features=high_res_features,
+        )
+
+        is_obj_appearing = object_score_logits > 0
+        # spatial-memory mask is a hard obj/no-obj choice, matching the prediction
+        low_res_multimasks = mx.where(
+            mx.reshape(is_obj_appearing, (B, 1, 1, 1)), low_res_multimasks, NO_OBJ_SCORE
+        )
+        low_res_multimasks = low_res_multimasks.astype(mx.float32)
+        high_res_multimasks = _interpolate(
+            low_res_multimasks,
+            size=(self.image_size, self.image_size),
+            mode="bilinear",
+            align_corners=False,
+        )
+
+        sam_output_token = sam_output_tokens[:, 0]
+        if multimask_output:
+            best_iou_inds = mx.argmax(ious, axis=-1)
+            batch_inds = mx.arange(B)
+            low_res_masks = low_res_multimasks[batch_inds, best_iou_inds][:, None]
+            high_res_masks = high_res_multimasks[batch_inds, best_iou_inds][:, None]
+            if sam_output_tokens.shape[1] > 1:
+                sam_output_token = sam_output_tokens[batch_inds, best_iou_inds]
+        else:
+            low_res_masks, high_res_masks = low_res_multimasks, high_res_multimasks
+
+        # Build object pointers with an occlusion fallback.
+        obj_ptr = self.obj_ptr_proj(sam_output_token)
+        lambda_is_obj_appearing = is_obj_appearing.astype(mx.float32)
+        obj_ptr = lambda_is_obj_appearing * obj_ptr
+        obj_ptr = obj_ptr + (1 - lambda_is_obj_appearing) * self.no_obj_ptr
+
+        return (
+            low_res_multimasks,
+            high_res_multimasks,
+            ious,
+            low_res_masks,
+            high_res_masks,
+            obj_ptr,
+            object_score_logits,
+        )
+
+    def _use_mask_as_output(
+        self,
+        backbone_features: mx.array,
+        high_res_features: list[mx.array] | None,
+        mask_inputs: mx.array,
+    ) -> tuple[
+        mx.array,
+        mx.array,
+        mx.array,
+        mx.array,
+        mx.array,
+        mx.array,
+        mx.array,
+    ]:
+        """Convert binary mask prompts directly into SAM-style mask outputs."""
+        if len(mask_inputs.shape) != 4 or mask_inputs.shape[1] != 1:
+            raise ValueError("mask_inputs must have shape [B, 1, H, W].")
+
+        out_scale, out_bias = 20.0, -10.0
+        mask_inputs_float = mask_inputs.astype(mx.float32)
+        high_res_masks = mask_inputs_float * out_scale + out_bias
+        low_res_masks = _interpolate(
+            high_res_masks,
+            size=(
+                high_res_masks.shape[-2] // self.backbone_stride * 4,
+                high_res_masks.shape[-1] // self.backbone_stride * 4,
+            ),
+            align_corners=False,
+            mode="bilinear",
+        )
+        ious = mx.ones((mask_inputs.shape[0], 1), dtype=mx.float32)
+
+        # ``mask_downsample`` is a raw MLX Conv2d to preserve checkpoint key
+        # names, so call it at its NHWC boundary and return to NCHW for SAM.
+        mask_prompt = mx.transpose(
+            self.mask_downsample(mx.transpose(mask_inputs_float, (0, 2, 3, 1))),
+            (0, 3, 1, 2),
+        )
+        _, _, _, _, _, obj_ptr, _ = self._forward_sam_heads(
+            backbone_features=backbone_features,
+            mask_inputs=mask_prompt,
+            high_res_features=high_res_features,
+            gt_masks=mask_inputs,
+        )
+
+        is_obj_appearing = mx.any(
+            mx.reshape(mask_inputs, (mask_inputs.shape[0], -1)).astype(mx.float32)
+            > 0.0,
+            axis=1,
+        )[:, None]
+        lambda_is_obj_appearing = is_obj_appearing.astype(mx.float32)
+        object_score_logits = out_scale * lambda_is_obj_appearing + out_bias
+        obj_ptr = lambda_is_obj_appearing * obj_ptr
+        obj_ptr = obj_ptr + (1 - lambda_is_obj_appearing) * self.no_obj_ptr
+
+        return (
+            low_res_masks,
+            high_res_masks,
+            ious,
+            low_res_masks,
+            high_res_masks,
+            obj_ptr,
+            object_score_logits,
+        )
+
+    def forward(self, *args: object, **kwargs: object) -> NoReturn:
+        """Unsupported; use ``track_step``. Always raises."""
+        _unsupported_tracker_base("forward")
+
+    def __call__(self, *args: object, **kwargs: object) -> NoReturn:
+        """Unsupported; use ``track_step``. Always raises."""
+        _unsupported_tracker_base("__call__")
+
+    def forward_image(self, img_batch: mx.array) -> BackboneFeatureOutput:
+        """Get tracker visual features from the SAM3 image backbone."""
+        if self.backbone is None:
+            raise RuntimeError(
+                "Sam3TrackerBase.forward_image requires a backbone. Build the "
+                "tracker with with_backbone=True or provide cached frame features."
+            )
+
+        backbone_all = self.backbone.forward_image(img_batch)
+        if "tracker_backbone_out" in backbone_all:
+            backbone_out = backbone_all["tracker_backbone_out"]
+        else:
+            backbone_out = backbone_all.get("sam2_backbone_out")
+        if backbone_out is None:
+            raise ValueError(
+                "Tracker forward_image requires backbone.forward_image(...) to "
+                "return sam2_backbone_out or tracker_backbone_out. Build the "
+                "SAM3 backbone with enable_inst_interactivity=True."
+            )
+        if "backbone_fpn" not in backbone_out or "vision_pos_enc" not in backbone_out:
+            raise KeyError(
+                "tracker backbone output must contain backbone_fpn and vision_pos_enc."
+            )
+        if len(backbone_out["backbone_fpn"]) < 2:
+            raise ValueError("Expected at least two high-resolution feature levels.")
+
+        backbone_out = backbone_out.copy()
+        backbone_out["backbone_fpn"] = list(backbone_out["backbone_fpn"])
+        backbone_out["vision_pos_enc"] = list(backbone_out["vision_pos_enc"])
+        backbone_out["backbone_fpn"][0] = self.sam_mask_decoder.conv_s0(
+            backbone_out["backbone_fpn"][0]
+        )
+        backbone_out["backbone_fpn"][1] = self.sam_mask_decoder.conv_s1(
+            backbone_out["backbone_fpn"][1]
+        )
+        return backbone_out
+
+    def _prepare_backbone_features(
+        self, backbone_out: BackboneFeatureOutput
+    ) -> tuple[
+        BackboneFeatureOutput,
+        list[mx.array],
+        list[mx.array],
+        list[tuple[int, int]],
+    ]:
+        """Prepare and flatten visual features into official ``(HW, B, C)`` form."""
+        backbone_out = backbone_out.copy()
+        assert len(backbone_out["backbone_fpn"]) == len(backbone_out["vision_pos_enc"])
+        assert len(backbone_out["backbone_fpn"]) >= self.num_feature_levels
+
+        feature_maps = backbone_out["backbone_fpn"][-self.num_feature_levels :]
+        vision_pos_embeds = backbone_out["vision_pos_enc"][-self.num_feature_levels :]
+        feat_sizes: list[tuple[int, int]] = [
+            (x.shape[-2], x.shape[-1]) for x in vision_pos_embeds
+        ]
+        vision_feats: list[mx.array] = [
+            mx.transpose(mx.reshape(x, (x.shape[0], x.shape[1], -1)), (2, 0, 1))
+            for x in feature_maps
+        ]
+        vision_pos_embeds = [
+            mx.transpose(mx.reshape(x, (x.shape[0], x.shape[1], -1)), (2, 0, 1))
+            for x in vision_pos_embeds
+        ]
+
+        return backbone_out, vision_feats, vision_pos_embeds, feat_sizes
+
+    def _prepare_backbone_features_per_frame(
+        self, img_batch: mx.array, img_ids: ArrayLike
+    ) -> tuple[mx.array, list[mx.array], list[mx.array], list[tuple[int, int]]]:
+        """Compute backbone features for the requested image ids."""
+        img_ids_np = np.asarray(img_ids).reshape(-1).astype(np.int64)
+        if img_ids_np.size == 0:
+            raise ValueError("img_ids must contain at least one image id.")
+        unique_img_ids, inv_ids = np.unique(img_ids_np, return_inverse=True)
+        unique_ids_mx = mx.array(unique_img_ids, dtype=mx.int32)
+
+        image = img_batch[unique_ids_mx]
+        backbone_out = self.forward_image(image)
+        (
+            _,
+            vision_feats,
+            vision_pos_embeds,
+            feat_sizes,
+        ) = self._prepare_backbone_features(backbone_out)
+
+        if unique_img_ids.size != img_ids_np.size:
+            inv_ids_mx = mx.array(inv_ids, dtype=mx.int32)
+            image = image[inv_ids_mx]
+            vision_feats = [x[:, inv_ids_mx] for x in vision_feats]
+            vision_pos_embeds = [x[:, inv_ids_mx] for x in vision_pos_embeds]
+
+        return image, vision_feats, vision_pos_embeds, feat_sizes
+
+    def cal_mem_score(
+        self, object_score_logits: mx.array, iou_score: mx.array
+    ) -> mx.array:
+        """Return a scalar frame quality: mean of ``iou_score`` weighted by object presence.
+
+        Object logits at or below 0 count as 0 and positive ones are mapped from the
+        sigmoid range [0.5, 1) to [0, 1).
+        """
+        object_score_norm = mx.where(
+            object_score_logits > 0,
+            mx.sigmoid(object_score_logits) * 2 - 1,  # rescale to [0, 1]
+            mx.zeros_like(object_score_logits),
+        )
+        score_per_frame = (object_score_norm * iou_score).mean()
+        return score_per_frame
+
+    def frame_filter(
+        self,
+        output_dict: TrackerOutputState,
+        track_in_reverse: bool,
+        frame_idx: int,
+        num_frames: int,
+        r: int,
+    ) -> list[int]:
+        """Pick past non-conditioning frames to use as memory when memory selection is on.
+
+        Walks away from ``frame_idx`` in steps of ``r`` frames (opposite to the
+        tracking direction) and keeps frames whose ``eff_iou_score`` exceeds
+        ``mf_threshold``, up to ``max_obj_ptrs_in_encoder - 1``; the adjacent frame
+        is always included. Returns indices ordered from farthest to nearest, or an
+        empty list on the first frame in the tracking direction.
+        """
+        if (frame_idx == 0 and not track_in_reverse) or (
+            frame_idx == num_frames - 1 and track_in_reverse
+        ):
+            return []
+
+        max_num = min(num_frames, self.max_obj_ptrs_in_encoder)
+        if not track_in_reverse:
+            start = frame_idx - 1
+            end = 0
+            step = -r
+            must_include = frame_idx - 1
+        else:
+            start = frame_idx + 1
+            end = num_frames
+            step = r
+            must_include = frame_idx + 1
+
+        valid_indices: list[int] = []
+        for i in range(start, end, step):
+            out = output_dict["non_cond_frame_outputs"].get(i)
+            if out is None or "eff_iou_score" not in out:
+                continue
+
+            score_per_frame = out["eff_iou_score"]
+            score_value = (
+                float(score_per_frame)
+                if _is_mlx_array(score_per_frame)
+                else score_per_frame
+            )
+            if score_value > self.mf_threshold:
+                valid_indices.insert(0, i)
+
+            if len(valid_indices) >= max_num - 1:
+                break
+
+        if must_include not in valid_indices:
+            valid_indices.append(must_include)
+
+        return valid_indices
+
+    def _prepare_memory_conditioned_features(
+        self,
+        frame_idx: int,
+        is_init_cond_frame: bool,
+        current_vision_feats: list[mx.array],
+        current_vision_pos_embeds: list[mx.array],
+        feat_sizes: list[tuple[int, int]],
+        output_dict: TrackerOutputState,
+        num_frames: int,
+        track_in_reverse: bool = False,
+        use_prev_mem_frame: bool = True,
+    ) -> mx.array:
+        """Fuse current-frame visual features with previous spatial memories."""
+        B = current_vision_feats[-1].shape[1]
+        C = self.hidden_dim
+        H, W = feat_sizes[-1]
+
+        if self.num_maskmem == 0:
+            return mx.reshape(
+                mx.transpose(current_vision_feats[-1], (1, 2, 0)), (B, C, H, W)
+            )
+
+        num_obj_ptr_tokens = 0
+        tpos_sign_mul = -1 if track_in_reverse else 1
+        if not is_init_cond_frame and use_prev_mem_frame:
+            to_cat_prompt: list[mx.array] = []
+            to_cat_prompt_mask: list[mx.array | None] = []
+            to_cat_prompt_pos_embed: list[mx.array] = []
+
+            assert len(output_dict["cond_frame_outputs"]) > 0
+            cond_outputs = output_dict["cond_frame_outputs"]
+            selected_cond_outputs, unselected_cond_outputs = (
+                _select_closest_cond_frames(
+                    frame_idx,
+                    cond_outputs,
+                    self.max_cond_frames_in_attn,
+                    keep_first_cond_frame=self.keep_first_cond_frame,
+                )
+            )
+            valid_indices: list[int] = []
+            t_pos_and_prevs: list[tuple[int, TrackerStoredFrameOutput | None, bool]] = [
+                ((frame_idx - t) * tpos_sign_mul, out, True)
+                for t, out in selected_cond_outputs.items()
+            ]
+
+            r = self.memory_temporal_stride_for_eval
+            if self.use_memory_selection:
+                valid_indices = self.frame_filter(
+                    output_dict,
+                    track_in_reverse,
+                    frame_idx,
+                    num_frames,
+                    r,
+                )
+
+            for t_pos in range(1, self.num_maskmem):
+                t_rel = self.num_maskmem - t_pos
+                prev_frame_idx = previous_memory_frame_index(
+                    frame_idx=frame_idx,
+                    temporal_distance=t_rel,
+                    stride=r,
+                    track_in_reverse=track_in_reverse,
+                    selected_indices=(
+                        valid_indices if self.use_memory_selection else None
+                    ),
+                )
+                if prev_frame_idx is None:
+                    continue
+
+                out = output_dict["non_cond_frame_outputs"].get(prev_frame_idx)
+                if out is None:
+                    out = unselected_cond_outputs.get(prev_frame_idx)
+                t_pos_and_prevs.append((t_pos, out, False))
+
+            for t_pos, prev, is_selected_cond_frame in t_pos_and_prevs:
+                if prev is None:
+                    continue
+                memory_frame = cast(_MemoryFrameOutput, prev)
+                feats = memory_frame["maskmem_features"]
+                seq_len = feats.shape[-2] * feats.shape[-1]
+                to_cat_prompt.append(
+                    mx.transpose(
+                        mx.reshape(feats, (B, self.mem_dim, seq_len)), (2, 0, 1)
+                    )
+                )
+                to_cat_prompt_mask.append(mx.zeros((B, seq_len), dtype=mx.bool_))
+
+                maskmem_enc = memory_frame["maskmem_pos_enc"][-1]
+                maskmem_enc = mx.transpose(
+                    mx.reshape(maskmem_enc, (B, self.mem_dim, seq_len)), (2, 0, 1)
+                )
+                cond_frame_spatial_embedding = getattr(
+                    cast(_OptionalTrackerAttributes, self),
+                    "cond_frame_spatial_embedding",
+                    None,
+                )
+                if is_selected_cond_frame and cond_frame_spatial_embedding is not None:
+                    maskmem_enc = maskmem_enc + cond_frame_spatial_embedding
+
+                t = t_pos if not is_selected_cond_frame else 0
+                maskmem_enc = (
+                    maskmem_enc + self.maskmem_tpos_enc[self.num_maskmem - t - 1]
+                )
+                to_cat_prompt_pos_embed.append(maskmem_enc)
+
+            max_obj_ptrs_in_encoder = min(num_frames, self.max_obj_ptrs_in_encoder)
+            ptr_cond_outputs = {
+                t: out
+                for t, out in selected_cond_outputs.items()
+                if (t >= frame_idx if track_in_reverse else t <= frame_idx)
+            }
+            pos_and_ptrs: list[tuple[int, mx.array, bool]] = []
+            for t, out in ptr_cond_outputs.items():
+                memory_frame = cast(_MemoryFrameOutput, out)
+                pos_and_ptrs.append(
+                    ((frame_idx - t) * tpos_sign_mul, memory_frame["obj_ptr"], True)
+                )
+
+            for t_diff in range(1, max_obj_ptrs_in_encoder):
+                if not self.use_memory_selection:
+                    t = frame_idx + t_diff if track_in_reverse else frame_idx - t_diff
+                    if t < 0 or t >= num_frames:
+                        break
+                else:
+                    if -t_diff <= -len(valid_indices):
+                        break
+                    t = valid_indices[-t_diff]
+
+                out = output_dict["non_cond_frame_outputs"].get(
+                    t, unselected_cond_outputs.get(t)
+                )
+                if out is not None:
+                    memory_frame = cast(_MemoryFrameOutput, out)
+                    pos_and_ptrs.append((t_diff, memory_frame["obj_ptr"], False))
+
+            if len(pos_and_ptrs) > 0:
+                pos_list, ptrs_list, is_selected_cond_frame_list = zip(*pos_and_ptrs)
+                obj_ptrs = mx.stack(list(ptrs_list), axis=0)
+                cond_frame_obj_ptr_embedding = getattr(
+                    cast(_OptionalTrackerAttributes, self),
+                    "cond_frame_obj_ptr_embedding",
+                    None,
+                )
+                if cond_frame_obj_ptr_embedding is not None:
+                    obj_ptrs = (
+                        obj_ptrs
+                        + cond_frame_obj_ptr_embedding
+                        * mx.array(is_selected_cond_frame_list, dtype=mx.float32)[
+                            :, None, None
+                        ]
+                    )
+
+                obj_pos = self._get_tpos_enc(
+                    pos_list,
+                    max_abs_pos=max_obj_ptrs_in_encoder,
+                )
+                obj_pos = mx.broadcast_to(
+                    obj_pos[:, None, :], (obj_pos.shape[0], B, obj_pos.shape[1])
+                )
+
+                if self.mem_dim < C:
+                    tokens_per_ptr = C // self.mem_dim
+                    obj_ptrs = mx.reshape(
+                        obj_ptrs, (-1, B, tokens_per_ptr, self.mem_dim)
+                    )
+                    obj_ptrs = mx.reshape(
+                        mx.transpose(obj_ptrs, (0, 2, 1, 3)), (-1, B, self.mem_dim)
+                    )
+                    obj_pos = mx.repeat(obj_pos, tokens_per_ptr, axis=0)
+                to_cat_prompt.append(obj_ptrs)
+                to_cat_prompt_mask.append(None)
+                to_cat_prompt_pos_embed.append(obj_pos)
+                num_obj_ptr_tokens = obj_ptrs.shape[0]
+            else:
+                num_obj_ptr_tokens = 0
+        else:
+            pix_feat_with_mem = current_vision_feats[-1] + self.no_mem_embed
+            return mx.reshape(mx.transpose(pix_feat_with_mem, (1, 2, 0)), (B, C, H, W))
+
+        prompt = mx.concat(to_cat_prompt, axis=0)
+        prompt_mask = None
+        prompt_pos_embed = mx.concat(to_cat_prompt_pos_embed, axis=0)
+        encoder_out = self.transformer.encoder(
+            src=current_vision_feats,
+            src_key_padding_mask=[None],
+            src_pos=current_vision_pos_embeds,
+            prompt=prompt,
+            prompt_pos=prompt_pos_embed,
+            prompt_key_padding_mask=prompt_mask,
+            feat_sizes=feat_sizes,
+            num_obj_ptr_tokens=num_obj_ptr_tokens,
+        )
+        return mx.reshape(mx.transpose(encoder_out["memory"], (1, 2, 0)), (B, C, H, W))
+
+    def _encode_new_memory(
+        self,
+        image: mx.array | None,
+        current_vision_feats: list[mx.array],
+        feat_sizes: list[tuple[int, int]],
+        pred_masks_high_res: mx.array,
+        object_score_logits: mx.array,
+        is_mask_from_pts: bool,
+        output_dict: TrackerOutputState | None = None,
+        is_init_cond_frame: bool = False,
+    ) -> tuple[mx.array, list[mx.array]]:
+        """Encode the current image + prediction into a spatial memory feature."""
+        del image, output_dict, is_init_cond_frame
+        B = current_vision_feats[-1].shape[1]  # batch size on this frame
+        C = self.hidden_dim
+        H, W = feat_sizes[-1]  # top-level (lowest-resolution) feature size
+        # top-level feature, (HW)BC => BCHW
+        pix_feat = mx.reshape(
+            mx.transpose(current_vision_feats[-1], (1, 2, 0)), (B, C, H, W)
+        )
+        if self.non_overlap_masks_for_mem_enc:
+            pred_masks_high_res = self._apply_non_overlapping_constraints(
+                pred_masks_high_res
+            )
+        # Scale raw mask logits before applying sigmoid.
+        if is_mask_from_pts:
+            mask_for_mem = (pred_masks_high_res > 0).astype(mx.float32)
+        else:
+            # Map raw mask logits to [0, 1].
+            mask_for_mem = mx.sigmoid(pred_masks_high_res)
+        # Apply scale and bias to the probabilities.
+        if self.sigmoid_scale_for_mem_enc != 1.0:
+            mask_for_mem = mask_for_mem * self.sigmoid_scale_for_mem_enc
+        if self.sigmoid_bias_for_mem_enc != 0.0:
+            mask_for_mem = mask_for_mem + self.sigmoid_bias_for_mem_enc
+
+        # Use the SimpleMaskEncoder memory backbone.
+        maskmem_out: MemoryEncoderOutput = self.maskmem_backbone(
+            pix_feat, mask_for_mem, skip_mask_sigmoid=True
+        )
+        maskmem_features = self._maybe_clone(maskmem_out["vision_features"])
+        maskmem_pos_enc = [self._maybe_clone(m) for m in maskmem_out["vision_pos_enc"]]
+        # Add a no-object embedding when the frame is predicted as occluded.
+        is_obj_appearing = (object_score_logits > 0).astype(mx.float32)
+        maskmem_features = maskmem_features + (
+            1 - mx.reshape(is_obj_appearing, (B, 1, 1, 1))
+        ) * mx.reshape(self.no_obj_embed_spatial, (1, self.mem_dim, 1, 1))
+
+        return maskmem_features, maskmem_pos_enc
+
+    def forward_tracking(
+        self,
+        backbone_out: TrackingBackboneOutput,
+        input: _TrackerInput,
+        return_dict: bool = False,
+    ) -> TrackerOutputState | list[TrackerFrameOutput]:
+        """Forward tracking over precomputed frame features."""
+        img_feats_already_computed = backbone_out["backbone_fpn"] is not None
+        vision_feats: list[mx.array] = []
+        vision_pos_embeds: list[mx.array] = []
+        feat_sizes: list[tuple[int, int]] = []
+        if img_feats_already_computed:
+            feature_backbone_out = cast(BackboneFeatureOutput, backbone_out)
+            _, vision_feats, vision_pos_embeds, feat_sizes = (
+                self._prepare_backbone_features(feature_backbone_out)
+            )
+
+        num_frames = backbone_out["num_frames"]
+        init_cond_frames = backbone_out["init_cond_frames"]
+        frames_to_add_correction_pt = backbone_out["frames_to_add_correction_pt"]
+        processing_order = init_cond_frames + backbone_out["frames_not_in_init_cond"]
+        output_dict: TrackerOutputState = {
+            "cond_frame_outputs": {},
+            "non_cond_frame_outputs": {},
+        }
+        for stage_id in processing_order:
+            img_ids = input.find_inputs[stage_id].img_ids
+            if img_feats_already_computed:
+                current_image = input.img_batch[img_ids]
+                current_vision_feats = [x[:, img_ids] for x in vision_feats]
+                current_vision_pos_embeds = [x[:, img_ids] for x in vision_pos_embeds]
+            else:
+                (
+                    current_image,
+                    current_vision_feats,
+                    current_vision_pos_embeds,
+                    feat_sizes,
+                ) = self._prepare_backbone_features_per_frame(input.img_batch, img_ids)
+
+            current_out = self.track_step(
+                frame_idx=stage_id,
+                is_init_cond_frame=stage_id in init_cond_frames,
+                current_vision_feats=current_vision_feats,
+                current_vision_pos_embeds=current_vision_pos_embeds,
+                feat_sizes=feat_sizes,
+                image=current_image,
+                point_inputs=backbone_out["point_inputs_per_frame"].get(stage_id),
+                mask_inputs=backbone_out["mask_inputs_per_frame"].get(stage_id),
+                output_dict=output_dict,
+                num_frames=num_frames,
+            )
+            add_output_as_cond_frame = stage_id in init_cond_frames or (
+                getattr(self, "add_all_frames_to_correct_as_cond", False)
+                and stage_id in frames_to_add_correction_pt
+            )
+            if add_output_as_cond_frame:
+                output_dict["cond_frame_outputs"][stage_id] = current_out
+            else:
+                output_dict["non_cond_frame_outputs"][stage_id] = current_out
+
+        if return_dict:
+            return output_dict
+        all_frame_outputs_by_frame: dict[int, TrackerStoredFrameOutput] = {}
+        all_frame_outputs_by_frame.update(output_dict["cond_frame_outputs"])
+        all_frame_outputs_by_frame.update(output_dict["non_cond_frame_outputs"])
+        all_frame_outputs = [all_frame_outputs_by_frame[t] for t in range(num_frames)]
+        return [
+            cast(
+                TrackerFrameOutput,
+                {k: v for k, v in frame_out.items() if k != "obj_ptr"},
+            )
+            for frame_out in all_frame_outputs
+        ]
+
+    def track_step(
+        self,
+        frame_idx: int,
+        is_init_cond_frame: bool,
+        current_vision_feats: list[mx.array],
+        current_vision_pos_embeds: list[mx.array],
+        feat_sizes: list[tuple[int, int]],
+        image: mx.array | None,
+        point_inputs: PointInputs | None,
+        mask_inputs: mx.array | None,
+        output_dict: TrackerOutputState,
+        num_frames: int,
+        track_in_reverse: bool = False,
+        run_mem_encoder: bool = True,
+        prev_sam_mask_logits: mx.array | None = None,
+        use_prev_mem_frame: bool = True,
+    ) -> TrackerFrameOutput:
+        """Track one frame: predict its mask and (optionally) encode it as a memory.
+
+        Args:
+            frame_idx: Index of this frame in the video.
+            is_init_cond_frame: True for a prompted initial-conditioning frame, which
+                uses no past memory.
+            current_vision_feats: Sequence-first ``(H*W, B, C)`` features per level,
+                lowest resolution last. The earlier levels become the SAM decoder's
+                high-resolution skip features.
+            current_vision_pos_embeds: Matching position encodings.
+            feat_sizes: ``(H, W)`` per level.
+            image: Input image batch for the memory encoder, or None.
+            point_inputs: Point prompts for this frame, if any.
+            mask_inputs: Binary mask prompt ``(B, 1, H, W)``; when given it is turned
+                directly into the frame's output logits (+10 inside, -10 outside)
+                instead of being decoded.
+            output_dict: Conditioning and non-conditioning outputs of earlier frames.
+            num_frames: Total number of frames in the video.
+            track_in_reverse: Track backwards in time.
+            run_mem_encoder: Encode the prediction as a memory (needs
+                ``num_maskmem > 0``).
+            prev_sam_mask_logits: Previous logits to refine with new points (requires
+                the ``iter_use_prev_mask_pred`` attribute to be set).
+            use_prev_mem_frame: Attend to earlier memories on non-initial frames.
+
+        Returns:
+            The frame output (see ``TrackerFrameOutput``). ``pred_masks`` are
+            low-resolution mask logits and ``pred_masks_high_res`` the same masks
+            resized to ``image_size`` (for SAM-head predictions). Slots whose object
+            score is not positive carry ``NO_OBJ_SCORE`` logits.
+
+        Raises:
+            Sam3MlxUnsupportedError: If ``offload_output_to_cpu_for_eval`` is set.
+        """
+        current_out: _TrackerFrameOutputPartial = {
+            "point_inputs": point_inputs,
+            "mask_inputs": mask_inputs,
+        }
+        if len(current_vision_feats) > 1:
+            high_res_features: list[mx.array] | None = [
+                mx.reshape(mx.transpose(x, (1, 2, 0)), (x.shape[1], x.shape[2], *s))
+                for x, s in zip(current_vision_feats[:-1], feat_sizes[:-1])
+            ]
+        else:
+            high_res_features = None
+
+        if mask_inputs is not None:
+            sam_outputs = self._use_mask_as_output(
+                mx.reshape(
+                    mx.transpose(current_vision_feats[-1], (1, 2, 0)),
+                    (-1, self.hidden_dim, *feat_sizes[-1]),
+                ),
+                high_res_features,
+                mask_inputs,
+            )
+        else:
+            pix_feat_with_mem = self._prepare_memory_conditioned_features(
+                frame_idx=frame_idx,
+                is_init_cond_frame=is_init_cond_frame,
+                current_vision_feats=current_vision_feats[-1:],
+                current_vision_pos_embeds=current_vision_pos_embeds[-1:],
+                feat_sizes=feat_sizes[-1:],
+                output_dict=output_dict,
+                num_frames=num_frames,
+                track_in_reverse=track_in_reverse,
+                use_prev_mem_frame=use_prev_mem_frame,
+            )
+            if prev_sam_mask_logits is not None:
+                assert getattr(self, "iter_use_prev_mask_pred", False)
+                assert point_inputs is not None and mask_inputs is None
+                mask_inputs = prev_sam_mask_logits
+            sam_outputs = self._forward_sam_heads(
+                backbone_features=pix_feat_with_mem,
+                point_inputs=point_inputs,
+                mask_inputs=mask_inputs,
+                high_res_features=high_res_features,
+                multimask_output=self._use_multimask(is_init_cond_frame, point_inputs),
+            )
+
+        (
+            _,
+            _high_res_multimasks,
+            ious,
+            low_res_masks,
+            high_res_masks,
+            obj_ptr,
+            object_score_logits,
+        ) = sam_outputs
+        current_out["pred_masks"] = low_res_masks
+        current_out["pred_masks_high_res"] = high_res_masks
+        current_out["obj_ptr"] = obj_ptr
+
+        if self.use_memory_selection:
+            current_out["object_score_logits"] = object_score_logits
+            iou_score = mx.max(ious, axis=-1)
+            current_out["iou_score"] = iou_score
+            current_out["eff_iou_score"] = self.cal_mem_score(
+                object_score_logits, iou_score
+            )
+        current_out["object_score_logits"] = object_score_logits
+
+        if run_mem_encoder and self.num_maskmem > 0:
+            maskmem_features, maskmem_pos_enc = self._encode_new_memory(
+                image=image,
+                current_vision_feats=current_vision_feats,
+                feat_sizes=feat_sizes,
+                pred_masks_high_res=high_res_masks,
+                object_score_logits=object_score_logits,
+                is_mask_from_pts=(point_inputs is not None),
+                output_dict=output_dict,
+                is_init_cond_frame=is_init_cond_frame,
+            )
+            current_out["maskmem_features"] = maskmem_features
+            current_out["maskmem_pos_enc"] = maskmem_pos_enc
+        else:
+            current_out["maskmem_features"] = None
+            current_out["maskmem_pos_enc"] = None
+
+        if self.offload_output_to_cpu_for_eval:
+            _unsupported_tracker_base("track_step(offload_output_to_cpu_for_eval=True)")
+
+        def _trim_past_out(
+            past_out: TrackerStoredFrameOutput,
+        ) -> TrackerStoredFrameOutput:
+            complete_past_out = cast(_MemoryFrameOutput, past_out)
+            return cast(
+                TrackerStoredFrameOutput,
+                {
+                    "pred_masks": complete_past_out["pred_masks"],
+                    "obj_ptr": complete_past_out["obj_ptr"],
+                    "object_score_logits": complete_past_out["object_score_logits"],
+                },
+            )
+
+        if self.trim_past_non_cond_mem_for_eval:
+            trim_plan = memory_trim_plan(
+                frame_idx=frame_idx,
+                stride=self.memory_temporal_stride_for_eval,
+                num_maskmem=self.num_maskmem,
+                use_memory_selection=self.use_memory_selection,
+                max_object_pointers=self.max_obj_ptrs_in_encoder,
+            )
+            past_frame_idx = trim_plan.expired_frame_idx
+            past_out = output_dict["non_cond_frame_outputs"].get(past_frame_idx)
+            if past_out is not None:
+                eff_iou = past_out.get("eff_iou_score", 0)
+                eff_iou_value = float(eff_iou) if _is_mlx_array(eff_iou) else eff_iou
+                if (
+                    self.use_memory_selection and eff_iou_value < self.mf_threshold
+                ) or not self.use_memory_selection:
+                    output_dict["non_cond_frame_outputs"][past_frame_idx] = (
+                        _trim_past_out(past_out)
+                    )
+
+            far_old_frame_idx = trim_plan.far_history_frame_idx
+            if far_old_frame_idx is not None:
+                past_out = output_dict["non_cond_frame_outputs"].get(far_old_frame_idx)
+                if past_out is not None:
+                    output_dict["non_cond_frame_outputs"][far_old_frame_idx] = (
+                        _trim_past_out(past_out)
+                    )
+
+        return cast(TrackerFrameOutput, current_out)
+
+    def _use_multimask(
+        self, is_init_cond_frame: bool, point_inputs: PointInputs | None
+    ) -> bool:
+        """Whether to use multimask output in the SAM head."""
+        num_pts = 0 if point_inputs is None else point_inputs["point_labels"].shape[1]
+        multimask_output = (
+            self.multimask_output_in_sam
+            and (is_init_cond_frame or self.multimask_output_for_tracking)
+            and (self.multimask_min_pt_num <= num_pts <= self.multimask_max_pt_num)
+        )
+        return multimask_output
+
+    def _apply_non_overlapping_constraints(self, pred_masks: mx.array) -> mx.array:
+        """Suppress non-winning object logits at overlapping spatial locations."""
+        batch_size = pred_masks.shape[0]
+        if batch_size == 1:
+            return pred_masks
+
+        max_obj_inds = mx.reshape(
+            mx.argmax(pred_masks, axis=0), (1,) + pred_masks.shape[1:]
+        )
+        batch_obj_inds = mx.reshape(mx.arange(batch_size), (batch_size, 1, 1, 1))
+        keep = max_obj_inds == batch_obj_inds
+        return mx.where(
+            keep,
+            pred_masks,
+            mx.minimum(pred_masks, mx.array(-10.0, dtype=pred_masks.dtype)),
+        )
+
+    def _compile_all_components(self) -> NoReturn:
+        """Unsupported (``mx.compile`` of the whole tracker); always raises."""
+        _unsupported_tracker_base("_compile_all_components")
+
+    @overload
+    def _maybe_clone(self, x: mx.array) -> mx.array: ...
+
+    @overload
+    def _maybe_clone(self, x: np.ndarray) -> np.ndarray: ...
+
+    def _maybe_clone(self, x: ArrayLike) -> ArrayLike:
+        return mx.array(x) if _is_mlx_array(x) else np.array(x, copy=True)
+
+
+@overload
+def _concat_points(
+    old_point_inputs: PointInputs | None,
+    new_points: mx.array,
+    new_labels: mx.array,
+) -> PointInputs: ...
+
+
+@overload
+def _concat_points(
+    old_point_inputs: _NumpyPointInputs | None,
+    new_points: np.ndarray,
+    new_labels: np.ndarray,
+) -> _NumpyPointInputs: ...
+
+
+def _concat_points(
+    old_point_inputs: PointInputs | _NumpyPointInputs | None,
+    new_points: ArrayLike,
+    new_labels: ArrayLike,
+) -> PointInputs | _NumpyPointInputs:
+    """Add new point coordinates and labels to previous point inputs."""
+
+    if old_point_inputs is None:
+        points, labels = new_points, new_labels
+    elif _is_mlx_array(new_points):
+        old_coords = cast(mx.array, old_point_inputs["point_coords"])
+        old_labels = cast(mx.array, old_point_inputs["point_labels"])
+        points = mx.concat([old_coords, new_points], axis=1)
+        labels = mx.concat([old_labels, cast(mx.array, new_labels)], axis=1)
+    else:
+        old_coords = cast(np.ndarray, old_point_inputs["point_coords"])
+        old_labels = cast(np.ndarray, old_point_inputs["point_labels"])
+        points = np.concatenate([old_coords, cast(np.ndarray, new_points)], axis=1)
+        labels = np.concatenate([old_labels, cast(np.ndarray, new_labels)], axis=1)
+
+    return cast(
+        PointInputs | _NumpyPointInputs,
+        {"point_coords": points, "point_labels": labels},
+    )
+
+
+concat_points = _concat_points
+
+
+__all__ = [
+    "NO_OBJ_SCORE",
+    "Sam3TrackerBase",
+    "concat_points",
+]

@@ -1,0 +1,1463 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates. All Rights Reserved
+
+"""Shared building blocks for the SAM 3 transformer modules.
+
+Includes a PyTorch-compatible multi-head attention wrapper (sequence-first,
+``(L, B, C)``, unless ``batch_first`` is set), MLPs, normalization and
+activation helpers, sine position embeddings and the ``SAM3Output`` container.
+Mask convention for the attention helpers follows PyTorch: a True entry of a
+boolean ``attn_mask`` or ``key_padding_mask`` marks a position that must not be
+attended to.
+"""
+
+from __future__ import annotations
+
+import importlib
+import math
+import weakref
+from collections.abc import Callable, Iterator, Mapping
+from copy import deepcopy
+from enum import Enum, auto
+from functools import partial
+from types import TracebackType
+from typing import (
+    Final,
+    Literal,
+    Protocol,
+    TYPE_CHECKING,
+    TypeAlias,
+    TypeVar,
+    cast,
+)
+
+import mlx.core as mx
+import mlx.utils as mlx_utils
+from mlx import nn
+
+from sam3_mlx._unsupported import raise_unsupported
+
+
+_ModuleT = TypeVar("_ModuleT", bound=nn.Module)
+CloneableModule: TypeAlias = _ModuleT | Callable[[], _ModuleT]
+AttentionKind: TypeAlias = Literal["Vanilla", "Xformer", "Sparse", "Deformable"]
+Sam3StepDict: TypeAlias = dict[str, object]
+Sam3StageSteps: TypeAlias = list[Sam3StepDict]
+Sam3NestedOutput: TypeAlias = list[Sam3StageSteps]
+
+
+class _TreeMapWithPath(Protocol):
+    def __call__(
+        self,
+        fn: Callable[..., object],
+        tree: object,
+        *rest: object,
+        is_leaf: Callable[[object], bool] | None = None,
+        path: object | None = None,
+    ) -> object: ...
+
+
+class _Pad(Protocol):
+    def __call__(
+        self,
+        a: mx.array,
+        pad_width: int | tuple[int] | tuple[int, int] | list[tuple[int, int]],
+        mode: Literal["constant", "edge"] = "constant",
+        constant_values: int | float | bool | mx.array = 0,
+        *,
+        stream: object | None = None,
+    ) -> mx.array: ...
+
+
+class _Stack(Protocol):
+    def __call__(
+        self,
+        arrays: list[mx.array],
+        axis: int | None = 0,
+        *,
+        stream: object | None = None,
+    ) -> mx.array: ...
+
+
+class _Concat(Protocol):
+    def __call__(
+        self,
+        arrays: list[mx.array],
+        axis: int | None = 0,
+        *,
+        stream: object | None = None,
+    ) -> mx.array: ...
+
+
+class _ArrayCallable(Protocol):
+    def __call__(self, x: mx.array) -> mx.array: ...
+
+
+class _LinearModule(Protocol):
+    weight: mx.array
+    bias: mx.array | None
+
+    def __call__(self, x: mx.array) -> mx.array: ...
+
+
+class _ActivationFn(Protocol):
+    def __call__(self, x: mx.array, axis: int = -1) -> mx.array: ...
+
+
+class _ActFactory(Protocol):
+    def __call__(self) -> _ArrayCallable: ...
+
+
+class _NormFactory(Protocol):
+    def __call__(self, dims: int) -> _ArrayCallable: ...
+
+
+class _LinearFactory(Protocol):
+    def __call__(
+        self, input_dims: int, output_dims: int, bias: bool = True
+    ) -> _LinearModule: ...
+
+
+class _GlorotUniform(Protocol):
+    def __call__(
+        self, dtype: mx.Dtype = mx.float32
+    ) -> Callable[[mx.array, float], mx.array]: ...
+
+
+class _ModuleUpdate(Protocol):
+    def parameters(self) -> object: ...
+
+    def update(self, parameters: object) -> object: ...
+
+
+class _HasNumQueries(Protocol):
+    num_queries: int | None
+
+
+_tree_map_with_path = cast(_TreeMapWithPath, getattr(mlx_utils, "tree_map_with_path"))
+_pad = cast(_Pad, getattr(mx, "pad"))
+_stack = cast(_Stack, getattr(mx, "stack"))
+_concat = cast(_Concat, getattr(mx, "concat"))
+_glorot_uniform = cast(_GlorotUniform, getattr(getattr(nn, "init"), "glorot_uniform"))
+
+
+if TYPE_CHECKING:
+
+    class _MultiHeadAttentionBase(nn.Module):
+        query_proj: _LinearModule
+        key_proj: _LinearModule
+        value_proj: _LinearModule
+        out_proj: _LinearModule
+        num_heads: int
+
+        def __init__(
+            self,
+            dims: int,
+            num_heads: int,
+            query_input_dims: int | None = None,
+            key_input_dims: int | None = None,
+            value_input_dims: int | None = None,
+            value_dims: int | None = None,
+            value_output_dims: int | None = None,
+            bias: bool = False,
+        ) -> None: ...
+
+else:
+    _MultiHeadAttentionBase = getattr(
+        importlib.import_module("mlx.nn"), "MultiHeadAttention"
+    )
+
+
+def _raise_attention_unsupported(feature: str, *, reason: str, detail: str) -> None:
+    raise_unsupported(
+        feature,
+        reason=reason,
+        detail=detail,
+    )
+
+
+def inverse_sigmoid(x: mx.array, eps: float = 1e-3) -> mx.array:
+    """Return ``log(x / (1 - x))`` with ``x`` clipped to [0, 1] and both terms floored at ``eps``."""
+    x = mx.clip(x, 0, 1)
+    x1 = mx.clip(x, eps, None)
+    x2 = mx.clip((1 - x), eps, None)
+    return mx.log(x1 / x2)
+
+
+def joint_box_logits(class_logits: mx.array, presence_logits: mx.array) -> mx.array:
+    """Combine per-box class logits with a per-image presence logit.
+
+    ``class_logits`` is ``(..., Q, K)`` (the decoder passes ``(layers, B, Q, 1)``)
+    and ``presence_logits`` is the same shape with the query axis removed
+    (``(layers, B, 1)``), broadcast over the queries. The result is the logit of
+    ``sigmoid(class) * sigmoid(presence)``, clamped to ``[-10, 10]``, with the shape
+    of ``class_logits``.
+    """
+    probability = mx.sigmoid(class_logits) * mx.sigmoid(presence_logits)[..., None]
+    return mx.clip(inverse_sigmoid(probability), -10.0, 10.0)
+
+
+class AttentionType:
+    """Type of attention, matching the official SAM3 constants."""
+
+    Vanilla: Final[AttentionKind] = "Vanilla"
+    Xformer: Final[AttentionKind] = "Xformer"
+    Sparse: Final[AttentionKind] = "Sparse"
+    Deformable: Final[AttentionKind] = "Deformable"
+
+
+def get_sdpa_settings() -> tuple[bool, bool, bool]:
+    """Return fixed ``(old_gpu, use_flash_attn, math_kernel_on)`` flags.
+
+    Kept for upstream compatibility; MLX picks its attention kernel itself, so the
+    values are constants.
+    """
+    return True, False, True
+
+
+OLD_GPU, USE_FLASH_ATTN, MATH_KERNEL_ON = get_sdpa_settings()
+
+
+def _linear(
+    input_array: mx.array, weight: mx.array, bias: mx.array | None = None
+) -> mx.array:
+    output = mx.matmul(input_array, mx.transpose(weight, axes=(1, 0)))
+    if bias is not None:
+        output = output + bias
+    return output
+
+
+def _in_projection(
+    query: mx.array,
+    key: mx.array,
+    value: mx.array,
+    q_weight: mx.array,
+    k_weight: mx.array,
+    v_weight: mx.array,
+    bias: mx.array | None = None,
+) -> tuple[mx.array, mx.array, mx.array]:
+    if bias is None:
+        q_bias = k_bias = v_bias = None
+    else:
+        q_bias, k_bias, v_bias = mx.split(bias, 3, axis=0)
+    return (
+        _linear(query, q_weight, q_bias),
+        _linear(key, k_weight, k_bias),
+        _linear(value, v_weight, v_bias),
+    )
+
+
+def _in_projection_packed(
+    query: mx.array,
+    key: mx.array,
+    value: mx.array,
+    in_proj_weight: mx.array,
+    in_proj_bias: mx.array | None = None,
+) -> tuple[mx.array, mx.array, mx.array]:
+    q_weight, k_weight, v_weight = mx.split(in_proj_weight, 3, axis=0)
+    return _in_projection(
+        query,
+        key,
+        value,
+        q_weight,
+        k_weight,
+        v_weight,
+        in_proj_bias,
+    )
+
+
+def _pad_last_dim(array: mx.array, pad_count: int = 1) -> mx.array:
+    pad_width: list[tuple[int, int]] = [(0, 0)] * array.ndim
+    pad_width[-1] = (0, pad_count)
+    return _pad(array, pad_width)
+
+
+def _is_bool_mask(mask: mx.array | None) -> bool:
+    return mask is not None and mask.dtype == mx.bool_
+
+
+def _is_bool_like_mask(mask: mx.array | None) -> bool:
+    return mask is not None and mask.dtype in (mx.bool_, mx.uint8)
+
+
+def _to_block_bool_mask(mask: mx.array) -> mx.array:
+    if mask.dtype == mx.bool_:
+        return mask
+    if mask.dtype == mx.uint8:
+        return mask.astype(mx.bool_)
+    raise TypeError(f"Expected a bool-like attention mask, got {mask.dtype}.")
+
+
+def _to_additive_attention_mask(
+    mask: mx.array | None, dtype: mx.Dtype
+) -> mx.array | None:
+    if mask is None:
+        return None
+    if _is_bool_mask(mask):
+        return mx.where(
+            mask, mx.array(-float("inf"), dtype=dtype), mx.array(0.0, dtype=dtype)
+        )
+    if mask.dtype == mx.uint8:
+        bool_mask = mask.astype(mx.bool_)
+        return mx.where(
+            bool_mask, mx.array(-float("inf"), dtype=dtype), mx.array(0.0, dtype=dtype)
+        )
+    return mask.astype(dtype)
+
+
+def _require_array(mask: mx.array | None, *, name: str) -> mx.array:
+    if mask is None:
+        raise AssertionError(f"{name} must be an array")
+    return mask
+
+
+def _to_attention_mask(
+    mask: mx.array | None, dtype: mx.Dtype, *, preserve_bool: bool
+) -> mx.array | None:
+    if mask is None:
+        return None
+    if _is_bool_like_mask(mask):
+        block_mask = _to_block_bool_mask(mask)
+        if preserve_bool:
+            return mx.logical_not(block_mask)
+        return _to_additive_attention_mask(block_mask, dtype)
+    return mask.astype(dtype)
+
+
+def _merge_attention_masks(
+    left: mx.array | None,
+    right: mx.array | None,
+    dtype: mx.Dtype,
+    *,
+    preserve_bool: bool,
+) -> mx.array | None:
+    if left is None:
+        return _to_attention_mask(right, dtype, preserve_bool=preserve_bool)
+    if right is None:
+        return _to_attention_mask(left, dtype, preserve_bool=preserve_bool)
+    if preserve_bool and _is_bool_like_mask(left) and _is_bool_like_mask(right):
+        block_mask = mx.logical_or(
+            _to_block_bool_mask(left),
+            _to_block_bool_mask(right),
+        )
+        return mx.logical_not(block_mask)
+    left_add = _require_array(
+        _to_additive_attention_mask(left, dtype), name="left additive mask"
+    )
+    right_add = _require_array(
+        _to_additive_attention_mask(right, dtype), name="right additive mask"
+    )
+    return left_add + right_add
+
+
+def scaled_dot_product_attention(
+    query: mx.array,
+    key: mx.array,
+    value: mx.array,
+    attn_mask: mx.array | None,
+    need_weights: bool = True,
+) -> tuple[mx.array, mx.array | None]:
+    """Scaled dot-product attention over ``(B, num_heads, L, head_dim)`` arrays.
+
+    ``attn_mask`` is either boolean (True = attend, MLX convention, used only when
+    ``need_weights`` is False) or additive. With ``need_weights`` the attention
+    matrix is materialized and returned as the second element, otherwise the fused
+    MLX kernel is used and the second element is ``None``. Scale is
+    ``head_dim ** -0.5``.
+    """
+    scale = query.shape[-1] ** -0.5
+    if not need_weights:
+        return (
+            mx.fast.scaled_dot_product_attention(
+                query,
+                key,
+                value,
+                scale=scale,
+                mask=attn_mask,
+            ),
+            None,
+        )
+    scores = mx.matmul(query, mx.transpose(key, axes=(0, 1, 3, 2))) * scale
+    if attn_mask is not None:
+        additive = _to_additive_attention_mask(attn_mask, scores.dtype)
+        if additive is not None:
+            scores = scores + additive
+    weights = mx.softmax(scores, axis=-1)
+    return mx.matmul(weights, value), weights
+
+
+def multi_head_attention_forward(
+    query: mx.array,
+    key: mx.array,
+    value: mx.array,
+    embed_dim_to_check: int,
+    num_heads: int,
+    in_proj_weight: mx.array | None,
+    in_proj_bias: mx.array | None,
+    bias_k: mx.array | None,
+    bias_v: mx.array | None,
+    add_zero_attn: bool,
+    out_proj_weight: mx.array,
+    out_proj_bias: mx.array | None,
+    key_padding_mask: mx.array | None = None,
+    need_weights: bool = True,
+    attn_mask: mx.array | None = None,
+    use_separate_proj_weight: bool = False,
+    q_proj_weight: mx.array | None = None,
+    k_proj_weight: mx.array | None = None,
+    v_proj_weight: mx.array | None = None,
+    static_k: mx.array | None = None,
+    static_v: mx.array | None = None,
+    average_attn_weights: bool = True,
+    is_causal: bool = False,
+    attn_type: AttentionKind = AttentionType.Vanilla,
+    attn_sparsity: float = 0.0,
+    attn_bias: mx.array | None = None,
+    use_fa3: bool = False,
+) -> tuple[mx.array, mx.array | None]:
+    """MLX implementation of the official vanilla MHA helper.
+
+    The xformers sparse/efficient and FA3 branches remain explicit boundaries:
+    those upstream paths depend on PyTorch-only kernels rather than portable MLX
+    array operations.
+
+    Inputs are sequence-first: ``query`` is ``(tgt_len, B, E)``; ``key`` and
+    ``value`` are ``(src_len, B, E)``. ``attn_mask`` may be ``(tgt_len, src_len)``,
+    ``(B * num_heads, tgt_len, src_len)`` or ``(B, num_heads, tgt_len, src_len)``;
+    ``key_padding_mask`` is ``(B, src_len)``. Boolean masks follow the PyTorch
+    convention (True = do not attend); float masks are added to the scores.
+    ``attn_bias`` is an additive ``(B, num_heads, tgt_len, src_len)`` bias.
+
+    Returns:
+        ``(output, weights)``: ``output`` is ``(tgt_len, B, E)``. ``weights`` is
+        ``None`` unless ``need_weights``; then it is ``(B, tgt_len, src_len)``
+        averaged over heads, or ``(B, num_heads, tgt_len, src_len)`` when
+        ``average_attn_weights`` is False.
+
+    Raises:
+        AssertionError: On inconsistent embedding, shape or projection arguments.
+        RuntimeError: If ``attn_mask`` has an unsupported rank or shape.
+    """
+    if is_causal:
+        _raise_attention_unsupported(
+            "sam3_mlx.model.model_misc.multi_head_attention_forward(is_causal=True)",
+            reason="xformers",
+            detail="The MLX vanilla MHA helper does not implement the official causal branch.",
+        )
+    if attn_type != AttentionType.Vanilla:
+        _raise_attention_unsupported(
+            f"sam3_mlx.model.model_misc.multi_head_attention_forward(attn_type={attn_type!r})",
+            reason="xformers",
+            detail="Non-vanilla attention depends on PyTorch/xformers kernels.",
+        )
+    if attn_sparsity != 0.0:
+        _raise_attention_unsupported(
+            "sam3_mlx.model.model_misc.multi_head_attention_forward(attn_sparsity)",
+            reason="xformers",
+            detail="Sparse attention is not ported to MLX.",
+        )
+    if use_fa3:
+        _raise_attention_unsupported(
+            "sam3_mlx.model.model_misc.multi_head_attention_forward(use_fa3=True)",
+            reason="flash-attn-3",
+            detail="FlashAttention 3 is non-MLX and not ported to MLX.",
+        )
+    fast_attention_path = not need_weights and attn_bias is None
+
+    tgt_len, bsz, embed_dim = query.shape
+    src_len = key.shape[0]
+    if embed_dim != embed_dim_to_check:
+        raise AssertionError(
+            f"was expecting embedding dimension of {embed_dim_to_check}, but got {embed_dim}"
+        )
+    head_dim = embed_dim // num_heads
+    if head_dim * num_heads != embed_dim:
+        raise AssertionError(f"embed_dim {embed_dim} not divisible by num_heads")
+
+    if use_separate_proj_weight:
+        if key.shape[:2] != value.shape[:2]:
+            raise AssertionError(
+                f"key's sequence and batch dims {key.shape[:2]} do not match value's {value.shape[:2]}"
+            )
+        if q_proj_weight is None or k_proj_weight is None or v_proj_weight is None:
+            raise AssertionError(
+                "q_proj_weight, k_proj_weight, and v_proj_weight are required"
+            )
+        q, k, v = _in_projection(
+            query, key, value, q_proj_weight, k_proj_weight, v_proj_weight, in_proj_bias
+        )
+    else:
+        if key.shape != value.shape:
+            raise AssertionError(
+                f"key shape {key.shape} does not match value shape {value.shape}"
+            )
+        if in_proj_weight is None:
+            raise AssertionError(
+                "use_separate_proj_weight is False but in_proj_weight is None"
+            )
+        q, k, v = _in_projection_packed(query, key, value, in_proj_weight, in_proj_bias)
+
+    if attn_mask is not None:
+        if attn_mask.ndim == 2:
+            if attn_mask.shape != (tgt_len, src_len):
+                raise RuntimeError(
+                    f"The shape of the 2D attn_mask is {attn_mask.shape}, but should be {(tgt_len, src_len)}."
+                )
+            attn_mask = attn_mask[None, None, :, :]
+        elif attn_mask.ndim == 3:
+            if attn_mask.shape != (bsz * num_heads, tgt_len, src_len):
+                raise RuntimeError(
+                    f"The shape of the 3D attn_mask is {attn_mask.shape}, but should be {(bsz * num_heads, tgt_len, src_len)}."
+                )
+            attn_mask = mx.reshape(attn_mask, (bsz, num_heads, tgt_len, src_len))
+        elif attn_mask.ndim == 4:
+            if attn_mask.shape != (bsz, num_heads, tgt_len, src_len):
+                raise RuntimeError(
+                    f"The shape of the 4D attn_mask is {attn_mask.shape}, but should be {(bsz, num_heads, tgt_len, src_len)}."
+                )
+        else:
+            raise RuntimeError(
+                f"attn_mask's dimension {attn_mask.ndim} is not supported"
+            )
+    attn_mask_ready = False
+
+    if bias_k is not None and bias_v is not None:
+        if static_k is not None:
+            raise AssertionError("bias cannot be added to static key.")
+        if static_v is not None:
+            raise AssertionError("bias cannot be added to static value.")
+        k = _concat([k, mx.repeat(bias_k, bsz, axis=1)], axis=0)
+        v = _concat([v, mx.repeat(bias_v, bsz, axis=1)], axis=0)
+        if attn_mask is not None:
+            attn_mask = _pad_last_dim(attn_mask)
+        if key_padding_mask is not None:
+            key_padding_mask = _pad_last_dim(key_padding_mask)
+    else:
+        if bias_k is not None or bias_v is not None:
+            raise AssertionError("bias_k and bias_v must both be set or both be None")
+
+    q = mx.transpose(
+        mx.reshape(q, (tgt_len, bsz * num_heads, head_dim)), axes=(1, 0, 2)
+    )
+    if static_k is None:
+        k = mx.transpose(
+            mx.reshape(k, (k.shape[0], bsz * num_heads, head_dim)), axes=(1, 0, 2)
+        )
+    else:
+        if static_k.shape[0] != bsz * num_heads:
+            raise AssertionError(
+                f"expecting static_k.shape[0] of {bsz * num_heads}, but got {static_k.shape[0]}"
+            )
+        if static_k.shape[2] != head_dim:
+            raise AssertionError(
+                f"expecting static_k.shape[2] of {head_dim}, but got {static_k.shape[2]}"
+            )
+        k = static_k
+    if static_v is None:
+        v = mx.transpose(
+            mx.reshape(v, (v.shape[0], bsz * num_heads, head_dim)), axes=(1, 0, 2)
+        )
+    else:
+        if static_v.shape[0] != bsz * num_heads:
+            raise AssertionError(
+                f"expecting static_v.shape[0] of {bsz * num_heads}, but got {static_v.shape[0]}"
+            )
+        if static_v.shape[2] != head_dim:
+            raise AssertionError(
+                f"expecting static_v.shape[2] of {head_dim}, but got {static_v.shape[2]}"
+            )
+        v = static_v
+
+    if add_zero_attn:
+        zero_attn_shape = (bsz * num_heads, 1, head_dim)
+        k = _concat([k, mx.zeros(zero_attn_shape, dtype=k.dtype)], axis=1)
+        v = _concat([v, mx.zeros(zero_attn_shape, dtype=v.dtype)], axis=1)
+        if attn_mask is not None:
+            attn_mask = _pad_last_dim(attn_mask)
+        if key_padding_mask is not None:
+            key_padding_mask = _pad_last_dim(key_padding_mask)
+
+    src_len = k.shape[1]
+
+    if key_padding_mask is not None:
+        if key_padding_mask.shape != (bsz, src_len):
+            raise AssertionError(
+                f"expecting key_padding_mask shape of {(bsz, src_len)}, but got {key_padding_mask.shape}"
+            )
+        key_padding_mask = mx.reshape(key_padding_mask, (bsz, 1, 1, src_len))
+        attn_mask = _merge_attention_masks(
+            attn_mask,
+            key_padding_mask,
+            q.dtype,
+            preserve_bool=fast_attention_path,
+        )
+        attn_mask_ready = True
+
+    if attn_bias is not None:
+        if attn_bias.shape != (bsz, num_heads, tgt_len, src_len):
+            raise AssertionError(
+                f"expecting attn_bias shape of {(bsz, num_heads, tgt_len, src_len)}, but got {attn_bias.shape}"
+            )
+        attn_mask = _merge_attention_masks(
+            attn_mask,
+            attn_bias,
+            q.dtype,
+            preserve_bool=False,
+        )
+        attn_mask_ready = True
+    elif attn_mask is not None and not attn_mask_ready:
+        attn_mask = _to_attention_mask(
+            attn_mask,
+            q.dtype,
+            preserve_bool=fast_attention_path,
+        )
+
+    q = mx.reshape(q, (bsz, num_heads, tgt_len, head_dim))
+    k = mx.reshape(k, (bsz, num_heads, src_len, head_dim))
+    v = mx.reshape(v, (bsz, num_heads, src_len, head_dim))
+
+    attn_output, attn_output_weights = scaled_dot_product_attention(
+        q, k, v, attn_mask, need_weights=need_weights
+    )
+    attn_output = mx.reshape(
+        mx.transpose(attn_output, axes=(2, 0, 1, 3)),
+        (tgt_len, bsz, embed_dim),
+    )
+    attn_output = _linear(attn_output, out_proj_weight, out_proj_bias)
+
+    if not need_weights:
+        return attn_output, None
+
+    if attn_output_weights is None:
+        raise AssertionError("attention weights are required when need_weights=True")
+    if average_attn_weights:
+        attn_output_weights = mx.sum(attn_output_weights, axis=1) / num_heads
+    return attn_output, attn_output_weights
+
+
+def _as_linear_module(module: object) -> _LinearModule:
+    return cast(_LinearModule, module)
+
+
+def _as_array_callable(module: object) -> _ArrayCallable:
+    return cast(_ArrayCallable, module)
+
+
+class MultiheadAttentionWrapper(_MultiHeadAttentionBase):
+    """SAM3 multi-head attention with PyTorch-compatible kwargs and masks.
+
+    Parameter-key layout and runtime identity match mlx.nn.MultiHeadAttention.
+
+    The constructor accepts both MLX-style (``dims``) and PyTorch-style
+    (``embed_dim``, ``kdim``, ``vdim``, ``batch_first``) arguments. ``batch_first``
+    defaults to True unless the width is given as the ``embed_dim`` keyword, which
+    selects PyTorch's sequence-first default. Calling the module takes queries,
+    keys and values (also as ``query``/``q``-style aliases) and returns the
+    attention output, or ``(output, weights)`` when ``need_weights=True`` (default
+    False). ``attn_mask`` and ``key_padding_mask`` use the PyTorch convention
+    (boolean True = do not attend); ``mask`` is an additional mask merged into
+    ``attn_mask``. Causal, sparse, xformers and FA3 options raise as unsupported.
+    """
+
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        has_dims_keyword = "dims" in kwargs
+        has_embed_dim_keyword = "embed_dim" in kwargs
+        dims = kwargs.pop("dims", None)
+        embed_dim = kwargs.pop("embed_dim", None)
+        num_heads = kwargs.pop("num_heads", None)
+        bias = kwargs.pop("bias", True)
+        add_bias_kv = kwargs.pop("add_bias_kv", False)
+        add_zero_attn = kwargs.pop("add_zero_attn", False)
+        kdim = kwargs.pop("kdim", None)
+        vdim = kwargs.pop("vdim", None)
+        batch_first = kwargs.pop("batch_first", None)
+        device = kwargs.pop("device", None)
+        dtype = kwargs.pop("dtype", None)
+        attn_type = kwargs.pop("attn_type", AttentionType.Vanilla)
+        sparsity = kwargs.pop("sparsity", 0.0)
+        use_fa3 = kwargs.pop("use_fa3", False)
+        query_input_dims = kwargs.pop("query_input_dims", None)
+        key_input_dims = kwargs.pop("key_input_dims", None)
+        value_input_dims = kwargs.pop("value_input_dims", None)
+        value_dims = kwargs.pop("value_dims", None)
+        value_output_dims = kwargs.pop("value_output_dims", None)
+        if kwargs:
+            names = ", ".join(sorted(str(name) for name in kwargs))
+            raise TypeError(f"Unsupported MultiHeadAttention kwargs: {names}.")
+
+        if args:
+            if dims is not None or embed_dim is not None:
+                raise TypeError(
+                    "Embedding dimension was provided both positionally and by keyword."
+                )
+            dims = args[0]
+            args = args[1:]
+        elif dims is None:
+            dims = embed_dim
+        elif embed_dim is not None and embed_dim != dims:
+            raise TypeError("Received conflicting 'dims' and 'embed_dim' values.")
+        used_embed_dim_keyword = has_embed_dim_keyword and not has_dims_keyword
+
+        if args:
+            if num_heads is not None:
+                raise TypeError(
+                    "num_heads was provided both positionally and by keyword."
+                )
+            num_heads = args[0]
+            args = args[1:]
+        if args:
+            raise TypeError(
+                f"Expected at most 2 positional arguments, got {len(args) + 2}."
+            )
+        if dims is None or num_heads is None:
+            raise TypeError("dims/embed_dim and num_heads are required.")
+
+        dims_i = cast(int, dims)
+        num_heads_i = cast(int, num_heads)
+        bias_b = cast(bool, bias)
+        add_bias_kv_b = cast(bool, add_bias_kv)
+        add_zero_attn_b = cast(bool, add_zero_attn)
+        attn_type_s = cast(AttentionKind, attn_type)
+        sparsity_f = float(cast(float, sparsity))
+        use_fa3_b = cast(bool, use_fa3)
+
+        if device is not None or dtype is not None:
+            _raise_attention_unsupported(
+                "sam3_mlx.model.model_misc.MultiheadAttentionWrapper(device/dtype factory kwargs)",
+                reason="port-gap",
+                detail="MLX attention parameters are created in the active MLX runtime dtype/device.",
+            )
+        if add_bias_kv_b:
+            _raise_attention_unsupported(
+                "sam3_mlx.model.model_misc.MultiheadAttentionWrapper(add_bias_kv=True)",
+                reason="port-gap",
+                detail="The MLX wrapper does not implement extra learned key/value bias rows.",
+            )
+        if value_dims is not None and value_dims != dims_i:
+            _raise_attention_unsupported(
+                "sam3_mlx.model.model_misc.MultiheadAttentionWrapper(value_dims)",
+                reason="port-gap",
+                detail="The official SAM3 MHA path keeps value and embedding dimensions equal.",
+            )
+        if value_output_dims is not None and value_output_dims != dims_i:
+            _raise_attention_unsupported(
+                "sam3_mlx.model.model_misc.MultiheadAttentionWrapper(value_output_dims)",
+                reason="port-gap",
+                detail="The official SAM3 MHA path keeps output and embedding dimensions equal.",
+            )
+        if query_input_dims is not None and query_input_dims != dims_i:
+            _raise_attention_unsupported(
+                "sam3_mlx.model.model_misc.MultiheadAttentionWrapper(query_input_dims)",
+                reason="port-gap",
+                detail="The official SAM3 MHA path expects query input dimensions to equal embed_dim.",
+            )
+
+        resolved_key_input = key_input_dims if key_input_dims is not None else kdim
+        resolved_value_input = (
+            value_input_dims if value_input_dims is not None else vdim
+        )
+        if batch_first is None:
+            batch_first_b = not used_embed_dim_keyword
+        else:
+            batch_first_b = bool(batch_first)
+
+        query_in = dims_i if query_input_dims is None else cast(int, query_input_dims)
+        key_in = dims_i if resolved_key_input is None else cast(int, resolved_key_input)
+        # Match MLX MultiHeadAttention: value_input_dims defaults to key_input_dims.
+        value_in = (
+            key_in if resolved_value_input is None else cast(int, resolved_value_input)
+        )
+
+        super().__init__(
+            dims_i,
+            num_heads_i,
+            query_input_dims=query_in,
+            key_input_dims=key_in,
+            value_input_dims=value_in,
+            value_dims=dims_i,
+            value_output_dims=dims_i,
+            bias=bias_b,
+        )
+        self.num_heads = num_heads_i
+        self.embed_dim = dims_i
+        self.kdim = key_in
+        self.vdim = value_in
+        self._qkv_same_embed_dim = self.kdim == dims_i and self.vdim == dims_i
+        self.batch_first = batch_first_b
+        self.head_dim = dims_i // num_heads_i
+        self.bias_k: mx.array | None = None
+        self.bias_v: mx.array | None = None
+        self.add_zero_attn = add_zero_attn_b
+        self.attn_type: AttentionKind = attn_type_s
+        self.sparsity = sparsity_f
+        self.use_fa3 = use_fa3_b
+
+    @staticmethod
+    def _pop_alias(
+        kwargs: dict[str, object], canonical: str, *aliases: str
+    ) -> object | None:
+        canonical_value = kwargs.pop(canonical, None)
+        chosen_value = canonical_value
+        chosen_name: str | None = canonical if canonical_value is not None else None
+        for alias in aliases:
+            alias_value = kwargs.pop(alias, None)
+            if alias_value is not None:
+                if chosen_value is not None:
+                    raise TypeError(f"Received both {chosen_name!r} and {alias!r}.")
+                chosen_value = alias_value
+                chosen_name = alias
+        return chosen_value
+
+    def _combined_in_proj_bias(self) -> mx.array | None:
+        biases = (self.query_proj.bias, self.key_proj.bias, self.value_proj.bias)
+        if all(bias is None for bias in biases):
+            return None
+        if any(bias is None for bias in biases):
+            raise AssertionError("q/k/v projection biases must be all set or all None.")
+        present = [bias for bias in biases if bias is not None]
+        return _concat(present, axis=0)
+
+    def __call__(
+        self, *args: object, **kwargs: object
+    ) -> mx.array | tuple[mx.array, mx.array | None]:
+        queries = self._pop_alias(kwargs, "queries", "query", "q")
+        keys = self._pop_alias(kwargs, "keys", "key", "k")
+        values = self._pop_alias(kwargs, "values", "value", "v")
+
+        if len(args) > 3:
+            raise TypeError(f"Expected at most 3 positional arrays, got {len(args)}.")
+        if len(args) > 0:
+            if queries is not None:
+                raise TypeError(
+                    "queries was provided both positionally and by keyword."
+                )
+            queries = args[0]
+        if len(args) > 1:
+            if keys is not None:
+                raise TypeError("keys was provided both positionally and by keyword.")
+            keys = args[1]
+        if len(args) > 2:
+            if values is not None:
+                raise TypeError("values was provided both positionally and by keyword.")
+            values = args[2]
+        if queries is None or keys is None or values is None:
+            raise TypeError("queries, keys, and values are required.")
+        queries_a = cast(mx.array, queries)
+        keys_a = cast(mx.array, keys)
+        values_a = cast(mx.array, values)
+
+        attn_mask = cast(mx.array | None, kwargs.pop("attn_mask", None))
+        key_padding_mask = cast(mx.array | None, kwargs.pop("key_padding_mask", None))
+        base_mask = cast(mx.array | None, kwargs.pop("mask", None))
+        need_weights = cast(bool, kwargs.pop("need_weights", False))
+        average_attn_weights = cast(bool, kwargs.pop("average_attn_weights", True))
+        attn_bias = cast(mx.array | None, kwargs.pop("attn_bias", None))
+        is_causal = cast(bool, kwargs.pop("is_causal", False))
+        attn_type = cast(AttentionKind, kwargs.pop("attn_type", self.attn_type))
+        attn_sparsity = float(cast(float, kwargs.pop("attn_sparsity", self.sparsity)))
+        use_fa3 = cast(bool, kwargs.pop("use_fa3", self.use_fa3))
+        if kwargs:
+            names = ", ".join(sorted(str(name) for name in kwargs))
+            raise TypeError(f"Unsupported MultiHeadAttention kwargs: {names}.")
+
+        if is_causal:
+            _raise_attention_unsupported(
+                "sam3_mlx.model.model_misc.MultiheadAttentionWrapper(is_causal=True)",
+                reason="xformers",
+                detail="The MLX wrapper does not implement the official causal branch.",
+            )
+        if attn_type != AttentionType.Vanilla:
+            _raise_attention_unsupported(
+                f"sam3_mlx.model.model_misc.MultiheadAttentionWrapper(attn_type={attn_type!r})",
+                reason="xformers",
+                detail="Non-vanilla attention depends on PyTorch/xformers kernels.",
+            )
+        if attn_sparsity != 0.0:
+            _raise_attention_unsupported(
+                "sam3_mlx.model.model_misc.MultiheadAttentionWrapper(attn_sparsity)",
+                reason="xformers",
+                detail="Sparse attention is not ported to MLX.",
+            )
+        if use_fa3:
+            _raise_attention_unsupported(
+                "sam3_mlx.model.model_misc.MultiheadAttentionWrapper(use_fa3=True)",
+                reason="flash-attn-3",
+                detail="FlashAttention 3 is non-MLX and not ported to MLX.",
+            )
+
+        is_batched = queries_a.ndim == 3
+        if self.batch_first and is_batched:
+            queries_a = mx.transpose(queries_a, axes=(1, 0, 2))
+            keys_a = mx.transpose(keys_a, axes=(1, 0, 2))
+            values_a = mx.transpose(values_a, axes=(1, 0, 2))
+
+        if base_mask is not None:
+            attn_mask = _merge_attention_masks(
+                attn_mask,
+                base_mask,
+                queries_a.dtype,
+                preserve_bool=False,
+            )
+
+        attn_output, attn_output_weights = multi_head_attention_forward(
+            queries_a,
+            keys_a,
+            values_a,
+            self.embed_dim,
+            self.num_heads,
+            in_proj_weight=None,
+            in_proj_bias=self._combined_in_proj_bias(),
+            bias_k=self.bias_k,
+            bias_v=self.bias_v,
+            add_zero_attn=self.add_zero_attn,
+            out_proj_weight=self.out_proj.weight,
+            out_proj_bias=self.out_proj.bias,
+            key_padding_mask=key_padding_mask,
+            need_weights=need_weights,
+            attn_mask=attn_mask,
+            use_separate_proj_weight=True,
+            q_proj_weight=self.query_proj.weight,
+            k_proj_weight=self.key_proj.weight,
+            v_proj_weight=self.value_proj.weight,
+            average_attn_weights=average_attn_weights,
+            is_causal=is_causal,
+            attn_type=attn_type,
+            attn_sparsity=attn_sparsity,
+            attn_bias=attn_bias,
+            use_fa3=use_fa3,
+        )
+        if self.batch_first and is_batched:
+            attn_output = mx.transpose(attn_output, axes=(1, 0, 2))
+        if need_weights:
+            return attn_output, attn_output_weights
+        return attn_output
+
+
+class MultiheadAttention(MultiheadAttentionWrapper):
+    """``MultiheadAttentionWrapper`` plus a ``forward`` alias and no-op ``_reset_parameters``, matching ``torch.nn.MultiheadAttention`` call sites."""
+
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        super().__init__(*args, **kwargs)
+
+    def __setstate__(self, state: Mapping[str, object]) -> None:
+        self.__dict__.update(state)
+
+    def _reset_parameters(self) -> None:
+        return None
+
+    def forward(
+        self, *args: object, **kwargs: object
+    ) -> mx.array | tuple[mx.array, mx.array | None]:
+        return super().__call__(*args, **kwargs)
+
+
+class DotProductScoring(nn.Module):
+    """Score decoder queries against a mean-pooled text prompt by dot product.
+
+    Both sides are projected to ``d_proj``; the score is their dot product scaled by
+    ``d_proj ** -0.5`` and optionally clamped to ``[-clamp_max_val, clamp_max_val]``
+    (which keeps later inverse-sigmoid steps finite).
+    """
+
+    def __init__(
+        self,
+        d_model: int,
+        d_proj: int,
+        prompt_mlp: nn.Module | None = None,
+        clamp_logits: bool = True,
+        clamp_max_val: float = 12.0,
+    ) -> None:
+        super().__init__()
+        self.d_proj = d_proj
+        assert isinstance(prompt_mlp, nn.Module) or prompt_mlp is None
+        self.prompt_mlp = prompt_mlp
+        self.prompt_proj = _as_linear_module(nn.Linear(d_model, d_proj))
+        self.hs_proj = _as_linear_module(nn.Linear(d_model, d_proj))
+        self.scale = float(1.0 / math.sqrt(d_proj))
+        self.clamp_logits = clamp_logits
+        if self.clamp_logits:
+            self.clamp_max_val = clamp_max_val
+
+    def mean_pool_text(self, prompt: mx.array, prompt_mask: mx.array) -> mx.array:
+        """Average ``prompt`` ``(L, B, C)`` over valid tokens into ``(B, C)``.
+
+        ``prompt_mask`` is ``(B, L)`` and True at padding; a row with no valid
+        token yields zeros.
+        """
+        # is_valid has shape (seq, bs, 1): 1 for valid tokens and 0 for padding.
+        is_valid = mx.transpose((~prompt_mask).astype(mx.float32), axes=(1, 0))[
+            ..., None
+        ]
+        num_valid = mx.clip(mx.sum(is_valid, axis=0), 1.0, None)
+        pooled_prompt = mx.sum(prompt * is_valid, axis=0) / num_valid
+        return pooled_prompt
+
+    def forward(
+        self, hs: mx.array, prompt: mx.array, prompt_mask: mx.array
+    ) -> mx.array:
+        """Return per-query scores ``(num_layers, B, num_queries, 1)``.
+
+        ``hs`` is ``(num_layers, B, num_queries, d_model)``, ``prompt`` is
+        ``(L, B, d_model)`` and ``prompt_mask`` is ``(B, L)``, True at padding.
+        """
+        assert hs.ndim == 4 and prompt.ndim == 3 and prompt_mask.ndim == 2
+
+        if self.prompt_mlp is not None:
+            prompt = _as_array_callable(self.prompt_mlp)(prompt)
+
+        pooled_prompt = self.mean_pool_text(prompt, prompt_mask)
+
+        proj_pooled_prompt = self.prompt_proj(pooled_prompt)  # (bs, d_proj)
+        proj_hs = self.hs_proj(hs)  # (num_layer, bs, num_query, d_proj)
+
+        scores = mx.matmul(proj_hs, proj_pooled_prompt[..., None])
+        scores *= self.scale
+
+        # Clamp scores to keep the inverse-sigmoid computation finite.
+        if self.clamp_logits:
+            scores = mx.clip(scores, -self.clamp_max_val, self.clamp_max_val)
+
+        return scores
+
+    def __call__(
+        self, hs: mx.array, prompt: mx.array, prompt_mask: mx.array
+    ) -> mx.array:
+        return self.forward(hs, prompt, prompt_mask)
+
+
+class TransformerWrapper(nn.Module):
+    """Holds an encoder/decoder pair and Glorot-initializes its matrix parameters.
+
+    Parameters whose path contains ``box_embed``, ``query_embed`` or
+    ``reference_points`` keep their original initialization. Only
+    ``two_stage_type="none"`` is supported.
+    """
+
+    def __init__(
+        self,
+        encoder: object | None,
+        decoder: object | None,
+        d_model: int,
+        two_stage_type: str = "none",
+        pos_enc_at_input_dec: bool = True,
+    ) -> None:
+        super().__init__()
+
+        self.encoder = encoder
+        self.decoder = decoder
+        # Real decoders define num_queries; missing attribute fails closed (AttributeError).
+        self.num_queries = (
+            cast(_HasNumQueries, decoder).num_queries if decoder is not None else None
+        )
+        self.pos_enc_at_input_dec = pos_enc_at_input_dec
+
+        assert two_stage_type in ["none"], "unknown param {} of two_stage_type".format(
+            two_stage_type
+        )
+        self.two_stage_type = two_stage_type
+
+        self._reset_parameters()
+        self.d_model = d_model
+
+    def _reset_parameters(self) -> None:
+        def _init_fn(path: object, params: mx.array) -> mx.array:
+            path_s = str(path)
+            if params.ndim > 1:
+                if (
+                    "box_embed" not in path_s
+                    and "query_embed" not in path_s
+                    and "reference_points" not in path_s
+                ):
+                    return _glorot_uniform()(params, 1.0)
+            return params
+
+        module = cast(_ModuleUpdate, self)
+        module.update(_tree_map_with_path(_init_fn, module.parameters()))
+
+
+class MLP(nn.Module):
+    """Multi-layer perceptron (also called FFN)."""
+
+    def __init__(
+        self,
+        input_dim: int,
+        hidden_dim: int,
+        output_dim: int,
+        num_layers: int,
+        residual: bool = False,
+        out_norm: nn.Module | None = None,
+    ) -> None:
+        super().__init__()
+        self.num_layers = num_layers
+        h = [hidden_dim] * (num_layers - 1)
+        self.layers: list[_LinearModule] = [
+            _as_linear_module(nn.Linear(n, k))
+            for n, k in zip([input_dim] + h, h + [output_dim])
+        ]
+        self.drop = _as_array_callable(nn.Identity())
+        if residual and input_dim != output_dim:
+            raise ValueError("residual is only supported if input_dim == output_dim")
+        self.residual = residual
+        assert isinstance(out_norm, nn.Module) or out_norm is None
+        self.out_norm = (
+            _as_array_callable(out_norm)
+            if out_norm is not None
+            else _as_array_callable(nn.Identity())
+        )
+        self.act = _as_array_callable(nn.ReLU())
+
+    def forward(self, x: mx.array) -> mx.array:
+        orig_x = x
+        for i, layer in enumerate(self.layers):
+            x = self.drop(self.act(layer(x))) if i < self.num_layers - 1 else layer(x)
+        if self.residual:
+            x = x + orig_x
+        x = self.out_norm(x)
+        return x
+
+    def __call__(self, x: mx.array) -> mx.array:
+        return self.forward(x)
+
+
+class Mlp(nn.Module):
+    """Two-layer feed-forward block following timm's ``Mlp`` layout (``fc1``, ``act``, ``norm``, ``fc2``).
+
+    ``drop`` is accepted for signature compatibility; no dropout is applied
+    (inference only).
+    """
+
+    # ViT MLP block shape follows timm Mlp semantics.
+    def __init__(
+        self,
+        in_features: int,
+        hidden_features: int | None = None,
+        out_features: int | None = None,
+        act_layer: _ActFactory | type[nn.Module] = nn.GELU,
+        norm_layer: _NormFactory | type[nn.Module] | None = None,
+        bias: bool | tuple[bool, bool] = True,
+        drop: float | tuple[float, float] = 0.0,
+        use_conv: bool = False,
+    ) -> None:
+        super().__init__()
+        out_features = out_features or in_features
+        hidden_features = hidden_features or in_features
+        bias_pair: tuple[bool, bool] = bias if isinstance(bias, tuple) else (bias, bias)
+        drop_probs: tuple[float, float] = (
+            drop if isinstance(drop, tuple) else (drop, drop)
+        )
+        if use_conv:
+            linear_layer: _LinearFactory = cast(
+                _LinearFactory, partial(nn.Conv2d, kernel_size=1)
+            )
+        else:
+            linear_layer = cast(_LinearFactory, nn.Linear)
+
+        self.fc1 = linear_layer(in_features, hidden_features, bias=bias_pair[0])
+        self.act = _as_array_callable(cast(_ActFactory, act_layer)())
+        self.drop1 = (
+            _as_array_callable(nn.Identity())
+            if drop_probs[0] == 0
+            else _as_array_callable(nn.Identity())
+        )
+        if norm_layer is not None:
+            self.norm = _as_array_callable(
+                cast(_NormFactory, norm_layer)(hidden_features)
+            )
+        else:
+            self.norm = _as_array_callable(nn.Identity())
+        self.fc2 = linear_layer(hidden_features, out_features, bias=bias_pair[1])
+        self.drop2 = (
+            _as_array_callable(nn.Identity())
+            if drop_probs[1] == 0
+            else _as_array_callable(nn.Identity())
+        )
+
+    def __call__(self, x: mx.array) -> mx.array:
+        x = self.fc1(x)
+        x = self.act(x)
+        x = self.drop1(x)
+        x = self.norm(x)
+        x = self.fc2(x)
+        x = self.drop2(x)
+        return x
+
+
+class LayerScale(nn.Module):
+    """Multiply the last axis by a per-channel ``gamma`` initialized to ``init_values``."""
+
+    def __init__(
+        self,
+        dim: int,
+        init_values: float | mx.array = 1e-5,
+        inplace: bool = False,
+    ) -> None:
+        super().__init__()
+        self.inplace = inplace
+        self.gamma = init_values * mx.ones(dim)
+
+    def forward(self, x: mx.array) -> mx.array:
+        # MLX arrays are immutable; keep the flag for PyTorch API compatibility.
+        # Both paths return a new array.
+        return x * self.gamma
+
+    def __call__(self, x: mx.array) -> mx.array:
+        return self.forward(x)
+
+
+class LayerNorm2d(nn.Module):
+    """LayerNorm over the channel axis of NCHW input ``(B, C, H, W)``."""
+
+    def __init__(self, num_channels: int, eps: float = 1e-6) -> None:
+        super().__init__()
+        self.weight = mx.ones((num_channels,))
+        self.bias = mx.zeros((num_channels,))
+        self.eps = eps
+
+    def forward(self, x: mx.array) -> mx.array:
+        u = mx.mean(x, axis=1, keepdims=True)
+        s = mx.mean((x - u) ** 2, axis=1, keepdims=True)
+        x = (x - u) / mx.sqrt(s + self.eps)
+        return self.weight[None, :, None, None] * x + self.bias[None, :, None, None]
+
+    def __call__(self, x: mx.array) -> mx.array:
+        return self.forward(x)
+
+
+def get_clones(module: CloneableModule[_ModuleT], N: int) -> list[_ModuleT]:
+    """Return ``N`` independent copies of a module (deep copy) or outputs of a zero-argument factory.
+
+    Raises:
+        TypeError: If ``module`` is neither an MLX module nor callable.
+    """
+    if isinstance(module, nn.Module):
+        return [cast(_ModuleT, deepcopy(module)) for _ in range(N)]
+    if callable(module):
+        return [module() for _ in range(N)]
+    raise TypeError(
+        "get_clones expects an MLX module instance or zero-argument factory."
+    )
+
+
+def get_activation_fn(activation: str) -> _ActivationFn:
+    """Return an activation function given a string"""
+    if activation == "relu":
+        return cast(_ActivationFn, getattr(nn, "relu"))
+    if activation == "gelu":
+        return cast(_ActivationFn, getattr(nn, "gelu"))
+    if activation == "glu":
+        return cast(_ActivationFn, getattr(nn, "glu"))
+    raise RuntimeError(f"activation should be relu/gelu, not {activation}.")
+
+
+class _GLUModule(nn.Module):
+    def __call__(self, x: mx.array) -> mx.array:
+        return cast(_ActivationFn, getattr(nn, "glu"))(x)
+
+
+def get_activation_module(activation: str) -> type[nn.Module]:
+    """Return an activation module class given a string."""
+    if activation == "relu":
+        return nn.ReLU
+    if activation == "gelu":
+        return nn.GELU
+    if activation == "glu":
+        return cast(type[nn.Module], getattr(nn, "GLU", _GLUModule))
+    raise RuntimeError(f"activation should be relu/gelu, not {activation}.")
+
+
+def get_valid_ratio(mask: mx.array) -> mx.array:
+    """Return the unpadded fraction of each image as ``(B, 2)`` = (width, height) ratios.
+
+    ``mask`` is ``(B, H, W)`` and True at padding; the valid extent is read from the
+    first column and first row.
+    """
+    _, H, W = mask.shape
+    valid_H = mx.sum(~mask[:, :, 0], 1)
+    valid_W = mx.sum(~mask[:, 0, :], 1)
+    valid_ratio_h = valid_H.astype(mx.float32) / H
+    valid_ratio_w = valid_W.astype(mx.float32) / W
+    valid_ratio = _stack([valid_ratio_w, valid_ratio_h], -1)
+    return valid_ratio
+
+
+def gen_sineembed_for_position(pos_array: mx.array, num_feats: int = 256) -> mx.array:
+    """Sine embedding of normalized box coordinates.
+
+    ``pos_array`` is ``(N, B, 2)`` as (x, y) or ``(N, B, 4)`` as (x, y, w, h),
+    with values normalized to [0, 1] (multiplied by 2 pi here). Returns
+    ``(N, B, num_feats)`` for two coordinates or ``(N, B, 2 * num_feats)`` for four,
+    ordered (y, x[, w, h]).
+
+    Raises:
+        ValueError: If the last axis is not 2 or 4.
+    """
+    assert num_feats % 2 == 0
+    num_feats = num_feats // 2
+
+    scale = 2 * math.pi
+    dim_t = mx.arange(num_feats, dtype=mx.float32)
+    dim_t = 10000 ** (2 * mx.floor(mx.divide(dim_t, 2)) / num_feats)
+    x_embed = pos_array[:, :, 0] * scale
+    y_embed = pos_array[:, :, 1] * scale
+    pos_x = x_embed[:, :, None] / dim_t
+    pos_y = y_embed[:, :, None] / dim_t
+    pos_x = mx.flatten(
+        _stack([mx.sin(pos_x[:, :, 0::2]), mx.cos(pos_x[:, :, 1::2])], axis=3),
+        start_axis=2,
+    )
+    pos_y = mx.flatten(
+        _stack([mx.sin(pos_y[:, :, 0::2]), mx.cos(pos_y[:, :, 1::2])], axis=3),
+        start_axis=2,
+    )
+    if pos_array.shape[-1] == 2:
+        pos = _concat([pos_y, pos_x], axis=2)
+    elif pos_array.shape[-1] == 4:
+        w_embed = pos_array[:, :, 2] * scale
+        pos_w = w_embed[:, :, None] / dim_t
+        pos_w = mx.flatten(
+            _stack([mx.sin(pos_w[:, :, 0::2]), mx.cos(pos_w[:, :, 1::2])], axis=3),
+            start_axis=2,
+        )
+
+        h_embed = pos_array[:, :, 3] * scale
+        pos_h = h_embed[:, :, None] / dim_t
+        pos_h = mx.flatten(
+            _stack([mx.sin(pos_h[:, :, 0::2]), mx.cos(pos_h[:, :, 1::2])], axis=3),
+            start_axis=2,
+        )
+
+        pos = _concat([pos_y, pos_x, pos_w, pos_h], axis=2)
+    else:
+        raise ValueError("Unknown pos_tensor shape(-1):{}".format(pos_array.shape[-1]))
+    return pos
+
+
+class SAM3Output:
+    """Coherent SAM3 output container with selectable iteration modes.
+
+    List-like (append/iter/getitem/len) but intentionally not a list subclass.
+    """
+
+    class IterMode(Enum):
+        """How iteration, indexing and ``len`` view the stage/step nesting.
+
+        ``ALL_STEPS_PER_STAGE`` yields each stage's list of steps,
+        ``LAST_STEP_PER_STAGE`` yields the last step of every stage and
+        ``FLATTENED`` yields every step of every stage in order.
+        """
+
+        ALL_STEPS_PER_STAGE = auto()
+        LAST_STEP_PER_STAGE = auto()
+        FLATTENED = auto()
+
+    def __init__(
+        self,
+        output: Sam3NestedOutput | None = None,
+        iter_mode: IterMode = IterMode.ALL_STEPS_PER_STAGE,
+        loss_stages: list[int] | None = None,
+    ) -> None:
+        if output is not None:
+            assert (
+                isinstance(output, list)
+                and len(output) > 0
+                and isinstance(output[0], list)
+            ), "Expected output to be a list of lists"
+            self.output: Sam3NestedOutput = output
+        else:
+            self.output = []
+        assert isinstance(iter_mode, SAM3Output.IterMode), (
+            f"iter_mode should be of enum type 'SAM3Output.IterMode'. Got {type(iter_mode)}"
+        )
+        self.iter_mode = iter_mode
+        self.loss_stages = loss_stages
+        self_ref = weakref.ref(self)
+
+        def _all_steps() -> Iterator[Sam3StageSteps]:
+            current = self_ref()
+            if current is None:
+                return iter(())
+            return iter(current.output)
+
+        def _last_steps() -> Iterator[Sam3StepDict]:
+            current = self_ref()
+            if current is None:
+                return
+            for inner_list in current.output:
+                yield inner_list[-1]
+
+        def _flattened() -> Iterator[Sam3StepDict]:
+            current = self_ref()
+            if current is None:
+                return
+            for inner_list in current.output:
+                yield from inner_list
+
+        self._mode2iter: dict[
+            SAM3Output.IterMode,
+            Callable[[], Iterator[Sam3StageSteps] | Iterator[Sam3StepDict]],
+        ] = {
+            SAM3Output.IterMode.ALL_STEPS_PER_STAGE: _all_steps,
+            SAM3Output.IterMode.LAST_STEP_PER_STAGE: _last_steps,
+            SAM3Output.IterMode.FLATTENED: _flattened,
+        }
+
+    def __iter__(self) -> Iterator[Sam3StageSteps] | Iterator[Sam3StepDict]:
+        return self._mode2iter[self.iter_mode]()
+
+    def __getitem__(self, index: int) -> Sam3StageSteps | Sam3StepDict:
+        assert isinstance(index, int), f"index should be an integer. Got {type(index)}"
+        if self.iter_mode == SAM3Output.IterMode.ALL_STEPS_PER_STAGE:
+            return self.output[index]
+        if self.iter_mode == SAM3Output.IterMode.LAST_STEP_PER_STAGE:
+            return self.output[index][-1]
+        if index == -1:
+            return self.output[-1][-1]
+        flattened_output: Sam3StageSteps = []
+        for stage in self.output:
+            flattened_output.extend(stage)
+        return flattened_output[index]
+
+    class _IterationMode:
+        def __init__(
+            self, model_output: SAM3Output, iter_mode: SAM3Output.IterMode
+        ) -> None:
+            self._model_output = model_output
+            self._orig_iter_mode = model_output.iter_mode
+            self._new_iter_mode = iter_mode
+
+        def __enter__(self) -> SAM3Output:
+            self._model_output.iter_mode = self._new_iter_mode
+            return self._model_output
+
+        def __exit__(
+            self,
+            exc_type: type[BaseException] | None,
+            exc_value: BaseException | None,
+            traceback: TracebackType | None,
+        ) -> None:
+            self._model_output.iter_mode = self._orig_iter_mode
+
+    @staticmethod
+    def iteration_mode(
+        model_output: SAM3Output, iter_mode: SAM3Output.IterMode
+    ) -> SAM3Output._IterationMode:
+        return SAM3Output._IterationMode(model_output=model_output, iter_mode=iter_mode)
+
+    def append(self, item: Sam3StageSteps) -> None:
+        assert isinstance(item, list), (
+            f"Only list items are supported. Got {type(item)}"
+        )
+        self.output.append(item)
+
+    def __repr__(self) -> str:
+        return self.output.__repr__()
+
+    def __len__(self) -> int:
+        if self.iter_mode in (
+            SAM3Output.IterMode.ALL_STEPS_PER_STAGE,
+            SAM3Output.IterMode.LAST_STEP_PER_STAGE,
+        ):
+            return len(self.output)
+        flattened_len = 0
+        for stage in self.output:
+            flattened_len += len(stage)
+        return flattened_len

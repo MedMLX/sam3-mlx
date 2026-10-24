@@ -1,0 +1,56 @@
+{
+  "arrays": {
+    "roi_align_output": {
+      "allow_inf": false,
+      "allow_nan": false,
+      "atol": 1e-06,
+      "dtype": "float32",
+      "finite": true,
+      "rtol": 1e-05,
+      "shape": [
+        null,
+        null,
+        null,
+        null
+      ]
+    }
+  },
+  "description": "TorchVision ROI Align differential contract for finite feature maps and finite ROI coordinates.",
+  "precision_policies": {
+    "bf16": {
+      "atol": 0.03,
+      "candidate_dtype": "bfloat16",
+      "note": "TorchVision CPU has no BF16 ROI Align kernel; compare MLX BF16 with a TorchVision FP32 oracle fed BF16-quantized inputs and coordinates.",
+      "oracle_dtype": "float32",
+      "rtol": 0.03
+    },
+    "fp16": {
+      "atol": 0.005,
+      "candidate_dtype": "float16",
+      "note": "Compare native MLX and TorchVision CPU FP16 outputs after FP32 host export.",
+      "oracle_dtype": "float16",
+      "rtol": 0.005
+    },
+    "fp32": {
+      "atol": 1e-05,
+      "candidate_dtype": "float32",
+      "note": "Pathological fuzz budget, including extreme coordinates; ordinary deterministic cases retain the stricter arrays.roi_align_output budget.",
+      "oracle_dtype": "float32",
+      "rtol": 1e-05
+    }
+  },
+  "reference": {
+    "implementation": "torchvision.ops.roi_align",
+    "supported_oracle": {
+      "torch": "2.13.0",
+      "torchvision": "0.28.0"
+    }
+  },
+  "required_arrays": [
+    "roi_align_output"
+  ],
+  "required_finite_arrays": [
+    "roi_align_output"
+  ],
+  "schema_version": "sam3_mlx.roi_align_numeric_contract.v2"
+}

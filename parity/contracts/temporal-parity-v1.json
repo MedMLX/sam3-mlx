@@ -1,0 +1,26 @@
+{
+  "checkpoint": {
+    "filename": "sam3.1_multiplex.pt",
+    "repo": "facebook/sam3.1",
+    "revision": "daa63191845a41281374e725f4c9e51c7a824460"
+  },
+  "identity_contract": "semantic prompt IDs and prompt lineage; no per-frame optimal rematching",
+  "numeric_contract": {
+    "invalid_output": "Raise ValueError; never report passing parity for invalid arrays.",
+    "logit_mean": "Finite when present.",
+    "masks": "Finite boolean or numeric 0/1 arrays; validate before boolean conversion. Per-track shape (H, W), backend shape (N, H, W).",
+    "scores": "Finite values; NaN and infinity are rejected before evaluation or archival."
+  },
+  "official_code": {
+    "repo": "https://github.com/facebookresearch/sam3.git",
+    "revision": "2814fa619404a722d03e9a012e083e4f293a4e53"
+  },
+  "schema_version": 1,
+  "thresholds": {
+    "boundary_f1_min": 0.9,
+    "dice_min": 0.97,
+    "identity_errors_max": 0,
+    "iou_min": 0.95,
+    "presence_agreement_required": true
+  }
+}

@@ -1,0 +1,1629 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates. All Rights Reserved
+
+"""Promptable concept segmentation (PCS) image model: the Sam3Image detector.
+
+``Sam3Image`` combines a vision-language backbone, a fusion encoder, a DETR-style
+decoder with a presence token, a box/score head and an optional mask head. Layout
+conventions used throughout:
+
+- Backbone feature maps are NCHW. Before the transformer they are flattened to
+  sequence-first ``(H*W, B, C)`` lists, one entry per feature level.
+- Prompt tokens are sequence-first ``(P, B, C)`` with a batch-first boolean mask
+  ``(B, P)`` where True marks padding.
+- Predicted boxes are normalized (cx, cy, w, h) in [0, 1] (and (x0, y0, x1, y1) in
+  ``pred_boxes_xyxy``), relative to the model input image.
+- Scores and mask values are logits unless stated otherwise.
+
+The class also exposes SAM1-style interactive prediction (``predict_inst``) through
+an attached ``SAM3InteractiveImagePredictor``.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Callable, Mapping, Sequence
+from copy import deepcopy
+from dataclasses import dataclass
+from typing import Literal, NoReturn, NotRequired, Protocol, TypedDict, cast, overload
+import mlx.core as mx
+from mlx import nn
+import numpy as np
+
+from sam3_mlx._unsupported import raise_unsupported
+from sam3_mlx.mlx_runtime import to_numpy
+from sam3_mlx.precision import PrecisionPolicy
+from sam3_mlx.model import box_ops
+from sam3_mlx.model.data_misc import BatchedDatapoint, FindStage
+from sam3_mlx.model.geometry_encoders import Prompt
+from sam3_mlx.model.model_misc import (
+    SAM3Output, Sam3StepDict, inverse_sigmoid, joint_box_logits,
+)
+
+
+class _ArrayCallable(Protocol):
+    def __call__(self, value: mx.array) -> mx.array: ...
+
+
+class _ArrayTransforms(Protocol):
+    def reshape(self, *shape: int) -> mx.array: ...
+
+    def swapaxes(self, axis1: int, axis2: int) -> mx.array: ...
+
+    def transpose(self, *axes: int) -> mx.array: ...
+
+
+class _BoxConverter(Protocol):
+    def __call__(self, value: mx.array) -> mx.array: ...
+
+
+class _Backbone(Protocol):
+    def forward_image(self, samples: object) -> BackboneOutput: ...
+
+    def forward_text(
+        self,
+        captions: object,
+        input_boxes: object | None = None,
+        additional_text: object | None = None,
+        device: str | None = None,
+    ) -> dict[str, mx.array]: ...
+
+
+class _MaskEncoder(Protocol):
+    @property
+    def mask_downsampler(self) -> _ArrayCallable: ...
+
+
+class _GeometryEncoder(Protocol):
+    @property
+    def mask_encoder(self) -> _MaskEncoder: ...
+
+    def __call__(
+        self,
+        *,
+        geo_prompt: Prompt,
+        img_feats: Sequence[mx.array],
+        img_sizes: Sequence[tuple[int, int]],
+        img_pos_embeds: Sequence[mx.array],
+    ) -> tuple[mx.array, mx.array]: ...
+
+
+class _EncoderMemory(TypedDict):
+    memory: mx.array
+    memory_text: NotRequired[mx.array]
+    pos_embed: mx.array
+    padding_mask: mx.array | None
+    level_start_index: mx.array
+    spatial_shapes: mx.array
+    valid_ratios: mx.array
+
+
+class EncoderOutput(TypedDict):
+    """Fusion-encoder result plus the prompt tokens it was conditioned on.
+
+    ``encoder_hidden_states`` and ``pos_embed`` are sequence-first
+    ``(sum_i H_i*W_i, B, C)`` over the flattened feature levels. ``level_start_index``
+    ``(n_levels,)``, ``spatial_shapes`` ``(n_levels, 2)`` and ``valid_ratios``
+    ``(B, n_levels, 2)`` describe that flattening, and ``vis_feat_sizes`` lists the
+    ``(H, W)`` of each level. ``prompt_before_enc`` / ``prompt_after_enc`` are
+    ``(P, B, C)`` prompt tokens before and after the encoder, and ``prompt_mask`` is
+    ``(B, P)`` with True at padding.
+    """
+
+    encoder_hidden_states: mx.array
+    pos_embed: mx.array
+    padding_mask: mx.array | None
+    level_start_index: mx.array
+    spatial_shapes: mx.array
+    valid_ratios: mx.array
+    vis_feat_sizes: list[tuple[int, int]]
+    prompt_before_enc: mx.array
+    prompt_after_enc: mx.array
+    prompt_mask: mx.array
+
+
+class _Encoder(Protocol):
+    def __call__(
+        self,
+        *,
+        src: list[mx.array],
+        src_key_padding_mask: list[mx.array | None] | None,
+        src_pos: list[mx.array],
+        prompt: mx.array,
+        prompt_pos: mx.array,
+        prompt_key_padding_mask: mx.array,
+        feat_sizes: list[tuple[int, int]],
+        encoder_extra_kwargs: Mapping[str, object] | None,
+    ) -> _EncoderMemory: ...
+
+
+class _Embedding(Protocol):
+    @property
+    def weight(self) -> mx.array: ...
+
+
+class _Decoder(Protocol):
+    @property
+    def num_queries(self) -> int: ...
+
+    @property
+    def query_embed(self) -> _Embedding: ...
+
+    @property
+    def bbox_embed(self) -> _ArrayCallable: ...
+
+    @property
+    def instance_bbox_embed(self) -> _ArrayCallable | None: ...
+
+    def __call__(
+        self,
+        *,
+        tgt: mx.array,
+        memory: mx.array,
+        memory_key_padding_mask: mx.array | None,
+        pos: mx.array,
+        reference_boxes: mx.array | None,
+        level_start_index: mx.array,
+        spatial_shapes: mx.array,
+        valid_ratios: mx.array,
+        tgt_mask: mx.array | None,
+        memory_text: mx.array,
+        text_attention_mask: mx.array,
+    ) -> tuple[mx.array, mx.array, mx.array | None, mx.array | None]: ...
+
+
+class _Transformer(Protocol):
+    @property
+    def d_model(self) -> int: ...
+
+    @property
+    def encoder(self) -> _Encoder: ...
+
+    @property
+    def decoder(self) -> _Decoder: ...
+
+
+class _Scorer(Protocol):
+    def __call__(
+        self, hs: mx.array, prompt: mx.array, prompt_mask: mx.array
+    ) -> mx.array: ...
+
+
+class _SegmentationHead(Protocol):
+    @property
+    def instance_keys(self) -> Sequence[str]: ...
+
+    def __call__(
+        self, *args: object, **kwargs: object
+    ) -> dict[str, mx.array | None]: ...
+
+
+class ImagePromptIndices(Protocol):
+    @property
+    def img_ids(self) -> mx.array: ...
+
+    @property
+    def text_ids(self) -> mx.array: ...
+
+
+@dataclass(frozen=True)
+class _ImagePromptIndices:
+    img_ids: mx.array
+    text_ids: mx.array
+
+
+def image_prompt_indices(find_stage: FindStage) -> ImagePromptIndices:
+    """Return the ``img_ids`` / ``text_ids`` index arrays of a find stage.
+
+    Raises:
+        TypeError: If either field is not an MLX array.
+    """
+    img_ids = find_stage.img_ids
+    text_ids = find_stage.text_ids
+    if not isinstance(img_ids, mx.array):
+        raise TypeError("Image prompt img_ids must be an MLX array.")
+    if not isinstance(text_ids, mx.array):
+        raise TypeError("Image prompt text_ids must be an MLX array.")
+    return _ImagePromptIndices(img_ids=img_ids, text_ids=text_ids)
+
+
+class FindInput(ImagePromptIndices, Protocol):
+    @property
+    def input_boxes(self) -> mx.array: ...
+
+    @property
+    def input_boxes_mask(self) -> mx.array: ...
+
+    @property
+    def input_boxes_label(self) -> mx.array: ...
+
+    @property
+    def input_points(self) -> mx.array | None: ...
+
+    @property
+    def input_boxes_before_embed(self) -> mx.array | None: ...
+
+    @property
+    def input_points_before_embed(self) -> mx.array | None: ...
+
+    @property
+    def input_points_mask(self) -> mx.array | None: ...
+
+
+class _FindTarget(Protocol):
+    @property
+    def boxes(self) -> mx.array: ...
+
+    @property
+    def boxes_padded(self) -> mx.array: ...
+
+    @property
+    def num_boxes(self) -> mx.array: ...
+
+    @property
+    def segments(self) -> mx.array | None: ...
+
+    @property
+    def semantic_segments(self) -> mx.array | None: ...
+
+    @property
+    def is_valid_segment(self) -> mx.array | None: ...
+
+    @property
+    def is_exhaustive(self) -> mx.array: ...
+
+    @property
+    def object_ids(self) -> mx.array: ...
+
+    @property
+    def object_ids_padded(self) -> mx.array: ...
+
+
+class _Datapoint(Protocol):
+    @property
+    def img_batch(self) -> mx.array | list[object]: ...
+
+    @property
+    def find_text_batch(self) -> Sequence[str]: ...
+
+    @property
+    def find_inputs(self) -> Sequence[FindInput]: ...
+
+    @property
+    def find_targets(self) -> Sequence[_FindTarget]: ...
+
+
+class _InteractiveBackboneModel(Protocol):
+    @property
+    def no_mem_embed(self) -> mx.array: ...
+
+    def _prepare_backbone_features(
+        self, backbone_out: Mapping[str, object]
+    ) -> tuple[object, list[mx.array], object, object]: ...
+
+
+class _PredictorFeatures(TypedDict):
+    image_embed: mx.array
+    high_res_feats: list[mx.array]
+
+
+class _InteractivePredictor(Protocol):
+    @property
+    def model(self) -> _InteractiveBackboneModel: ...
+
+    @property
+    def _bb_feat_sizes(self) -> list[tuple[int, int]]: ...
+
+    @property
+    def _features(self) -> Mapping[str, object] | None: ...
+
+    @property
+    def _is_image_set(self) -> bool: ...
+
+    @property
+    def _is_batch(self) -> bool: ...
+
+    @property
+    def _orig_hw(self) -> list[tuple[int, int]]: ...
+
+    def predict(
+        self, **kwargs: object
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]: ...
+
+    def predict_batch(
+        self, *args: object, **kwargs: object
+    ) -> tuple[list[np.ndarray], list[np.ndarray], list[np.ndarray]]: ...
+
+
+class _FeatureWrapper(Protocol):
+    """Structural view of the repository's NestedTensor feature wrapper."""
+
+    tensors: mx.array
+    mask: mx.array | None
+
+
+class _IndexableBatch(Protocol):
+    def __len__(self) -> int: ...
+
+    def __getitem__(self, index: int) -> object: ...
+
+
+Feature = mx.array | _FeatureWrapper
+
+
+class BackboneOutput(TypedDict, total=False):
+    """Heterogeneous image/text backbone fields consumed by Sam3Image.
+
+    ``backbone_fpn`` and ``vision_pos_enc`` are lists of NCHW feature maps and
+    position encodings, one per level. ``id_mapping`` maps a requested image id to its
+    row in those lists (-1 for images that were not encoded). ``language_features`` is
+    sequence-first ``(L, T, C)`` over ``T`` text prompts and ``language_mask`` is
+    ``(T, L)`` with True at padding.
+    """
+
+    img_batch_all_stages: object
+    backbone_fpn: list[Feature]
+    vision_pos_enc: list[mx.array]
+    id_mapping: mx.array | None
+    language_features: mx.array
+    language_mask: mx.array
+
+
+class _PrecomputedBackboneOutput(TypedDict):
+    backbone_fpn: list[Feature]
+    vision_pos_enc: list[mx.array]
+    id_mapping: NotRequired[mx.array | None]
+
+
+class _LanguageBackboneOutput(TypedDict):
+    language_features: mx.array
+    language_mask: mx.array
+
+
+ImageFeatures = tuple[
+    BackboneOutput,
+    list[mx.array],
+    list[mx.array],
+    list[tuple[int, int]],
+]
+
+
+class _PreviousEncoderOutput(TypedDict):
+    encoder_out: EncoderOutput
+    backbone_out: BackboneOutput
+
+
+class Output(dict[str, object]):
+    """Model output dictionary (``pred_logits``, ``pred_boxes``, ``pred_masks``, ...).
+
+    A plain ``dict`` whose only addition is a typed ``prev_encoder_out`` lookup.
+    """
+
+    @overload
+    def __getitem__(
+        self, key: Literal["prev_encoder_out"]
+    ) -> _PreviousEncoderOutput: ...
+
+    @overload
+    def __getitem__(self, key: str) -> object: ...
+
+    def __getitem__(self, key: str) -> object:
+        return super().__getitem__(key)
+
+
+class RawPrediction(TypedDict):
+    """Fixed-shape detector outputs before score filtering or mask upsampling.
+
+    With ``Q`` queries and a batch of ``B``: ``pred_logits`` is ``(B, Q, 1)`` class
+    logits (combine with ``presence_logit_dec`` through ``joint_box_logits`` for the
+    official joint score), ``pred_boxes`` is ``(B, Q, 4)`` normalized (cx, cy, w, h),
+    ``pred_boxes_xyxy`` the same boxes as (x0, y0, x1, y1), ``pred_masks`` is
+    ``(B, Q, H, W)`` mask logits on the highest-resolution retained FPN grid,
+    ``presence_logit_dec`` is the ``(B, 1)`` image-level presence logit and
+    ``semantic_seg`` is ``(B, 1, H, W)`` logits.
+    """
+
+    pred_logits: mx.array
+    pred_boxes: mx.array
+    pred_masks: mx.array
+    presence_logit_dec: mx.array
+    pred_boxes_xyxy: NotRequired[mx.array]
+    semantic_seg: NotRequired[mx.array]
+
+
+class _MlxCompile(Protocol):
+    def __call__(
+        self,
+        function: Callable[
+            ..., tuple[mx.array, mx.array, mx.array, mx.array, mx.array]
+        ],
+        *,
+        inputs: object,
+    ) -> Callable[..., tuple[mx.array, mx.array, mx.array, mx.array, mx.array]]: ...
+
+
+_mlx_compile = cast(_MlxCompile, getattr(mx, "compile"))
+
+
+def raw_prediction_from_output(out: Mapping[str, object]) -> RawPrediction:
+    """Select the ``RawPrediction`` fields from a full model output.
+
+    Raises:
+        KeyError: If the mask head did not run (no ``pred_masks``) or another
+            required field is missing.
+    """
+    required = ("pred_logits", "pred_boxes", "pred_masks", "presence_logit_dec")
+    missing = [key for key in required if key not in out]
+    if missing:
+        raise KeyError(
+            "predict_raw requires pred_logits, pred_boxes, pred_masks, and "
+            f"presence_logit_dec; missing {missing}. Build with "
+            "enable_segmentation=True."
+        )
+    raw: RawPrediction = {
+        "pred_logits": cast(mx.array, out["pred_logits"]),
+        "pred_boxes": cast(mx.array, out["pred_boxes"]),
+        "pred_masks": cast(mx.array, out["pred_masks"]),
+        "presence_logit_dec": cast(mx.array, out["presence_logit_dec"]),
+    }
+    boxes_xyxy = out.get("pred_boxes_xyxy")
+    if isinstance(boxes_xyxy, mx.array):
+        raw["pred_boxes_xyxy"] = boxes_xyxy
+    semantic_seg = out.get("semantic_seg")
+    if isinstance(semantic_seg, mx.array):
+        raw["semantic_seg"] = semantic_seg
+    return raw
+
+
+def grounding_compile_key(
+    *,
+    dtype: mx.Dtype,
+    feat_shape: tuple[int, ...],
+    prompt_shape: tuple[int, ...],
+    prompt_mask_shape: tuple[int, ...],
+    vis_feat_sizes: Sequence[tuple[int, int]],
+    fpn_shapes: Sequence[tuple[int, ...]],
+    batch_size: int,
+) -> tuple[object, ...]:
+    """Build the hashable cache key identifying one compiled grounding graph.
+
+    ``mx.compile`` specializes on shapes and dtype, so one compiled function is kept
+    per distinct combination of these values.
+    """
+    from sam3_mlx.precision import dtype_name
+
+    return (
+        dtype_name(dtype),
+        tuple(int(dim) for dim in feat_shape),
+        tuple(int(dim) for dim in prompt_shape),
+        tuple(int(dim) for dim in prompt_mask_shape),
+        tuple((int(height), int(width)) for height, width in vis_feat_sizes),
+        tuple(tuple(int(dim) for dim in shape) for shape in fpn_shapes),
+        int(batch_size),
+    )
+
+
+ArrayInput = (
+    mx.array | np.ndarray | int | float | bool | list[object] | tuple[object, ...]
+)
+
+
+_box_cxcywh_to_xyxy = cast(_BoxConverter, getattr(box_ops, "box_cxcywh_to_xyxy"))
+
+
+def _feature_tensor(value: Feature) -> mx.array:
+    if isinstance(value, mx.array):
+        return value
+    return value.tensors
+
+
+def _array_transforms(value: mx.array) -> _ArrayTransforms:
+    return cast(_ArrayTransforms, value)
+
+
+def _raise_image_unsupported(
+    feature: str,
+    *,
+    reason: str,
+    detail: str,
+    alternative: str | None = None,
+) -> NoReturn:
+    raise_unsupported(
+        feature,
+        reason=reason,
+        detail=detail,
+        alternative=alternative,
+    )
+
+
+def _to_index_list(value: mx.array) -> list[int]:
+    values = np.asarray(to_numpy(value), dtype=np.int64).reshape(-1)
+    return [int(item) for item in values]
+
+
+def _update_out(
+    out: Output, out_name: str, out_value: mx.array, auxiliary: bool = True
+) -> None:
+    out[out_name] = out_value[-1] if auxiliary else out_value
+
+
+class Sam3ImageOptions(TypedDict, total=False):
+    """Optional image-model settings shared by video detector constructors."""
+
+    segmentation_head: object | None
+    num_feature_levels: int
+    dot_prod_scoring: _Scorer | None
+    use_instance_query: bool
+    multimask_output: bool
+    interactivity_in_encoder: bool
+    use_dot_prod_scoring: bool
+    supervise_joint_box_scores: bool
+    separate_scorer_for_instance: bool
+    num_interactive_steps_val: int
+    inst_interactive_predictor: object | None
+    compile_grounding: bool
+
+
+class Sam3Image(nn.Module):
+    """SAM 3 detector for text, box and exemplar-prompted concept segmentation.
+
+    Args:
+        backbone: Vision-language backbone with ``forward_image`` and ``forward_text``.
+        transformer: Fusion encoder and decoder pair with ``d_model``.
+        input_geometry_encoder: Encoder turning box prompts into prompt tokens.
+        segmentation_head: Mask head. Without it the model returns no
+            ``pred_masks`` and ``predict_raw`` raises ``KeyError``.
+        num_feature_levels: Number of trailing backbone FPN levels fed to the
+            transformer encoder.
+        dot_prod_scoring: Prompt-conditioned scorer, required with
+            ``use_dot_prod_scoring``.
+        use_instance_query: Stored for builder compatibility; not read by this class.
+        multimask_output: In ``forward``, keep only the highest-scoring query's
+            outputs and move the full set under ``multi_*`` keys.
+        interactivity_in_encoder: Stored for builder compatibility; not read by this
+            class.
+        use_dot_prod_scoring: Score queries against the prompt instead of a plain
+            linear ``class_embed`` head.
+        supervise_joint_box_scores: Fold the presence logit into ``pred_logits``.
+        separate_scorer_for_instance: Use a separate scorer/head for instance prompts.
+        num_interactive_steps_val: Must be 0; validation-time interactive prompt
+            sampling is not implemented.
+        inst_interactive_predictor: Optional SAM1-style predictor for ``predict_inst``.
+        compile_grounding: Compile the encoder-decoder-head core with ``mx.compile``
+            in ``predict_raw`` (single feature level only; other configurations run
+            eagerly).
+    """
+
+    precision: PrecisionPolicy
+    compute_dtype: mx.Dtype
+    TEXT_ID_FOR_TEXT = 0
+    TEXT_ID_FOR_VISUAL = 1
+    TEXT_ID_FOR_GEOMETRIC = 2
+
+    def __init__(
+        self,
+        backbone: object,
+        transformer: object,
+        input_geometry_encoder: object,
+        segmentation_head: object | None = None,
+        num_feature_levels: int = 1,
+        dot_prod_scoring: _Scorer | None = None,
+        use_instance_query: bool = True,
+        multimask_output: bool = True,
+        interactivity_in_encoder: bool = True,
+        use_dot_prod_scoring: bool = True,
+        supervise_joint_box_scores: bool = False,
+        separate_scorer_for_instance: bool = False,
+        num_interactive_steps_val: int = 0,
+        inst_interactive_predictor: object | None = None,
+        compile_grounding: bool = False,
+    ) -> None:
+        super().__init__()
+        # Adapt builder modules once to the execution contracts used below.
+        self.backbone = cast(_Backbone, backbone)
+        self.geometry_encoder = cast(_GeometryEncoder, input_geometry_encoder)
+        self.transformer = cast(_Transformer, transformer)
+        self.hidden_dim = self.transformer.d_model
+        self.num_feature_levels = num_feature_levels
+        self.segmentation_head = (
+            None
+            if segmentation_head is None
+            else cast(_SegmentationHead, segmentation_head)
+        )
+
+        self.dot_prod_scoring: _Scorer | None = dot_prod_scoring
+        self.interactivity_in_encoder = interactivity_in_encoder
+
+        self.num_interactive_steps_val = num_interactive_steps_val
+        self.use_dot_prod_scoring = use_dot_prod_scoring
+        self.instance_dot_prod_scoring: _Scorer | None = None
+        self.class_embed: _ArrayCallable | None = None
+        self.instance_class_embed: _ArrayCallable | None = None
+
+        if self.use_dot_prod_scoring:
+            assert dot_prod_scoring is not None
+            self.dot_prod_scoring = dot_prod_scoring
+            if separate_scorer_for_instance:
+                # Deep-copy the MLX scorer to preserve its parameters and
+                # prompt-MLP state for an independent instance.
+                self.instance_dot_prod_scoring = deepcopy(self.dot_prod_scoring)
+        else:
+            self.class_embed = cast(_ArrayCallable, nn.Linear(self.hidden_dim, 1))
+            if separate_scorer_for_instance:
+                self.instance_class_embed = cast(
+                    _ArrayCallable, nn.Linear(self.hidden_dim, 1)
+                )
+
+        self.supervise_joint_box_scores = supervise_joint_box_scores
+
+        self.use_instance_query = use_instance_query
+        self.multimask_output = multimask_output
+
+        self.inst_interactive_predictor = (
+            None
+            if inst_interactive_predictor is None
+            else cast(_InteractivePredictor, inst_interactive_predictor)
+        )
+        self.compile_grounding = bool(compile_grounding)
+        self._compiled_predict_raw: dict[
+            tuple[object, ...],
+            Callable[..., tuple[mx.array, mx.array, mx.array, mx.array, mx.array]],
+        ] = {}
+
+    @property
+    def device(self):
+        """Always ``"mlx"``; passed to the backbone's ``forward_text``."""
+        return "mlx"
+
+    def _validate_interactive_steps_val(self) -> None:
+        if self.num_interactive_steps_val > 0:
+            _raise_image_unsupported(
+                "sam3_mlx.model.sam3_image.Sam3Image(interactive-validation)",
+                reason="image-interactivity",
+                detail=(
+                    "Validation interactive prompt sampling is not implemented in "
+                    "the MLX image port. Set num_interactive_steps_val=0."
+                ),
+                alternative="num_interactive_steps_val=0",
+            )
+
+    def to(self, *args: object, **kwargs: object) -> None:
+        """Unsupported PyTorch device API; always raises."""
+        _raise_image_unsupported(
+            "sam3_mlx.model.sam3_image.Sam3Image.to",
+            reason="unsupported-device",
+            detail="Sam3Image.to() is a PyTorch device API and is not supported.",
+            alternative="Keep tensors on the explicit MLX runtime.",
+        )
+
+    def _get_img_feats(
+        self, backbone_out: BackboneOutput, img_ids: mx.array
+    ) -> ImageFeatures:
+        """Return the transformer-ready features for the images selected by ``img_ids``.
+
+        Uses precomputed ``backbone_fpn`` / ``vision_pos_enc`` when present
+        (translating ids through ``id_mapping``); otherwise encodes the requested
+        images from ``img_batch_all_stages`` once and recurses. Returns
+        ``(backbone_out, img_feats, img_pos_embeds, vis_feat_sizes)``, with the last
+        ``num_feature_levels`` levels as sequence-first ``(H*W, len(img_ids), C)``
+        arrays.
+
+        Raises:
+            KeyError: If neither precomputed features nor an image batch is present.
+        """
+        if "backbone_fpn" in backbone_out:
+            precomputed_out = cast(_PrecomputedBackboneOutput, backbone_out)
+            if (
+                "id_mapping" in precomputed_out
+                and precomputed_out["id_mapping"] is not None
+            ):
+                id_mapping = precomputed_out["id_mapping"]
+                img_ids = id_mapping[img_ids]
+                # Guard against requests for different image IDs; recomputing would
+                # add a costly CPU/GPU synchronization.
+                assert (img_ids >= 0).all()
+
+            vis_feats = precomputed_out["backbone_fpn"][-self.num_feature_levels :]
+            vis_pos_enc = precomputed_out["vision_pos_enc"][-self.num_feature_levels :]
+            vis_feat_sizes = [
+                (int(x.shape[-2]), int(x.shape[-1])) for x in vis_pos_enc
+            ]  # (H, W) Shapes
+            # Flatten NCHW features to sequence-first (H*W, N, C).
+            img_feats = [
+                _array_transforms(_feature_tensor(x)[img_ids].flatten(2)).transpose(
+                    2, 0, 1
+                )
+                for x in vis_feats
+            ]
+            img_pos_embeds = [
+                _array_transforms(x[img_ids].flatten(2)).transpose(2, 0, 1)
+                for x in vis_pos_enc
+            ]
+            return backbone_out, img_feats, img_pos_embeds, vis_feat_sizes
+
+        if "img_batch_all_stages" not in backbone_out:
+            raise KeyError(
+                "backbone_out must contain either precomputed 'backbone_fpn' "
+                "features or an 'img_batch_all_stages' image batch."
+            )
+
+        img_batch = backbone_out["img_batch_all_stages"]
+        requested_ids = _to_index_list(img_ids)
+        unique_ids = list(dict.fromkeys(requested_ids))
+        if isinstance(img_batch, mx.array):
+            image = img_batch[mx.array(unique_ids, dtype=mx.int64)]
+            batch_len = img_batch.shape[0]
+        else:
+            image_batch_items = cast(_IndexableBatch, img_batch)
+            image = mx.stack(
+                [
+                    mx.array(cast(ArrayInput, image_batch_items[index]))
+                    for index in unique_ids
+                ],
+                axis=0,
+            )
+            batch_len = len(image_batch_items)
+        from sam3_mlx.precision import compute_dtype_for_policy, model_precision
+
+        image = image.astype(compute_dtype_for_policy(model_precision(self)))
+
+        id_mapping_np = np.full((batch_len,), -1, dtype=np.int64)
+        for local_index, source_index in enumerate(unique_ids):
+            id_mapping_np[source_index] = local_index
+        new_backbone_out = cast(
+            BackboneOutput,
+            {
+                **backbone_out,
+                **self.backbone.forward_image(image),
+                "id_mapping": mx.array(id_mapping_np, dtype=mx.int64),
+            },
+        )
+        if "backbone_fpn" not in new_backbone_out:
+            raise AssertionError("backbone.forward_image must return 'backbone_fpn'.")
+        return self._get_img_feats(new_backbone_out, img_ids=img_ids)
+
+    def _encode_prompt(
+        self,
+        backbone_out: BackboneOutput,
+        find_input: ImagePromptIndices,
+        geometric_prompt: Prompt,
+        visual_prompt_embed: mx.array | None = None,
+        visual_prompt_mask: mx.array | None = None,
+        encode_text: bool = True,
+        prev_mask_pred: mx.array | None = None,
+    ) -> tuple[mx.array, mx.array, BackboneOutput]:
+        """Build the prompt token sequence for the encoder.
+
+        Concatenates, along the sequence axis, the text tokens (when
+        ``encode_text``), the geometry-prompt tokens and any visual-prompt tokens.
+        Returns ``(prompt, prompt_mask, backbone_out)`` with ``prompt`` ``(P, B, C)``
+        and ``prompt_mask`` ``(B, P)`` (True at padding).
+
+        Raises:
+            ValueError: If only one of ``visual_prompt_embed`` / ``visual_prompt_mask``
+                is given, or their prompt counts disagree.
+        """
+        if (visual_prompt_embed is None) != (visual_prompt_mask is None):
+            raise ValueError(
+                "visual_prompt_embed and visual_prompt_mask must be provided together."
+            )
+        if (
+            visual_prompt_embed is not None
+            and visual_prompt_mask is not None
+            and visual_prompt_embed.shape[0] != visual_prompt_mask.shape[1]
+        ):
+            raise ValueError(
+                "visual_prompt_embed and visual_prompt_mask disagree on prompt count."
+            )
+        # Text features are indexed by prompt, regardless of the fusion mode.
+        txt_ids = find_input.text_ids
+        language_out = cast(_LanguageBackboneOutput, backbone_out)
+        language_features = language_out["language_features"]
+        language_mask = language_out["language_mask"]
+        txt_feats = language_features[:, txt_ids]
+        txt_masks = language_mask[txt_ids]
+
+        img_ids = find_input.img_ids
+        feat_tuple = self._get_img_feats(backbone_out, img_ids)
+        backbone_out, img_feats, img_pos_embeds, vis_feat_sizes = feat_tuple
+
+        if prev_mask_pred is not None:
+            img_feats = [img_feats[-1] + prev_mask_pred]
+
+        geo_feats, geo_masks = self.geometry_encoder(
+            geo_prompt=geometric_prompt,
+            img_feats=img_feats,
+            img_sizes=vis_feat_sizes,
+            img_pos_embeds=img_pos_embeds,
+        )
+
+        if visual_prompt_embed is None and visual_prompt_mask is None:
+            visual_prompt_embed = mx.zeros((0, *geo_feats.shape[1:]))
+            visual_prompt_mask = mx.zeros(
+                (*geo_masks.shape[:-1], 0), dtype=geo_masks.dtype
+            )
+        assert visual_prompt_embed is not None
+        assert visual_prompt_mask is not None
+
+        if encode_text:
+            prompt = mx.concat([txt_feats, geo_feats, visual_prompt_embed], axis=0)
+            prompt_mask = mx.concat([txt_masks, geo_masks, visual_prompt_mask], axis=1)
+        else:
+            prompt = mx.concat([geo_feats, visual_prompt_embed], axis=0)
+            prompt_mask = mx.concat([geo_masks, visual_prompt_mask], axis=1)
+
+        return prompt, prompt_mask, backbone_out
+
+    def _run_encoder(
+        self,
+        backbone_out: BackboneOutput,
+        find_input: ImagePromptIndices,
+        prompt: mx.array,
+        prompt_mask: mx.array,
+        encoder_extra_kwargs: Mapping[str, object] | None = None,
+    ) -> tuple[BackboneOutput, EncoderOutput, ImageFeatures]:
+        """Fetch image features for ``find_input`` and run the fusion encoder."""
+        img_ids = find_input.img_ids
+        feat_tuple = self._get_img_feats(backbone_out, img_ids)
+        backbone_out, img_feats, img_pos_embeds, vis_feat_sizes = feat_tuple
+
+        encoder_out = self._encode_image_memory(
+            img_feats,
+            img_pos_embeds,
+            prompt,
+            prompt_mask,
+            vis_feat_sizes,
+            encoder_extra_kwargs=encoder_extra_kwargs,
+        )
+        return backbone_out, encoder_out, feat_tuple
+
+    def _encode_image_memory(
+        self,
+        img_feats: Sequence[mx.array],
+        img_pos_embeds: Sequence[mx.array],
+        prompt: mx.array,
+        prompt_mask: mx.array,
+        vis_feat_sizes: Sequence[tuple[int, int]],
+        encoder_extra_kwargs: Mapping[str, object] | None = None,
+    ) -> EncoderOutput:
+        """Run the transformer encoder over image features conditioned on the prompt.
+
+        The prompt tokens get a zero position embedding. ``prompt_after_enc`` falls
+        back to the unchanged prompt when the encoder returns no ``memory_text``.
+        """
+        prompt_pos_embed = mx.zeros_like(prompt)
+        memory = self.transformer.encoder(
+            src=list(img_feats),
+            src_key_padding_mask=None,
+            src_pos=list(img_pos_embeds),
+            prompt=prompt,
+            prompt_pos=prompt_pos_embed,
+            prompt_key_padding_mask=prompt_mask,
+            feat_sizes=list(vis_feat_sizes),
+            encoder_extra_kwargs=encoder_extra_kwargs,
+        )
+        return {
+            "encoder_hidden_states": memory["memory"],
+            "pos_embed": memory["pos_embed"],
+            "padding_mask": memory["padding_mask"],
+            "level_start_index": memory["level_start_index"],
+            "spatial_shapes": memory["spatial_shapes"],
+            "valid_ratios": memory["valid_ratios"],
+            "vis_feat_sizes": list(vis_feat_sizes),
+            "prompt_before_enc": prompt,
+            "prompt_after_enc": memory.get("memory_text", prompt),
+            "prompt_mask": prompt_mask,
+        }
+
+    def _run_decoder(
+        self,
+        pos_embed: mx.array,
+        memory: mx.array,
+        src_mask: mx.array | None,
+        out: Output,
+        prompt: mx.array,
+        prompt_mask: mx.array,
+        encoder_out: EncoderOutput,
+    ) -> tuple[Output, mx.array]:
+        """Decode the learned queries against ``memory`` and fill scores and boxes in ``out``.
+
+        Returns ``(out, hs)`` with ``hs`` the batch-first layer outputs
+        ``(num_layers, B, Q, C)``.
+        """
+        bs = memory.shape[1]
+        query_embed = self.transformer.decoder.query_embed.weight
+        tgt = mx.tile(query_embed[:, None], (1, bs, 1))
+
+        hs, reference_boxes, dec_presence_out, dec_presence_feats = (
+            self.transformer.decoder(
+                tgt=tgt,
+                memory=memory,
+                memory_key_padding_mask=src_mask,
+                pos=pos_embed,
+                reference_boxes=None,
+                level_start_index=encoder_out["level_start_index"],
+                spatial_shapes=encoder_out["spatial_shapes"],
+                valid_ratios=encoder_out["valid_ratios"],
+                tgt_mask=None,
+                memory_text=prompt,
+                text_attention_mask=prompt_mask,
+            )
+        )
+        hs = _array_transforms(hs).transpose(0, 2, 1, 3)  # seq-first to batch_first
+        reference_boxes = _array_transforms(reference_boxes).transpose(0, 2, 1, 3)
+        if dec_presence_out is not None:
+            dec_presence_out = _array_transforms(dec_presence_out).transpose(0, 2, 1)
+
+        out["presence_feats"] = dec_presence_feats
+        self._update_scores_and_boxes(
+            out,
+            hs,
+            reference_boxes,
+            prompt,
+            prompt_mask,
+            dec_presence_out=dec_presence_out,
+        )
+
+        return out, hs
+
+    def _update_scores_and_boxes(
+        self,
+        out: Output,
+        hs: mx.array,
+        reference_boxes: mx.array,
+        prompt: mx.array,
+        prompt_mask: mx.array,
+        dec_presence_out: mx.array | None = None,
+        is_instance_prompt: bool = False,
+    ) -> None:
+        """Write queries, class logits, boxes and presence logits for the last layer into ``out``.
+
+        Boxes are the decoder reference boxes (as inverse-sigmoid) plus the box head's
+        offsets, passed through a sigmoid. ``hs`` and ``reference_boxes`` are
+        ``(num_layers, B, Q, ...)`` and ``prompt`` / ``prompt_mask`` are as in
+        ``_encode_prompt``. All stored values are for the final decoder layer.
+        """
+        num_o2o = hs.shape[2]
+        out["queries"] = hs[-1][:, :num_o2o]
+        if self.use_dot_prod_scoring:
+            dot_prod_scoring_head = self.dot_prod_scoring
+            dot_prod_scoring_head = cast(_Scorer, dot_prod_scoring_head)
+            if is_instance_prompt and self.instance_dot_prod_scoring is not None:
+                dot_prod_scoring_head = self.instance_dot_prod_scoring
+            outputs_class = dot_prod_scoring_head(hs, prompt, prompt_mask)
+        else:
+            class_embed_head = self.class_embed
+            class_embed_head = cast(_ArrayCallable, class_embed_head)
+            if is_instance_prompt and self.instance_class_embed is not None:
+                class_embed_head = self.instance_class_embed
+            outputs_class = class_embed_head(hs)
+
+        box_head = self.transformer.decoder.bbox_embed
+        if (
+            is_instance_prompt
+            and self.transformer.decoder.instance_bbox_embed is not None
+        ):
+            box_head = self.transformer.decoder.instance_bbox_embed
+        anchor_box_offsets = box_head(hs)
+        reference_boxes_inv_sig = inverse_sigmoid(reference_boxes)
+        outputs_coord = mx.sigmoid(reference_boxes_inv_sig + anchor_box_offsets)
+        outputs_boxes_xyxy = _box_cxcywh_to_xyxy(outputs_coord)
+
+        if dec_presence_out is not None:
+            _update_out(out, "presence_logit_dec", dec_presence_out)
+
+        if self.supervise_joint_box_scores:
+            assert dec_presence_out is not None
+            outputs_class = joint_box_logits(outputs_class, dec_presence_out)
+
+        _update_out(out, "pred_logits", outputs_class[:, :, :num_o2o])
+
+        _update_out(out, "pred_boxes", outputs_coord[:, :, :num_o2o])
+        _update_out(out, "pred_boxes_xyxy", outputs_boxes_xyxy[:, :, :num_o2o])
+
+    def _run_segmentation_heads(
+        self,
+        out: Output,
+        backbone_out: BackboneOutput,
+        img_ids: mx.array,
+        vis_feat_sizes: list[tuple[int, int]],
+        encoder_hidden_states: mx.array,
+        prompt: mx.array,
+        prompt_mask: mx.array,
+        hs: mx.array,
+    ) -> None:
+        """Run the mask head (if any) and store its outputs in ``out``.
+
+        Instance-level outputs (``pred_masks``) are restricted to the first
+        ``Q`` queries and taken as-is; other head outputs are copied unchanged. Without
+        a mask head the ``backbone_fpn`` entry is dropped from ``backbone_out``.
+        """
+        if self.segmentation_head is not None:
+            num_o2o = hs.shape[2]
+            obj_queries = hs[:, :, :num_o2o]
+            seg_head = self.segmentation_head
+            instance_keys = self.segmentation_head.instance_keys
+            seg_head_outputs = seg_head(
+                backbone_feats=cast(_PrecomputedBackboneOutput, backbone_out)[
+                    "backbone_fpn"
+                ],
+                obj_queries=obj_queries,
+                image_ids=img_ids,
+                encoder_hidden_states=encoder_hidden_states,
+                prompt=prompt,
+                prompt_mask=prompt_mask,
+            )
+            aux_masks = False
+            for k, v in seg_head_outputs.items():
+                if k in instance_keys:
+                    value = cast(mx.array, v)
+                    _update_out(out, k, value[:, :num_o2o], auxiliary=aux_masks)
+                else:
+                    out[k] = v
+        else:
+            backbone_out.pop("backbone_fpn", None)
+
+    def _get_best_mask(self, out: Output) -> mx.array:
+        """Return the best-scoring query's mask, downsampled and flattened to ``(h*w, B, C)``."""
+        pred_logits = cast(mx.array, out["pred_logits"])
+        pred_masks = cast(mx.array, out["pred_masks"])
+        prev_mask_idx = mx.argmax(pred_logits, axis=1).squeeze(1)
+        batch_idx = mx.arange(pred_logits.shape[0], dtype=mx.int64)
+        prev_mask_pred = pred_masks[batch_idx, prev_mask_idx][:, None]
+        prev_mask_pred = self.geometry_encoder.mask_encoder.mask_downsampler(
+            prev_mask_pred
+        )
+        return _array_transforms(prev_mask_pred.flatten(-2)).transpose(2, 0, 1)
+
+    def video_detector_logits(
+        self, prediction: RawPrediction, *, include_presence: bool = True
+    ) -> mx.array:
+        """Return the detector score logits ``(B, Q, 1)`` used for video detection.
+
+        With ``include_presence`` the presence logit is folded in through
+        ``joint_box_logits`` unless ``supervise_joint_box_scores`` already did so.
+
+        Raises:
+            ValueError: If ``include_presence`` is False but the logits are already
+                joint scores (the class logits cannot be recovered).
+        """
+        logits = prediction["pred_logits"]
+        if not include_presence:
+            if self.supervise_joint_box_scores:
+                raise ValueError("Class logits cannot be recovered from joint detector scores.")
+            return logits
+        if self.supervise_joint_box_scores:
+            return logits
+        return joint_box_logits(logits, prediction["presence_logit_dec"])
+
+    def clear_compiled_grounding(self) -> None:
+        """Drop every cached ``mx.compile`` grounding graph."""
+        self._compiled_predict_raw.clear()
+
+    def _segmentation_image_ids(
+        self, backbone_out: BackboneOutput, find_input: ImagePromptIndices
+    ) -> mx.array:
+        """Return the row indices into ``backbone_fpn`` for the requested image ids."""
+        img_ids = find_input.img_ids
+        if "id_mapping" in backbone_out and backbone_out["id_mapping"] is not None:
+            return backbone_out["id_mapping"][img_ids]
+        return img_ids
+
+    def _run_encoded_core(
+        self,
+        backbone_out: BackboneOutput,
+        find_input: ImagePromptIndices,
+        prompt: mx.array,
+        prompt_mask: mx.array,
+    ) -> Output:
+        """Encoder, decoder and segmentation head for an already-encoded prompt."""
+        backbone_out, encoder_out, _ = self._run_encoder(
+            backbone_out, find_input, prompt, prompt_mask
+        )
+        out = Output(
+            {
+                "encoder_hidden_states": encoder_out["encoder_hidden_states"],
+                "prev_encoder_out": {
+                    "encoder_out": encoder_out,
+                    "backbone_out": backbone_out,
+                },
+            },
+        )
+        out, hs = self._run_decoder(
+            memory=cast(mx.array, out["encoder_hidden_states"]),
+            pos_embed=encoder_out["pos_embed"],
+            src_mask=(
+                None
+                if encoder_out["padding_mask"] is None
+                else encoder_out["padding_mask"]
+            ),
+            out=out,
+            prompt=prompt,
+            prompt_mask=prompt_mask,
+            encoder_out=encoder_out,
+        )
+        self._run_segmentation_heads(
+            out=out,
+            backbone_out=backbone_out,
+            img_ids=self._segmentation_image_ids(backbone_out, find_input),
+            vis_feat_sizes=encoder_out["vis_feat_sizes"],
+            encoder_hidden_states=cast(mx.array, out["encoder_hidden_states"]),
+            prompt=prompt,
+            prompt_mask=prompt_mask,
+            hs=hs,
+        )
+        return out
+
+    def _encoded_core_arrays(
+        self,
+        img_feat: mx.array,
+        img_pos: mx.array,
+        prompt: mx.array,
+        prompt_mask: mx.array,
+        img_ids: mx.array,
+        fpn: Sequence[mx.array],
+        vis_feat_sizes: Sequence[tuple[int, int]],
+    ) -> tuple[mx.array, mx.array, mx.array, mx.array, mx.array]:
+        """Array-in/array-out version of ``_run_encoded_core`` for a single feature level.
+
+        Takes and returns plain arrays so it can be wrapped by ``mx.compile``.
+        Returns ``(pred_logits, pred_boxes, pred_boxes_xyxy, pred_masks,
+        presence_logit_dec)``; ``pred_boxes_xyxy`` falls back to ``pred_boxes`` when
+        the output has no xyxy entry.
+        """
+        encoder_out = self._encode_image_memory(
+            [img_feat],
+            [img_pos],
+            prompt,
+            prompt_mask,
+            vis_feat_sizes,
+        )
+        backbone_out = cast(
+            BackboneOutput,
+            {"backbone_fpn": list(fpn)},
+        )
+        out = Output(
+            {
+                "encoder_hidden_states": encoder_out["encoder_hidden_states"],
+                "prev_encoder_out": {
+                    "encoder_out": encoder_out,
+                    "backbone_out": backbone_out,
+                },
+            },
+        )
+        out, hs = self._run_decoder(
+            memory=cast(mx.array, out["encoder_hidden_states"]),
+            pos_embed=encoder_out["pos_embed"],
+            src_mask=(
+                None
+                if encoder_out["padding_mask"] is None
+                else encoder_out["padding_mask"]
+            ),
+            out=out,
+            prompt=prompt,
+            prompt_mask=prompt_mask,
+            encoder_out=encoder_out,
+        )
+        self._run_segmentation_heads(
+            out=out,
+            backbone_out=backbone_out,
+            img_ids=img_ids,
+            vis_feat_sizes=list(vis_feat_sizes),
+            encoder_hidden_states=cast(mx.array, out["encoder_hidden_states"]),
+            prompt=prompt,
+            prompt_mask=prompt_mask,
+            hs=hs,
+        )
+        boxes_xyxy = out.get("pred_boxes_xyxy")
+        if not isinstance(boxes_xyxy, mx.array):
+            boxes_xyxy = cast(mx.array, out["pred_boxes"])
+        return (
+            cast(mx.array, out["pred_logits"]),
+            cast(mx.array, out["pred_boxes"]),
+            boxes_xyxy,
+            cast(mx.array, out["pred_masks"]),
+            cast(mx.array, out["presence_logit_dec"]),
+        )
+
+    def _compiled_or_eager_encoded_core(
+        self,
+        backbone_out: BackboneOutput,
+        find_input: ImagePromptIndices,
+        prompt: mx.array,
+        prompt_mask: mx.array,
+    ) -> Output:
+        """Run the encoded core compiled when ``compile_grounding`` allows, else eagerly.
+
+        The compiled path needs exactly one feature level and holds one graph per
+        shape/dtype key (``grounding_compile_key``). Its output contains only the
+        five ``RawPrediction`` fields.
+        """
+        if not self.compile_grounding:
+            return self._run_encoded_core(backbone_out, find_input, prompt, prompt_mask)
+        feat_tuple = self._get_img_feats(backbone_out, find_input.img_ids)
+        backbone_out, img_feats, img_pos_embeds, vis_feat_sizes = feat_tuple
+        if self.num_feature_levels != 1 or len(img_feats) != 1:
+            return self._run_encoded_core(backbone_out, find_input, prompt, prompt_mask)
+        fpn = [
+            _feature_tensor(feature) for feature in backbone_out.get("backbone_fpn", [])
+        ]
+        key = grounding_compile_key(
+            dtype=img_feats[0].dtype,
+            feat_shape=tuple(int(dim) for dim in img_feats[0].shape),
+            prompt_shape=tuple(int(dim) for dim in prompt.shape),
+            prompt_mask_shape=tuple(int(dim) for dim in prompt_mask.shape),
+            vis_feat_sizes=vis_feat_sizes,
+            fpn_shapes=tuple(
+                tuple(int(dim) for dim in feature.shape) for feature in fpn
+            ),
+            batch_size=int(img_feats[0].shape[1]) if img_feats[0].ndim > 1 else 1,
+        )
+        compiled = self._compiled_predict_raw.get(key)
+        vis_sizes = tuple(vis_feat_sizes)
+        if compiled is None:
+
+            def core(
+                img_feat: mx.array,
+                img_pos: mx.array,
+                prompt_arr: mx.array,
+                prompt_mask_arr: mx.array,
+                img_ids: mx.array,
+                *fpn_arrs: mx.array,
+            ) -> tuple[mx.array, mx.array, mx.array, mx.array, mx.array]:
+                return self._encoded_core_arrays(
+                    img_feat,
+                    img_pos,
+                    prompt_arr,
+                    prompt_mask_arr,
+                    img_ids,
+                    fpn_arrs,
+                    vis_sizes,
+                )
+
+            compiled = _mlx_compile(core, inputs=self.state)
+            self._compiled_predict_raw[key] = compiled
+        logits, boxes, boxes_xyxy, masks, presence = compiled(
+            img_feats[0],
+            img_pos_embeds[0],
+            prompt,
+            prompt_mask,
+            self._segmentation_image_ids(backbone_out, find_input),
+            *fpn,
+        )
+        return Output(
+            {
+                "pred_logits": logits,
+                "pred_boxes": boxes,
+                "pred_boxes_xyxy": boxes_xyxy,
+                "pred_masks": masks,
+                "presence_logit_dec": presence,
+            }
+        )
+
+    def predict_raw(
+        self,
+        backbone_out: Mapping[str, object],
+        find_input: object,
+        find_target: object | None,
+        geometric_prompt: Prompt,
+    ) -> RawPrediction:
+        """Predict ``RawPrediction`` arrays for one find stage (no score filtering or upsampling).
+
+        ``backbone_out`` must hold the text features and either precomputed image
+        features or the image batch (see ``BackboneOutput``). ``find_target`` is
+        unused and accepted for signature parity with ``forward_grounding``.
+
+        Raises:
+            KeyError: If the model has no mask head (see ``raw_prediction_from_output``).
+        """
+
+        self._validate_interactive_steps_val()
+        typed_backbone_out = cast(BackboneOutput, backbone_out)
+        typed_find_input = cast(FindInput, find_input)
+        prompt, prompt_mask, typed_backbone_out = self._encode_prompt(
+            typed_backbone_out, typed_find_input, geometric_prompt
+        )
+        out = self._compiled_or_eager_encoded_core(
+            typed_backbone_out, typed_find_input, prompt, prompt_mask
+        )
+        del find_target
+        return raw_prediction_from_output(out)
+
+    def forward_grounding(
+        self,
+        backbone_out: Mapping[str, object],
+        find_input: object,
+        find_target: object | None,
+        geometric_prompt: Prompt,
+    ) -> Output:
+        """Eager grounding pass returning the full ``Output`` (including encoder state)."""
+        self._validate_interactive_steps_val()
+        if self.num_interactive_steps_val > 0 and find_target is None:
+            raise ValueError("matching requires a populated find_target")
+        typed_backbone_out = cast(BackboneOutput, backbone_out)
+        typed_find_input = cast(FindInput, find_input)
+        prompt, prompt_mask, typed_backbone_out = self._encode_prompt(
+            typed_backbone_out, typed_find_input, geometric_prompt
+        )
+        out = self._run_encoded_core(
+            typed_backbone_out, typed_find_input, prompt, prompt_mask
+        )
+        return out
+
+    def _postprocess_out(self, out: Output, multimask_output: bool = False) -> Output:
+        """Keep only the highest-logit query per image when ``multimask_output`` is set.
+
+        The full per-query outputs are preserved under ``multi_pred_*`` keys and the
+        ``pred_*`` entries are replaced by the selected query (axis 1 of size 1).
+        """
+        pred_boxes = cast(mx.array, out["pred_boxes"])
+        pred_logits = cast(mx.array, out["pred_logits"])
+        pred_boxes_xyxy = cast(mx.array, out["pred_boxes_xyxy"])
+        num_mask_boxes = pred_boxes.shape[1]
+        if multimask_output and num_mask_boxes > 1:
+            out["multi_pred_logits"] = pred_logits
+            if "pred_masks" in out:
+                out["multi_pred_masks"] = out["pred_masks"]
+            out["multi_pred_boxes"] = pred_boxes
+            out["multi_pred_boxes_xyxy"] = pred_boxes_xyxy
+
+            best_mask_idx = mx.argmax(pred_logits, axis=1).squeeze(1)
+            batch_idx = mx.arange(best_mask_idx.shape[0], dtype=mx.int64)
+
+            out["pred_logits"] = pred_logits[batch_idx, best_mask_idx][:, None]
+            if "pred_masks" in out:
+                pred_masks = cast(mx.array, out["pred_masks"])
+                out["pred_masks"] = pred_masks[batch_idx, best_mask_idx][:, None]
+            out["pred_boxes"] = pred_boxes[batch_idx, best_mask_idx][:, None]
+            out["pred_boxes_xyxy"] = pred_boxes_xyxy[batch_idx, best_mask_idx][:, None]
+        return out
+
+    def _get_geo_prompt_from_find_input(self, find_input: object) -> Prompt:
+        """Build a geometry ``Prompt`` from a find input's box and point fields.
+
+        ``input_points_before_embed`` is batch-first ``(B, N, C+1)`` with the label in
+        the last channel; it is swapped to sequence-first and split into coordinates
+        and labels.
+        """
+        typed_find_input = cast(FindInput, find_input)
+        point_embeddings: mx.array | None = None
+        point_mask: mx.array | None = None
+        point_labels: mx.array | None = None
+        point_embeddings_before = typed_find_input.input_points_before_embed
+        if point_embeddings_before is not None:
+            point_embeddings = _array_transforms(point_embeddings_before).swapaxes(0, 1)
+            point_labels = point_embeddings[..., -1]
+            point_embeddings = point_embeddings[..., :-1]
+            point_mask = typed_find_input.input_points_mask
+
+        return Prompt(
+            box_embeddings=(
+                None
+                if typed_find_input.input_boxes_before_embed is None
+                else typed_find_input.input_boxes_before_embed
+            ),
+            box_mask=typed_find_input.input_boxes_mask,
+            box_labels=typed_find_input.input_boxes_label,
+            point_embeddings=point_embeddings,
+            point_mask=point_mask,
+            point_labels=point_labels,
+        )
+
+    def forward(self, input: BatchedDatapoint) -> SAM3Output | tuple[SAM3Output, None]:
+        """Run text- and box-prompted grounding on a batched datapoint.
+
+        The datapoint must contain exactly one find stage. Only box prompts are used;
+        point prompts are ignored (a warning is printed if any are present). Returns
+        a ``SAM3Output`` with one stage holding one ``Output`` step.
+
+        Raises:
+            AssertionError: If the datapoint does not have exactly one find input.
+        """
+        self._validate_interactive_steps_val()
+        typed_input = cast(_Datapoint, input)
+        device = self.device
+        image_batch = typed_input.img_batch
+        backbone_out: BackboneOutput = {"img_batch_all_stages": image_batch}
+        backbone_out.update(self.backbone.forward_image(image_batch))
+        num_frames = len(typed_input.find_inputs)
+        assert num_frames == 1
+
+        text_outputs = self.backbone.forward_text(
+            typed_input.find_text_batch, device=device
+        )
+        backbone_out["language_features"] = text_outputs["language_features"]
+        backbone_out["language_mask"] = text_outputs["language_mask"]
+
+        previous_stages_out = SAM3Output(
+            iter_mode=SAM3Output.IterMode.LAST_STEP_PER_STAGE
+        )
+        find_input = typed_input.find_inputs[0]
+        find_target = typed_input.find_targets[0]
+        input_points = find_input.input_points
+        if input_points is not None and input_points.size > 0:
+            print("Warning: Point prompts are ignored in PCS.")
+
+        geometric_prompt = Prompt(
+            box_embeddings=find_input.input_boxes,
+            box_mask=find_input.input_boxes_mask,
+            box_labels=find_input.input_boxes_label,
+        )
+
+        stage_outs: list[Sam3StepDict] = []
+        out = self.forward_grounding(
+            backbone_out=backbone_out,
+            find_input=find_input,
+            find_target=find_target,
+            geometric_prompt=geometric_prompt.clone(),
+        )
+        out = self._postprocess_out(out, multimask_output=self.multimask_output)
+        stage_outs.append(out)
+
+        previous_stages_out.append(stage_outs)
+        return previous_stages_out
+
+    def _require_interactive_predictor(self) -> _InteractivePredictor:
+        """Return the attached interactive predictor or raise the unsupported-feature error."""
+        predictor = self.inst_interactive_predictor
+        if predictor is None:
+            _raise_image_unsupported(
+                "sam3_mlx.model.sam3_image.Sam3Image.predict_inst",
+                reason="image-interactivity",
+                detail=(
+                    "SAM1-style interactive image prediction requires "
+                    "enable_inst_interactivity=True."
+                ),
+                alternative="build_sam3_image_model(enable_inst_interactivity=True)",
+            )
+        return predictor
+
+    def _inst_predictor_features_from_state(
+        self, inference_state: Mapping[str, object], batch_size: int | None = None
+    ) -> _PredictorFeatures:
+        """Convert stored SAM2-neck backbone features into predictor ``image_embed`` / ``high_res_feats``.
+
+        The ``no_mem_embed`` is added to the lowest-resolution level (SAM runs here
+        without memory), and each sequence-first ``(H*W, B, C)`` level is reshaped to
+        NCHW using the predictor's feature sizes.
+
+        Raises:
+            ValueError: If ``inference_state`` has no ``backbone_out``.
+        """
+        predictor = self._require_interactive_predictor()
+        if "backbone_out" not in inference_state:
+            raise ValueError("inference_state must contain backbone_out.")
+        typed_state_backbone_out = cast(
+            Mapping[str, object], inference_state["backbone_out"]
+        )
+        backbone_out = typed_state_backbone_out.get("sam2_backbone_out")
+        if backbone_out is None:
+            _raise_image_unsupported(
+                "sam3_mlx.model.sam3_image.Sam3Image.predict_inst(sam2_backbone_out)",
+                reason="image-interactivity",
+                detail=(
+                    "SAM1-style interactive prediction requires sam2_backbone_out. "
+                    "Build the image backbone with enable_inst_interactivity=True."
+                ),
+                alternative="build_sam3_image_model(enable_inst_interactivity=True)",
+            )
+        typed_backbone_out = cast(Mapping[str, object], backbone_out)
+        prepare_backbone_features = cast(
+            Callable[
+                [Mapping[str, object]], tuple[object, list[mx.array], object, object]
+            ],
+            getattr(predictor.model, "_prepare_backbone_features"),
+        )
+        _, vision_feats, _, _ = prepare_backbone_features(typed_backbone_out)
+        vision_feats[-1] = vision_feats[-1] + predictor.model.no_mem_embed
+        if batch_size is None:
+            batch_size = vision_feats[-1].shape[1]
+        feature_sizes = cast(
+            list[tuple[int, int]], getattr(predictor, "_bb_feat_sizes")
+        )
+        feats = [
+            _array_transforms(_array_transforms(feat).transpose(1, 2, 0)).reshape(
+                batch_size, -1, *feat_size
+            )
+            for feat, feat_size in zip(vision_feats[::-1], feature_sizes[::-1])
+        ][::-1]
+        return {"image_embed": feats[-1], "high_res_feats": feats[:-1]}
+
+    def predict_inst(
+        self,
+        inference_state: Mapping[str, object],
+        **kwargs: object,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Predict SAM1-style masks for one image from a stored inference state.
+
+        ``inference_state`` needs ``backbone_out`` (with ``sam2_backbone_out``) and
+        ``original_height`` / ``original_width``. ``kwargs`` are forwarded to
+        ``SAM3InteractiveImagePredictor.predict`` (points, boxes, ``multimask_output``,
+        ...), which also defines the returned ``(masks, iou_predictions,
+        low_res_masks)`` NumPy arrays. The predictor's own image state is restored
+        afterwards.
+        """
+        orig_h = cast(int, inference_state["original_height"])
+        orig_w = cast(int, inference_state["original_width"])
+        predictor = self._require_interactive_predictor()
+        features = self._inst_predictor_features_from_state(inference_state, 1)
+        previous_features = cast(
+            _PredictorFeatures | None, getattr(predictor, "_features")
+        )
+        previous_image_set = cast(bool, getattr(predictor, "_is_image_set"))
+        previous_orig_hw = cast(list[tuple[int, int]], getattr(predictor, "_orig_hw"))
+        setattr(predictor, "_features", features)
+        setattr(predictor, "_is_image_set", True)
+        setattr(predictor, "_orig_hw", [(orig_h, orig_w)])
+        try:
+            return predictor.predict(**kwargs)
+        finally:
+            setattr(predictor, "_features", previous_features)
+            setattr(predictor, "_is_image_set", previous_image_set)
+            setattr(predictor, "_orig_hw", previous_orig_hw)
+
+    def predict_inst_batch(
+        self,
+        inference_state: Mapping[str, object],
+        *args: object,
+        **kwargs: object,
+    ) -> tuple[list[np.ndarray], list[np.ndarray], list[np.ndarray]]:
+        """Batched ``predict_inst`` using ``original_heights`` / ``original_widths`` lists.
+
+        Positional and keyword arguments go to
+        ``SAM3InteractiveImagePredictor.predict_batch``, which returns per-image lists
+        of masks, IoU predictions and low-resolution masks.
+
+        Raises:
+            AssertionError: If the height/width lists or the feature batch disagree
+                in length.
+        """
+        orig_heights = inference_state["original_heights"]
+        orig_widths = inference_state["original_widths"]
+        typed_orig_heights = cast(_IndexableBatch, orig_heights)
+        typed_orig_widths = cast(_IndexableBatch, orig_widths)
+        batch_size = len(typed_orig_heights)
+        if batch_size != len(typed_orig_widths):
+            raise AssertionError(
+                "original_heights and original_widths must have the same length."
+            )
+        predictor = self._require_interactive_predictor()
+        features = self._inst_predictor_features_from_state(inference_state, batch_size)
+        if features["image_embed"].shape[0] != batch_size:
+            raise AssertionError(
+                "Batch size mismatch in predict_inst_batch. Got "
+                f"{features['image_embed'].shape[0]}, {len(typed_orig_heights)}, "
+                f"{len(typed_orig_widths)}"
+            )
+        typed_heights = [
+            cast(int, typed_orig_heights[index]) for index in range(batch_size)
+        ]
+        typed_widths = [
+            cast(int, typed_orig_widths[index]) for index in range(batch_size)
+        ]
+        previous_features = cast(
+            _PredictorFeatures | None, getattr(predictor, "_features")
+        )
+        previous_image_set = cast(bool, getattr(predictor, "_is_image_set"))
+        previous_batch = cast(bool, getattr(predictor, "_is_batch"))
+        previous_orig_hw = cast(list[tuple[int, int]], getattr(predictor, "_orig_hw"))
+        setattr(predictor, "_features", features)
+        setattr(predictor, "_is_image_set", True)
+        setattr(predictor, "_is_batch", True)
+        setattr(
+            predictor,
+            "_orig_hw",
+            [(orig_h, orig_w) for orig_h, orig_w in zip(typed_heights, typed_widths)],
+        )
+        try:
+            return predictor.predict_batch(*args, **kwargs)
+        finally:
+            setattr(predictor, "_features", previous_features)
+            setattr(predictor, "_is_image_set", previous_image_set)
+            setattr(predictor, "_is_batch", previous_batch)
+            setattr(predictor, "_orig_hw", previous_orig_hw)
+
+    def _get_dummy_prompt(self, num_prompts: int = 1) -> Prompt:
+        """Return an empty geometry prompt: zero boxes for ``num_prompts`` batch rows."""
+        geometric_prompt = Prompt(
+            box_embeddings=mx.zeros((0, num_prompts, 4)),
+            box_mask=mx.zeros((num_prompts, 0), dtype=mx.bool_),
+        )
+        return geometric_prompt

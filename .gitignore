@@ -1,0 +1,95 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+.pytest_cache/
+.ruff_cache/
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# macOS Finder metadata
+.DS_Store
+
+# Local AI agent instructions
+AGENTS.md
+AGENTS.local.md
+CLAUDE.md
+CLAUDE.local.md
+GEMINI.md
+GEMINI.local.md
+CODEX.md
+CODEX.local.md
+QWEN.md
+QWEN.local.md
+.claude/
+.codex/
+.cursor/
+.cursorrules
+.windsurfrules
+.clinerules
+.roomodes
+.github/copilot-instructions.md
+
+# Local upstream reference checkouts
+third_party/
+
+# Local-only provenance doc (not shipped in the public tree)
+/UPSTREAM.md
+
+# Scripts are ignored by default; explicitly retain release-critical tooling.
+scripts/
+!scripts/
+scripts/*
+!scripts/validate_release.py
+!scripts/run_image_parity.py
+!scripts/_oracle_runtime.py
+!scripts/_resize_reference.py
+!scripts/_oracle_artifacts.py
+!scripts/validate_checkpoint_lineage.py
+!scripts/run_hardened_image_parity.py
+!scripts/run_upstream_image_oracle_hardened.py
+!scripts/validate_checkpoint_lineage_hardened.py
+!scripts/audit_release_evidence.py
+!scripts/audit_inference_api.py
+!scripts/run_interactive_head_parity.py
+!scripts/run_interactive_checkpoint_parity.py
+!scripts/qualify_sam31_checkpoint.py
+!scripts/convert_sam3_tracker_checkpoint.py
+!scripts/run_mask_checkpoint_session.py
+!scripts/benchmark_image_runtime.py
+!scripts/benchmark_roi_align.py
+!scripts/_benchmark_env.py
+!scripts/_model_probes.py
+!scripts/_roi_align_differential.py
+!scripts/fuzz_roi_align.py
+!scripts/generate_image_parity_corpus.py
+!scripts/run_image_corpus_parity.py
+!scripts/run_image_qualification.py
+!scripts/run_upstream_image_corpus_oracle.py
+
+# Local benchmark outputs; reviewed baselines are explicitly retained.
+benchmarks/results/
+
+# Local scratch examples/notebooks
+examples/
+
+# Internal developer artifacts
+/dev_docs/
+dev_docs/**/*.json
+
+# Ignore Modified Weights
+checkpoints/
+sam3-mod-weights/
+vit_block/
+*.pt
+*.safetensors
+semantic_mask.png
+semantic_overlay.png
+*.jpg
+
+# Compiled extensions
+*.so

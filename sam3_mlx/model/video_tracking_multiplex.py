@@ -1,0 +1,4050 @@
+"""Multiplex video tracker: SAM-style mask heads over packed multi-object memory.
+
+``VideoTrackingMultiplex`` tracks many objects at once by packing them into buckets of
+``multiplex_count`` slots (see ``multiplex_utils``). Per-object tensors have a leading
+object axis ("data space") and are packed to ``(num_buckets, multiplex_count, ...)``
+("multiplex space") with ``MultiplexState.mux`` and ``demux``. One tracking step
+(``track_step``) combines propagation (memory-conditioned features decoded by the
+multiplex mask decoder) with interaction (the SAM prompt encoder and mask decoder on
+point or mask inputs), encodes the result into memory and can add or recondition
+objects in an existing state.
+
+Backbone features are channel-first ``(B, C, H, W)`` for the SAM heads and flattened
+sequence-first ``(H*W, B, C)`` for the memory transformer. Masks are ``(N, 1, H, W)``
+logits (foreground where > 0) at low resolution (``low_res_mask_size``) or high
+resolution (``input_mask_size``). The ``*_for_eval`` options and ``forward`` simulate
+prompts on ground-truth masks for evaluation, using seeded NumPy generators.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Callable, Mapping, Sequence
+from copy import deepcopy
+from typing import (
+    Literal,
+    NotRequired,
+    Required,
+    TypedDict,
+    TypeVar,
+    Unpack,
+    cast,
+    overload,
+)
+
+import mlx.core as mx
+from mlx import nn
+import numpy as np
+from numpy.typing import NDArray
+
+from sam3_mlx.mlx_runtime import is_mlx_array, mlx_array, to_numpy as _to_numpy
+from sam3_mlx.model.data_misc import NestedTensor, interpolate
+from sam3_mlx.model.multiplex_backbone_contract import (
+    BackboneForward, DynamicTrackingTarget, FeatureMap,
+    ImageBatch, NeckName, PreparedBackboneFeatures, PreparedBackboneOutput, PromptBackboneOutput,
+    RawBackboneFeatures, RawBackboneOutput, TrackerArray, TrackingAuxOutput, TrackingInput, TrackingTarget,
+)
+from sam3_mlx.model.multiplex_tracking_state import MultiplexDemoState
+from sam3_mlx.model.memory import MemoryEncoderOutput, SimpleMaskEncoder
+from sam3_mlx.model.multiplex_mask_decoder import MLP, MultiplexMaskDecoder
+from sam3_mlx.model.multiplex_utils import (
+    MultiplexController,
+    MultiplexState,
+    raise_unsupported_multiplex_runtime,
+)
+from sam3_mlx.model.sam3_tracker_utils import (
+    get_1d_sine_pe,
+    get_next_point,
+    sample_box_points,
+    select_closest_cond_frames,
+)
+from sam3_mlx.model.image_backbone_contract import SamMaskDecoderExtraArgs
+from sam3_mlx.model.temporal_memory import memory_trim_plan, previous_memory_frame_index
+from sam3_mlx.sam.common import Conv2dNCHW
+from sam3_mlx.sam.mask_decoder import MaskDecoder
+from sam3_mlx.sam.prompt_encoder import PositionEmbeddingRandom, PromptEncoder
+from sam3_mlx.sam.tensor_protocols import ArrayModule
+from sam3_mlx.sam.transformer import TwoWayTransformer
+
+
+# Mask logit used for objects that are absent in a frame.
+NO_OBJ_SCORE = -1024.0
+neck_outs: list[NeckName] = ["interactive", "sam2_backbone_out"]
+_DestinationArray = TypeVar("_DestinationArray", bound=TrackerArray)
+_SourceArray = TypeVar("_SourceArray", bound=TrackerArray)
+
+
+def _trunc_normal(shape: tuple[int, ...], std: float = 0.02) -> mx.array:
+    """Sample a truncated normal (cut at +/-2 before scaling) scaled by ``std``, for learned embeddings."""
+    return mx.random.truncated_normal(lower=-2.0, upper=2.0, shape=shape) * std
+
+
+type _SAMOutputKey = Literal["low_res_multimasks", "high_res_multimasks", "low_res_masks", "high_res_masks", "ious", "object_score_logits", "obj_ptr"]
+
+
+class SAMOutput(TypedDict, total=True):
+    """Outputs of a SAM mask-head call for ``N`` objects.
+
+    ``*_multimasks`` hold every candidate mask, ``*_masks`` the selected one (logits),
+    ``ious`` the predicted IoUs, ``object_score_logits`` the object-presence logits and
+    ``obj_ptr`` the object pointers (only when pointers are used).
+    """
+
+    low_res_multimasks: mx.array
+    high_res_multimasks: mx.array
+    ious: mx.array
+    low_res_masks: mx.array
+    high_res_masks: mx.array
+    object_score_logits: mx.array
+    obj_ptr: NotRequired[mx.array]
+
+
+class _FrameOutputFields[ArrayT: TrackerArray](TypedDict, total=False):
+    pred_masks: ArrayT | None
+    pred_masks_high_res: mx.array | None
+    point_inputs: dict[str, mx.array] | None
+    mask_inputs: mx.array | None
+    input_masks: mx.array
+    object_score_logits: mx.array
+    obj_ptr: mx.array | None
+    maskmem_features: mx.array | None
+    maskmem_pos_enc: list[mx.array] | None
+    image_features: mx.array
+    image_pos_enc: mx.array
+    iou_score: mx.array
+    eff_iou_score: mx.array
+    multistep_pred_masks: mx.array
+    multistep_pred_masks_high_res: mx.array
+    multistep_pred_multimasks: list[mx.array]
+    multistep_pred_multimasks_high_res: list[mx.array]
+    multistep_pred_ious: list[mx.array]
+    multistep_point_inputs: list[dict[str, mx.array] | None]
+    multistep_object_score_logits: list[mx.array]
+    pred_masks_video_res: mx.array
+    local_obj_id_to_idx: dict[object, int]
+
+
+class StageOutput(_FrameOutputFields[mx.array]):
+    """Per-frame tracker output; ``conditioning_objects`` holds the object indices that were prompted on this frame."""
+
+    conditioning_objects: set[int]
+
+
+class PublicFrameOutput(_FrameOutputFields[TrackerArray], total=False):
+    """Frame output returned to callers of ``forward``: a ``StageOutput`` without the packed ``obj_ptr``."""
+
+    conditioning_objects: set[int]
+
+
+class _MaskStateKwargs[ObjectIdT](TypedDict):
+    """Keyword arguments shared by ``add_new_masks_to_existing_state`` and ``recondition_masks_in_existing_state``."""
+
+    interactive_pix_feat: mx.array
+    interactive_high_res_features: list[mx.array] | None
+    propagation_vision_feats: list[mx.array] | None
+    propagation_feat_sizes: list[tuple[int, int]] | None
+    new_masks: mx.array
+    obj_idxs_in_mask: list[int]
+    obj_ids_in_mask: list[ObjectIdT] | None
+    prev_output: StageOutput
+    multiplex_state: MultiplexState[ObjectIdT]
+    add_mask_to_memory: bool
+
+
+class TrackingResult[ObjectIdT = int](TypedDict):
+    """Result of ``forward_tracking`` with ``return_dict``: outputs by frame index and the final multiplex state."""
+
+    cond_frame_outputs: dict[int, StageOutput]
+    non_cond_frame_outputs: dict[int, StageOutput]
+    multiplex_state: MultiplexState[ObjectIdT]
+
+
+@overload
+def _concat(values: Sequence[mx.array], axis: int) -> mx.array: ...
+
+
+@overload
+def _concat(values: Sequence[TrackerArray], axis: int) -> TrackerArray: ...
+
+
+def _concat(values: Sequence[TrackerArray], axis: int) -> TrackerArray:
+    """Concatenate along ``axis``, as an MLX array if any input is one, else with NumPy."""
+    if any(is_mlx_array(value) for value in values):
+        return mx.concat(cast(list[mx.array], values), axis=axis)
+    return np.concatenate(values, axis=axis)
+
+
+def concat_points[ArrayT: TrackerArray](
+    old_point_inputs: Mapping[str, ArrayT] | None, new_points: ArrayT, new_labels: ArrayT
+) -> dict[str, ArrayT]:
+    """Append points without changing the input array backend.
+
+    ``point_coords`` ``(B, N, 2)`` and ``point_labels`` ``(B, N)`` are concatenated along
+    the point axis (axis 1).
+    """
+    if old_point_inputs is None:
+        points, labels = new_points, new_labels
+    else:
+        points = cast(ArrayT, _concat([old_point_inputs["point_coords"], new_points], axis=1))
+        labels = cast(ArrayT, _concat([old_point_inputs["point_labels"], new_labels], axis=1))
+    return {"point_coords": points, "point_labels": labels}
+
+
+def _require_string_dict(value: object, *, name: str) -> dict[str, object]:
+    """Return ``value`` as a dict with string keys.
+
+    Raises:
+        TypeError: If it is not a dict or has non-string keys; ``name`` labels the message.
+    """
+    if not isinstance(value, dict):
+        raise TypeError(f"{name} must be a dictionary")
+    mapping = cast(dict[object, object], value)
+    if not all(isinstance(key, str) for key in mapping):
+        raise TypeError(f"{name} must use string keys")
+    return cast(dict[str, object], mapping)
+
+
+def _mapping_array(mapping: Mapping[str, object], key: str) -> TrackerArray:
+    """Return ``mapping[key]`` if it is an MLX or NumPy array.
+
+    Raises:
+        TypeError: For any other value.
+    """
+    value = mapping[key]
+    if is_mlx_array(value):
+        return value
+    if isinstance(value, np.ndarray):
+        return cast(NDArray[np.generic], value)
+    raise TypeError(f"{key} must be an MLX or NumPy array")
+
+
+@overload
+def _append(
+    d1: StageOutput,
+    d2: SAMOutput,
+    k1: str,
+    k2: str,
+    dim: int = 0,
+    strict: bool = True,
+) -> None: ...
+
+
+@overload
+def _append(
+    d1: dict[str, _DestinationArray],
+    d2: Mapping[str, _SourceArray],
+    k1: str,
+    k2: str,
+    dim: int = 0,
+    strict: bool = True,
+) -> None: ...
+
+
+def _append(
+    d1: object,
+    d2: object,
+    k1: str,
+    k2: str,
+    dim: int = 0,
+    strict: bool = True,
+) -> None:
+    """Concatenate ``d2[k2]`` onto ``d1[k1]`` along ``dim``, storing the result in ``d1``.
+
+    A missing ``k1`` fails an assertion with ``strict`` and is skipped otherwise.
+    """
+    d1_values = _require_string_dict(d1, name="destination")
+    d2_values = _require_string_dict(d2, name="source")
+    if strict:
+        assert k1 in d1_values, f"{k1} not found"
+    elif k1 not in d1_values:
+        return
+    destination = _mapping_array(d1_values, k1)
+    source = _mapping_array(d2_values, k2)
+    d1_values[k1] = _concat([destination, source], axis=dim)
+
+
+def _require_sam_obj_ptr(output: SAMOutput) -> mx.array:
+    """Return the object pointers of a SAM output.
+
+    Raises:
+        ValueError: If the output has no ``obj_ptr``.
+    """
+    if "obj_ptr" not in output:
+        raise ValueError("SAM output is missing obj_ptr for pointer-enabled tracking")
+    return output["obj_ptr"]
+
+
+def _require_stage_obj_ptr(output: StageOutput) -> mx.array:
+    """Return the packed object pointers of a stage output.
+
+    Raises:
+        ValueError: If the output has no ``obj_ptr``.
+    """
+    if "obj_ptr" not in output:
+        raise ValueError("stage output is missing obj_ptr for pointer-enabled tracking")
+    obj_ptr = output["obj_ptr"]
+    assert obj_ptr is not None
+    return obj_ptr
+
+
+class _CompactStageValues(TypedDict):
+    pred_masks: mx.array | None
+    pred_masks_high_res: mx.array | None
+    object_score_logits: mx.array
+    multistep_point_inputs: list[dict[str, mx.array] | None]
+
+
+class _PastStageValues(TypedDict):
+    pred_masks: mx.array | None
+    object_score_logits: mx.array
+    multistep_point_inputs: list[dict[str, mx.array] | None]
+
+
+class _MemoryStageValues(TypedDict):
+    maskmem_features: mx.array | None
+    maskmem_pos_enc: list[mx.array] | None
+
+
+class _ImageStageValues(TypedDict):
+    image_features: mx.array
+    image_pos_enc: mx.array
+
+
+class _MaskScoreStageValues(TypedDict):
+    pred_masks_high_res: mx.array | None
+    object_score_logits: mx.array
+
+
+class _MaskStageValues(TypedDict):
+    pred_masks: mx.array | None
+
+
+@overload
+def _require_stage_values(output: StageOutput, k0: Literal["pred_masks"], k1: Literal["pred_masks_high_res"], k2: Literal["object_score_logits"], k3: Literal["multistep_point_inputs"], /) -> _CompactStageValues: ...
+
+
+@overload
+def _require_stage_values(output: StageOutput, k0: Literal["pred_masks"], k1: Literal["object_score_logits"], k2: Literal["multistep_point_inputs"], /) -> _PastStageValues: ...
+
+
+@overload
+def _require_stage_values(output: StageOutput, k0: Literal["maskmem_features"], k1: Literal["maskmem_pos_enc"], /) -> _MemoryStageValues: ...
+
+
+@overload
+def _require_stage_values(output: StageOutput, k0: Literal["image_features"], k1: Literal["image_pos_enc"], /) -> _ImageStageValues: ...
+
+
+@overload
+def _require_stage_values(output: StageOutput, k0: Literal["pred_masks_high_res"], k1: Literal["object_score_logits"], /) -> _MaskScoreStageValues: ...
+
+
+@overload
+def _require_stage_values(output: StageOutput, k0: Literal["pred_masks"], /) -> _MaskStageValues: ...
+
+
+def _require_stage_values(output: StageOutput, *keys: str) -> _CompactStageValues | _PastStageValues | _MemoryStageValues | _ImageStageValues | _MaskScoreStageValues | _MaskStageValues:
+    """Return ``output`` typed as containing ``keys``.
+
+    Raises:
+        ValueError: Listing the keys the output lacks.
+    """
+    missing = [key for key in keys if key not in output]
+    if missing:
+        raise ValueError(f"stage output is missing required values: {missing}")
+    return cast(_CompactStageValues | _PastStageValues | _MemoryStageValues | _ImageStageValues | _MaskScoreStageValues | _MaskStageValues, output)
+
+
+@overload
+def _merge(
+    d1: StageOutput,
+    d2: SAMOutput,
+    k1: str,
+    k2: str,
+    d2_idx: list[int],
+    strict: bool = True,
+) -> None: ...
+
+
+@overload
+def _merge(
+    d1: dict[str, _DestinationArray],
+    d2: Mapping[str, _SourceArray],
+    k1: str,
+    k2: str,
+    d2_idx: list[int],
+    strict: bool = True,
+) -> None: ...
+
+
+def _merge(
+    d1: object,
+    d2: object,
+    k1: str,
+    k2: str,
+    d2_idx: list[int],
+    strict: bool = True,
+) -> None:
+    """Overwrite rows ``d2_idx`` (axis 0) of ``d1[k1]`` with the rows of ``d2[k2]``, in order.
+
+    MLX values are updated through a NumPy copy and stored back in ``d1``; NumPy values
+    are written in place. A missing ``k1`` fails an assertion with ``strict`` and is
+    skipped otherwise.
+    """
+    d1_values = _require_string_dict(d1, name="destination")
+    d2_values = _require_string_dict(d2, name="source")
+    if strict:
+        assert k1 in d1_values, f"{k1} not found"
+    elif k1 not in d1_values:
+        return
+
+    destination = _mapping_array(d1_values, k1)
+    source = _mapping_array(d2_values, k2)
+    if is_mlx_array(destination) or is_mlx_array(source):
+        merged = _to_numpy(destination).copy()
+        source_array = _to_numpy(source).astype(merged.dtype, copy=False)
+        merged[d2_idx] = source_array
+        d1_values[k1] = mlx_array(merged)
+        return
+
+    target = cast(np.ndarray, destination)
+    target[d2_idx] = np.asarray(source, dtype=target.dtype)
+
+
+@overload
+def _replace_rows(value: mx.array, indices: list[int], replacement: mx.array) -> mx.array: ...
+
+
+@overload
+def _replace_rows(value: TrackerArray, indices: list[int], replacement: TrackerArray) -> TrackerArray: ...
+
+
+def _replace_rows(value: TrackerArray, indices: list[int], replacement: TrackerArray) -> TrackerArray:
+    """Return a copy of ``value`` with rows ``indices`` (axis 0) set to the rows of ``replacement``.
+
+    MLX inputs are updated through a NumPy copy.
+    """
+    if is_mlx_array(value) or is_mlx_array(replacement):
+        updated = _to_numpy(value).copy()
+        source = _to_numpy(replacement).astype(updated.dtype, copy=False)
+        updated[indices] = source
+        return mlx_array(updated)
+
+    updated = np.asarray(value).copy()
+    source = np.asarray(replacement, dtype=updated.dtype)
+    updated[indices] = source
+    return updated
+
+
+@overload
+def _take_rows(value: mx.array, indices: list[int]) -> mx.array: ...
+
+
+@overload
+def _take_rows(value: TrackerArray, indices: list[int]) -> TrackerArray: ...
+
+
+def _take_rows(value: TrackerArray, indices: list[int]) -> TrackerArray:
+    """Select rows ``indices`` along axis 0."""
+    if is_mlx_array(value):
+        return mx.take(value, mx.array(indices, dtype=mx.int32), axis=0)
+    return np.asarray(value)[indices]
+
+
+def _zero_mask_rows_like(
+    value: TrackerArray, rows: int, mask_shape: tuple[int, ...]
+) -> TrackerArray:
+    """Zeros of shape ``(rows, *mask_shape)`` with the dtype and array backend of ``value``."""
+    shape = (rows, *mask_shape)
+    if is_mlx_array(value):
+        return mx.zeros(shape, dtype=value.dtype)
+    numpy_value = cast(NDArray[np.generic], value)
+    return cast(NDArray[np.generic], np.zeros(shape, dtype=numpy_value.dtype))
+
+
+def _to_scalar(value: TrackerArray | int | float) -> float:
+    """Convert a one-element array or a number to ``float``."""
+    if is_mlx_array(value):
+        return float(_to_numpy(value))
+    return float(value)
+
+
+@overload
+def _feature_tensor(feature_map: FeatureMap[mx.array]) -> mx.array: ...
+
+
+@overload
+def _feature_tensor(feature_map: object) -> TrackerArray: ...
+
+
+def _feature_tensor(feature_map: object) -> TrackerArray:
+    """Return the tensor of a feature map: ``NestedTensor.tensors``, a mapping's ``'tensors'`` entry or the array itself.
+
+    Raises:
+        TypeError: If no array can be found.
+    """
+    if isinstance(feature_map, NestedTensor):
+        return feature_map.tensors
+    if isinstance(feature_map, Mapping):
+        tensor = cast(Mapping[str, object], feature_map).get("tensors")
+        if is_mlx_array(tensor):
+            return tensor
+        if isinstance(tensor, np.ndarray):
+            return cast(NDArray[np.generic], tensor)
+        raise TypeError("feature map tensors must be an MLX or NumPy array")
+    if is_mlx_array(feature_map):
+        return feature_map
+    if isinstance(feature_map, np.ndarray):
+        return cast(NDArray[np.generic], feature_map)
+    raise TypeError("feature map must be an array, mapping, or NestedTensor")
+
+
+def _feature_mask(feature_map: object) -> TrackerArray | None:
+    """Return the padding mask of a feature map (NestedTensor or mapping), or None if it has none."""
+    if isinstance(feature_map, NestedTensor):
+        return feature_map.mask
+    if isinstance(feature_map, Mapping):
+        mask = cast(Mapping[str, object], feature_map).get("mask")
+        if mask is None or is_mlx_array(mask):
+            return mask
+        if isinstance(mask, np.ndarray):
+            return cast(NDArray[np.generic], mask)
+        raise TypeError("feature map mask must be an MLX or NumPy array")
+    return None
+
+
+def _mlx_feature_tensor(feature_map: object) -> mx.array:
+    """Like ``_feature_tensor`` but requires an MLX array (raises TypeError for NumPy)."""
+    tensor = _feature_tensor(feature_map)
+    if not is_mlx_array(tensor):
+        raise TypeError("MLX tracking requires MLX backbone feature arrays")
+    return tensor
+
+
+@overload
+def _take_along_axis(value: mx.array, indices: TrackerArray, axis: int) -> mx.array: ...
+
+
+@overload
+def _take_along_axis(value: TrackerArray, indices: TrackerArray, axis: int) -> TrackerArray: ...
+
+
+def _take_along_axis(value: TrackerArray, indices: TrackerArray, axis: int) -> TrackerArray:
+    """Select ``indices`` along ``axis`` (``take`` semantics) for MLX or NumPy values."""
+    if is_mlx_array(value):
+        return mx.take(value, mlx_array(indices, dtype=mx.int32), axis=axis)
+    return np.take(np.asarray(value), np.asarray(indices, dtype=np.int64), axis=axis)
+
+
+@overload
+def _reshape_spatial_feature(value: mx.array, size: tuple[int, int]) -> mx.array: ...
+
+
+@overload
+def _reshape_spatial_feature(value: TrackerArray, size: tuple[int, int]) -> TrackerArray: ...
+
+
+def _reshape_spatial_feature(value: TrackerArray, size: tuple[int, int]) -> TrackerArray:
+    """Restore BCHW features while retaining their NumPy or MLX backend."""
+    shape = (value.shape[1], value.shape[2], *size)
+    if is_mlx_array(value):
+        return mx.reshape(mx.transpose(value, (1, 2, 0)), shape)
+    array = cast(NDArray[np.generic], value)
+    return np.reshape(np.transpose(array, (1, 2, 0)), shape)
+
+
+def _take_image_batch(value: ImageBatch, indices: TrackerArray) -> ImageBatch:
+    """Select images ``indices`` from a batch, and from the mask too for a ``NestedTensor``."""
+    if isinstance(value, NestedTensor):
+        tensors = _take_along_axis(value.tensors, indices, axis=0)
+        mask = (
+            _take_along_axis(value.mask, indices, axis=0)
+            if value.mask is not None
+            else None
+        )
+        return NestedTensor(tensors, mask)
+    return _take_along_axis(value, indices, axis=0)
+
+
+def _replace_feature_tensor(feature_map: FeatureMap[mx.array], tensor: mx.array) -> FeatureMap[mx.array]:
+    """Return the feature map with its tensor replaced, keeping its mask and container type."""
+    if isinstance(feature_map, NestedTensor):
+        if not is_mlx_array(tensor):
+            raise TypeError("NestedTensor feature replacement requires an MLX array")
+        return NestedTensor(tensor, feature_map.mask)
+    if isinstance(feature_map, dict):
+        updated = dict(cast(Mapping[str, mx.array | None], feature_map))
+        updated["tensors"] = tensor
+        return updated
+    return tensor
+
+
+class _MultiplexTrackingSharedOptions(TypedDict, total=False):
+    """Supported options forwarded through the tracker constructor family."""
+
+    use_high_res_features_in_sam: bool
+    use_obj_ptrs_in_encoder: bool
+    max_obj_ptrs_in_encoder: int
+    add_tpos_enc_to_obj_ptrs: bool
+    proj_tpos_enc_in_obj_ptrs: bool
+    use_signed_tpos_enc_to_obj_ptrs: bool
+    only_obj_ptrs_in_the_past_for_eval: bool
+    save_image_features: bool
+    sincos_tpos_enc: bool
+    use_maskmem_tpos_v2: bool
+    directly_add_no_mem_embed: bool
+    apply_sigmoid_to_mask_logits_for_mem_enc: bool
+    sigmoid_scale_for_mem_enc: float
+    sigmoid_bias_for_mem_enc: float
+    binarize_mask_from_pts_for_mem_enc: bool
+    non_overlap_masks_for_mem_enc: bool
+    memory_temporal_stride_for_eval: int
+    use_mask_input_as_output_without_sam: bool
+    multimask_output_in_sam: bool
+    multimask_min_pt_num: int
+    multimask_max_pt_num: int
+    multimask_output_for_tracking: bool
+    use_multimask_token_for_obj_ptr: bool
+    use_best_iou_mask_for_mem_enc: bool
+    iou_prediction_use_sigmoid: bool
+    object_score_logit_threshold: float
+    stability_score_attentuation: bool
+    iter_use_prev_mask_pred: bool
+    forward_backbone_per_frame_for_eval: bool
+    offload_output_to_cpu_for_eval: bool
+    trim_past_non_cond_mem_for_eval: bool
+    pred_obj_scores: bool
+    pred_obj_scores_mlp: bool
+    fixed_no_obj_ptr: bool
+    use_no_obj_ptr: bool
+    use_linear_no_obj_ptr: bool
+    use_mlp_for_obj_ptr_proj: bool
+    no_obj_embed_spatial: bool
+    num_multimask_outputs: int
+    decode_mask_with_shared_tokens: bool
+    decode_mask_attribute_with_shared_tokens: bool
+    share_necks: bool
+    add_output_suppression_embeddings: bool
+    add_object_conditional_embeddings: bool
+    add_object_unconditional_embeddings: bool
+    condition_as_mask_input: bool
+    condition_as_mask_input_fg: float
+    condition_as_mask_input_bg: float
+    prob_to_use_pt_input_for_eval: float
+    prob_to_use_box_input_for_eval: float
+    num_frames_to_correct_for_eval: int
+    rand_frames_to_correct_for_eval: bool
+    force_correct_all_for_conditional_inputs: bool
+    num_init_cond_frames_for_eval: int
+    rand_init_cond_frames_for_eval: bool
+    max_cond_frames_in_attn: int
+    keep_first_cond_frame: bool
+    add_all_frames_to_correct_as_cond: bool
+    num_correction_pt_per_frame: int
+    pt_sampling_for_eval: str
+    use_memory_selection: bool
+    mf_threshold: float
+    compile_all_components: bool
+    randomness_fix: bool
+    sam_mask_decoder_extra_args: SamMaskDecoderExtraArgs | None
+
+
+class MultiplexTrackingOptions(_MultiplexTrackingSharedOptions, total=False):
+    """Keyword options of ``VideoTrackingMultiplex``: the shared options plus ``is_dynamic_model``."""
+
+    is_dynamic_model: bool
+
+
+class MultiplexTrackingConstructorArgs(_MultiplexTrackingSharedOptions, total=False):
+    """All constructor arguments of ``VideoTrackingMultiplex`` as keywords (modules required)."""
+
+    backbone: Required[nn.Module]
+    transformer: Required[nn.Module]
+    maskmem_backbone: Required[nn.Module]
+    multiplex_controller: Required[MultiplexController]
+    num_maskmem: int
+    image_size: int
+    backbone_stride: int
+
+
+class DynamicMultiplexTrackingConstructorArgs(MultiplexTrackingConstructorArgs, total=False):
+    """Constructor arguments of ``VideoTrackingDynamicMultiplex``: the base ones plus the dynamic-model options."""
+
+    rand_num_transition_points: bool
+    max_num_transition_points: int
+    add_all_transition_frames_as_cond: bool
+    max_trans_frames_in_attn: int
+    is_dynamic_model: bool
+    is_dynamic_vos_evaluation: bool
+
+
+class VideoTrackingMultiplex(nn.Module):
+    """Tracker that decodes masks for many objects at once from packed multiplex memory.
+
+    Options are read from ``kwargs`` (see ``_MultiplexTrackingSharedOptions``): the
+    ``use_*``, ``*_obj_ptr*`` and ``*_for_mem_enc`` names select architecture variants
+    (high-resolution SAM features, object pointers as extra memory tokens, how masks are
+    prepared for the memory encoder), the ``*_for_eval`` names configure the simulated
+    prompts of ``forward``, and ``compile_all_components`` is not supported.
+
+    Args:
+        backbone: Image backbone exposing ``forward_image``.
+        transformer: Encoder-only memory transformer with a ``d_model`` attribute.
+        maskmem_backbone: Memory encoder; its output projection must keep the hidden size.
+        multiplex_controller: Creates multiplex states and defines ``multiplex_count``.
+        num_maskmem: Number of memory frames the transformer attends to.
+        image_size: Side length in pixels of the square model input.
+        backbone_stride: Backbone stride; ``low_res_mask_size`` is ``image_size //
+            backbone_stride * 4`` and ``input_mask_size`` four times that.
+        **kwargs: Options described above.
+
+    Raises:
+        AssertionError: If the transformer has a decoder or the memory encoder compresses
+            the hidden size.
+        UnsupportedMultiplexRuntimeError: If ``compile_all_components`` is set.
+    """
+
+    interactive_mask_downsample: ArrayModule
+
+    def __init__(
+        self,
+        backbone: nn.Module,
+        transformer: nn.Module,
+        maskmem_backbone: nn.Module,
+        multiplex_controller: MultiplexController,
+        num_maskmem: int = 7,
+        image_size: int = 512,
+        backbone_stride: int = 16,
+        **kwargs: Unpack[MultiplexTrackingOptions],
+    ):
+        super().__init__()
+        sam_mask_decoder_extra_args = deepcopy(kwargs.get("sam_mask_decoder_extra_args"))
+        interactive_sam_mask_decoder_extra_args = deepcopy(sam_mask_decoder_extra_args)
+        if sam_mask_decoder_extra_args is not None:
+            sam_mask_decoder_extra_args["dynamic_multimask_via_stability"] = False
+
+        self.backbone = backbone
+        self.use_high_res_features_in_sam = kwargs.get(
+            "use_high_res_features_in_sam", False
+        )
+        self.num_feature_levels = 3 if self.use_high_res_features_in_sam else 1
+        self.use_obj_ptrs_in_encoder = kwargs.get("use_obj_ptrs_in_encoder", False)
+        self.max_obj_ptrs_in_encoder = kwargs.get("max_obj_ptrs_in_encoder", 16)
+        if self.use_obj_ptrs_in_encoder:
+            self.interactive_mask_downsample = Conv2dNCHW(1, 1, kernel_size=4, stride=4)
+
+        self.add_tpos_enc_to_obj_ptrs = kwargs.get("add_tpos_enc_to_obj_ptrs", True)
+        self.proj_tpos_enc_in_obj_ptrs = kwargs.get("proj_tpos_enc_in_obj_ptrs", False)
+        if self.proj_tpos_enc_in_obj_ptrs:
+            assert self.add_tpos_enc_to_obj_ptrs
+        self.use_signed_tpos_enc_to_obj_ptrs = kwargs.get(
+            "use_signed_tpos_enc_to_obj_ptrs", False
+        )
+        self.only_obj_ptrs_in_the_past_for_eval = kwargs.get(
+            "only_obj_ptrs_in_the_past_for_eval", False
+        )
+        self.multiplex_controller = multiplex_controller
+        self.save_image_features = kwargs.get("save_image_features", False)
+        self.multiplex_count = self.multiplex_controller.multiplex_count
+
+        assert getattr(transformer, "decoder", None) is None, (
+            "transformer should be encoder-only"
+        )
+        self.transformer = transformer
+        self.hidden_dim = cast(int, getattr(transformer, "d_model"))
+
+        self.maskmem_backbone = maskmem_backbone
+        self.mem_dim: int = self.hidden_dim
+        out_proj: object | None = getattr(self.maskmem_backbone, "out_proj", None)
+        weight: mx.array | None = (
+            cast(mx.array, getattr(out_proj, "weight"))
+            if out_proj is not None and hasattr(out_proj, "weight")
+            else None
+        )
+        if weight is not None:
+            mem_dim = weight.shape[0]
+            assert mem_dim == self.hidden_dim, (
+                "there should be no compression of memory embeddings"
+            )
+        self.num_maskmem = num_maskmem
+        self.sincos_tpos_enc = kwargs.get("sincos_tpos_enc", True)
+        self.use_maskmem_tpos_v2 = kwargs.get("use_maskmem_tpos_v2", False)
+        self.maskmem_tpos_enc = _trunc_normal((num_maskmem, 1, 1, self.mem_dim))
+        self.interactivity_no_mem_embed = _trunc_normal((1, 1, self.hidden_dim))
+        self.directly_add_no_mem_embed = kwargs.get("directly_add_no_mem_embed", False)
+
+        self.apply_sigmoid_to_mask_logits_for_mem_enc = kwargs.get(
+            "apply_sigmoid_to_mask_logits_for_mem_enc", False
+        )
+        self.sigmoid_scale_for_mem_enc = kwargs.get("sigmoid_scale_for_mem_enc", 1.0)
+        self.sigmoid_bias_for_mem_enc = kwargs.get("sigmoid_bias_for_mem_enc", 0.0)
+        self.binarize_mask_from_pts_for_mem_enc = kwargs.get(
+            "binarize_mask_from_pts_for_mem_enc", False
+        )
+        self.non_overlap_masks_for_mem_enc = kwargs.get(
+            "non_overlap_masks_for_mem_enc", False
+        )
+        self.memory_temporal_stride_for_eval = kwargs.get(
+            "memory_temporal_stride_for_eval", 1
+        )
+        self.use_mask_input_as_output_without_sam = kwargs.get(
+            "use_mask_input_as_output_without_sam", False
+        )
+        self.multimask_output_in_sam = kwargs.get("multimask_output_in_sam", False)
+        self.multimask_min_pt_num = kwargs.get("multimask_min_pt_num", 1)
+        self.multimask_max_pt_num = kwargs.get("multimask_max_pt_num", 1)
+        self.multimask_output_for_tracking = kwargs.get(
+            "multimask_output_for_tracking", False
+        )
+        self.use_multimask_token_for_obj_ptr = kwargs.get(
+            "use_multimask_token_for_obj_ptr", False
+        )
+        self.use_best_iou_mask_for_mem_enc = kwargs.get(
+            "use_best_iou_mask_for_mem_enc", False
+        )
+        self.iou_prediction_use_sigmoid = kwargs.get(
+            "iou_prediction_use_sigmoid", False
+        )
+        self.object_score_logit_threshold = kwargs.get(
+            "object_score_logit_threshold", 0.0
+        )
+        self.stability_score_attentuation = kwargs.get(
+            "stability_score_attentuation", False
+        )
+        self.iter_use_prev_mask_pred = kwargs.get("iter_use_prev_mask_pred", False)
+
+        self.image_size = image_size
+        self.backbone_stride = backbone_stride
+        self.low_res_mask_size = self.image_size // self.backbone_stride * 4
+        self.input_mask_size = self.low_res_mask_size * 4
+        self.forward_backbone_per_frame_for_eval = kwargs.get(
+            "forward_backbone_per_frame_for_eval", False
+        )
+        self.offload_output_to_cpu_for_eval = kwargs.get(
+            "offload_output_to_cpu_for_eval", False
+        )
+        self.trim_past_non_cond_mem_for_eval = kwargs.get(
+            "trim_past_non_cond_mem_for_eval", False
+        )
+        self.sam_mask_decoder_extra_args = sam_mask_decoder_extra_args
+        self.interactive_sam_mask_decoder_extra_args = (
+            interactive_sam_mask_decoder_extra_args
+        )
+        self.pred_obj_scores = kwargs.get("pred_obj_scores", False)
+        self.pred_obj_scores_mlp = kwargs.get("pred_obj_scores_mlp", False)
+        self.fixed_no_obj_ptr = kwargs.get("fixed_no_obj_ptr", False)
+        self.use_no_obj_ptr = kwargs.get("use_no_obj_ptr", True)
+        self.use_linear_no_obj_ptr = kwargs.get("use_linear_no_obj_ptr", False)
+        if (
+            self.pred_obj_scores
+            and self.use_obj_ptrs_in_encoder
+            and self.use_no_obj_ptr
+        ):
+            if self.use_linear_no_obj_ptr:
+                self.no_obj_ptr_linear = nn.Linear(self.hidden_dim, self.hidden_dim)
+            else:
+                self.no_obj_ptr = _trunc_normal((self.multiplex_count, self.hidden_dim))
+
+        self.use_mlp_for_obj_ptr_proj = kwargs.get("use_mlp_for_obj_ptr_proj", False)
+        self.no_obj_embed_spatial = None
+        if kwargs.get("no_obj_embed_spatial", False):
+            self.no_obj_embed_spatial = _trunc_normal(
+                (self.multiplex_count, self.hidden_dim)
+            )
+        self.num_multimask_outputs = kwargs.get("num_multimask_outputs", 3)
+        self.decode_mask_with_shared_tokens = kwargs.get(
+            "decode_mask_with_shared_tokens", False
+        )
+        self.decode_mask_attribute_with_shared_tokens = kwargs.get(
+            "decode_mask_attribute_with_shared_tokens", False
+        )
+        self.share_necks = kwargs.get("share_necks", False)
+
+        self.add_output_suppression_embeddings = kwargs.get(
+            "add_output_suppression_embeddings", False
+        )
+        if self.add_output_suppression_embeddings:
+            self.output_valid_embed = _trunc_normal(
+                (self.multiplex_count, self.hidden_dim)
+            )
+            self.output_invalid_embed = _trunc_normal(
+                (self.multiplex_count, self.hidden_dim)
+            )
+        self.add_object_conditional_embeddings = kwargs.get(
+            "add_object_conditional_embeddings", False
+        )
+        add_object_unconditional_embeddings = kwargs.get(
+            "add_object_unconditional_embeddings",
+            self.add_object_conditional_embeddings,
+        )
+        self.add_object_unconditional_embeddings = add_object_unconditional_embeddings
+        if self.add_object_conditional_embeddings:
+            self.obj_cond_embed = _trunc_normal((self.multiplex_count, self.hidden_dim))
+            if self.add_object_unconditional_embeddings:
+                self.obj_non_cond_embed = _trunc_normal(
+                    (self.multiplex_count, self.hidden_dim)
+                )
+        self.condition_as_mask_input = kwargs.get("condition_as_mask_input", False)
+        self.condition_as_mask_input_fg = kwargs.get("condition_as_mask_input_fg", 1.0)
+        self.condition_as_mask_input_bg = kwargs.get("condition_as_mask_input_bg", 0.0)
+        self.is_dynamic_model = kwargs.get("is_dynamic_model", False)
+
+        self._build_sam_heads()
+
+        self.prob_to_use_pt_input_for_eval = kwargs.get(
+            "prob_to_use_pt_input_for_eval", 0.0
+        )
+        self.prob_to_use_box_input_for_eval = kwargs.get(
+            "prob_to_use_box_input_for_eval", 0.0
+        )
+        self.num_frames_to_correct_for_eval = kwargs.get(
+            "num_frames_to_correct_for_eval", 1
+        )
+        self.rand_frames_to_correct_for_eval = kwargs.get(
+            "rand_frames_to_correct_for_eval", False
+        )
+        self.force_correct_all_for_conditional_inputs = kwargs.get(
+            "force_correct_all_for_conditional_inputs", False
+        )
+        self.num_init_cond_frames_for_eval = kwargs.get(
+            "num_init_cond_frames_for_eval", 1
+        )
+        self.rand_init_cond_frames_for_eval = kwargs.get(
+            "rand_init_cond_frames_for_eval", False
+        )
+        self.max_cond_frames_in_attn = kwargs.get("max_cond_frames_in_attn", -1)
+        self.keep_first_cond_frame = kwargs.get("keep_first_cond_frame", False)
+        self.add_all_frames_to_correct_as_cond = kwargs.get(
+            "add_all_frames_to_correct_as_cond", False
+        )
+        self.num_correction_pt_per_frame = kwargs.get("num_correction_pt_per_frame", 7)
+        self.pt_sampling_for_eval = kwargs.get("pt_sampling_for_eval", "center")
+        self.rng = np.random.default_rng(seed=42)
+        self.rng2 = (
+            np.random.default_rng(seed=42)
+            if kwargs.get("randomness_fix", False)
+            else self.rng
+        )
+        self.use_memory_selection = kwargs.get("use_memory_selection", False)
+        self.mf_threshold = kwargs.get("mf_threshold", 0.01)
+        self.compile_all_components = kwargs.get("compile_all_components", False)
+        if self.compile_all_components:
+            raise_unsupported_multiplex_runtime(
+                "VideoTrackingMultiplex.compile_all_components"
+            )
+
+    def _build_sam_heads(self) -> None:
+        """Create the point-prompt encoder and interactive mask decoder, the multiplex mask decoder used for propagation and the object-pointer projections."""
+        self.sam_prompt_embed_dim = self.hidden_dim
+        self.sam_image_embedding_size = self.image_size // self.backbone_stride
+        self.image_pe_layer = PositionEmbeddingRandom(self.hidden_dim // 2)
+        self.interactive_sam_prompt_encoder = PromptEncoder(
+            embed_dim=self.sam_prompt_embed_dim,
+            image_embedding_size=(
+                self.sam_image_embedding_size,
+                self.sam_image_embedding_size,
+            ),
+            input_image_size=(self.image_size, self.image_size),
+            mask_in_chans=16,
+        )
+        self.interactive_sam_mask_decoder = MaskDecoder(
+            num_multimask_outputs=3,
+            transformer=TwoWayTransformer(
+                depth=2,
+                embedding_dim=self.sam_prompt_embed_dim,
+                mlp_dim=2048,
+                num_heads=8,
+            ),
+            transformer_dim=self.sam_prompt_embed_dim,
+            iou_head_depth=3,
+            iou_head_hidden_dim=256,
+            use_high_res_features=self.use_high_res_features_in_sam,
+            iou_prediction_use_sigmoid=self.iou_prediction_use_sigmoid,
+            pred_obj_scores=self.pred_obj_scores,
+            pred_obj_scores_mlp=self.pred_obj_scores_mlp,
+            use_multimask_token_for_obj_ptr=self.use_multimask_token_for_obj_ptr,
+            **(self.interactive_sam_mask_decoder_extra_args or {}),
+        )
+        self.sam_mask_decoder = MultiplexMaskDecoder(
+            multiplex_count=self.multiplex_count,
+            num_multimask_outputs=self.num_multimask_outputs,
+            transformer=TwoWayTransformer(
+                depth=2,
+                embedding_dim=self.hidden_dim,
+                mlp_dim=2048,
+                num_heads=8,
+            ),
+            transformer_dim=self.hidden_dim,
+            iou_head_depth=3,
+            iou_head_hidden_dim=256,
+            use_high_res_features=self.use_high_res_features_in_sam,
+            iou_prediction_use_sigmoid=self.iou_prediction_use_sigmoid,
+            pred_obj_scores=self.pred_obj_scores,
+            pred_obj_scores_mlp=self.pred_obj_scores_mlp,
+            use_multimask_token_for_obj_ptr=self.use_multimask_token_for_obj_ptr,
+            decode_mask_with_shared_tokens=self.decode_mask_with_shared_tokens,
+            decode_mask_attribute_with_shared_tokens=(
+                self.decode_mask_attribute_with_shared_tokens
+            ),
+            multimask_outputs_only=(
+                self.num_multimask_outputs > 0 and self.multimask_output_in_sam
+            ),
+            **(self.sam_mask_decoder_extra_args or {}),
+        )
+        if self.use_obj_ptrs_in_encoder:
+            if self.use_mlp_for_obj_ptr_proj:
+                self.obj_ptr_proj = MLP(
+                    self.hidden_dim,
+                    self.hidden_dim,
+                    self.hidden_dim,
+                    3,
+                )
+                self.interactive_obj_ptr_proj = MLP(
+                    self.hidden_dim,
+                    self.hidden_dim,
+                    self.hidden_dim,
+                    3,
+                )
+            else:
+                self.obj_ptr_proj = nn.Linear(self.hidden_dim, self.hidden_dim)
+                self.interactive_obj_ptr_proj = nn.Linear(
+                    self.hidden_dim,
+                    self.hidden_dim,
+                )
+        else:
+            self.obj_ptr_proj = nn.Identity()
+            self.interactive_obj_ptr_proj = nn.Identity()
+        self.obj_ptr_tpos_proj = (
+            nn.Linear(self.hidden_dim, self.mem_dim)
+            if self.proj_tpos_enc_in_obj_ptrs
+            else nn.Identity()
+        )
+
+    @overload
+    def _maybe_clone(self, x: mx.array) -> mx.array: ...
+
+    @overload
+    def _maybe_clone(self, x: NDArray[np.generic]) -> NDArray[np.generic]: ...
+
+    def _maybe_clone(self, x: TrackerArray) -> TrackerArray:
+        """Return a copy of the array (new MLX array or NumPy copy)."""
+        return mx.array(x) if is_mlx_array(x) else np.array(x, copy=True)
+
+    def get_propagation_dense_pe(self) -> mx.array:
+        """Dense positional encoding ``(1, C, S, S)`` of the SAM image grid, ``S = image_size // backbone_stride``."""
+        return self.image_pe_layer(
+            (self.sam_image_embedding_size, self.sam_image_embedding_size)
+        )[None, ...]
+
+    def forward_image(
+        self,
+        img_batch: ImageBatch,
+        *,
+        need_sam3_out: bool = False,
+        need_interactive_out: bool = False,
+        need_propagation_out: bool = False,
+    ) -> RawBackboneOutput[mx.array]:
+        """Run the image backbone and prepare SAM high-res features.
+
+        With ``share_necks`` the interactive output reuses the propagation (SAM2) neck.
+        With ``use_high_res_features_in_sam`` the first two FPN levels are passed through
+        the ``conv_s0`` and ``conv_s1`` of the matching mask decoder (interactive decoder
+        for the interactive neck, multiplex decoder for the propagation neck).
+
+        Raises:
+            UnsupportedMultiplexRuntimeError: If the backbone has no ``forward_image``.
+            KeyError: If ``share_necks`` is set and the backbone returns no
+                ``sam2_backbone_out``.
+        """
+        forward_image_value = getattr(self.backbone, "forward_image", None)
+        if not callable(forward_image_value):
+            raise_unsupported_multiplex_runtime(
+                "VideoTrackingMultiplex.forward_image(backbone)"
+            )
+        forward_image = cast(BackboneForward, forward_image_value)
+
+        if self.share_necks:
+            need_propagation_out = need_interactive_out or need_propagation_out
+            need_interactive_out = False
+            backbone_out = forward_image(
+                img_batch,
+                need_sam3_out=need_sam3_out,
+                need_sam2_out=need_propagation_out,
+            )
+            if "sam2_backbone_out" not in backbone_out:
+                raise KeyError("sam2_backbone_out")
+            backbone_out["interactive"] = backbone_out["sam2_backbone_out"]
+        else:
+            backbone_out = forward_image(
+                img_batch,
+                need_sam3_out=need_sam3_out,
+                need_interactive_out=need_interactive_out,
+                need_propagation_out=need_propagation_out,
+            )
+
+        if self.use_high_res_features_in_sam:
+            if need_interactive_out and "interactive" in backbone_out:
+                interactive_fpn = list(backbone_out["interactive"]["backbone_fpn"])
+                interactive_fpn[0] = _replace_feature_tensor(
+                    interactive_fpn[0],
+                    self.interactive_sam_mask_decoder.conv_s0(
+                        _mlx_feature_tensor(interactive_fpn[0])
+                    ),
+                )
+                interactive_fpn[1] = _replace_feature_tensor(
+                    interactive_fpn[1],
+                    self.interactive_sam_mask_decoder.conv_s1(
+                        _mlx_feature_tensor(interactive_fpn[1])
+                    ),
+                )
+                backbone_out["interactive"] = cast(RawBackboneFeatures[mx.array], dict(backbone_out["interactive"]))
+                backbone_out["interactive"]["backbone_fpn"] = interactive_fpn
+            if need_propagation_out and "sam2_backbone_out" in backbone_out:
+                propagation_fpn = list(
+                    backbone_out["sam2_backbone_out"]["backbone_fpn"]
+                )
+                propagation_fpn[0] = _replace_feature_tensor(
+                    propagation_fpn[0],
+                    self.sam_mask_decoder.conv_s0(
+                        _mlx_feature_tensor(propagation_fpn[0])
+                    ),
+                )
+                propagation_fpn[1] = _replace_feature_tensor(
+                    propagation_fpn[1],
+                    self.sam_mask_decoder.conv_s1(
+                        _mlx_feature_tensor(propagation_fpn[1])
+                    ),
+                )
+                backbone_out["sam2_backbone_out"] = cast(RawBackboneFeatures[mx.array], dict(
+                    backbone_out["sam2_backbone_out"]
+                ))
+                backbone_out["sam2_backbone_out"]["backbone_fpn"] = propagation_fpn
+
+        return backbone_out
+
+    @overload
+    def _target_segments_as_masks(self, target: TrackingTarget | Mapping[str, mx.array]) -> mx.array: ...
+
+    @overload
+    def _target_segments_as_masks(self, target: object) -> TrackerArray: ...
+
+    def _target_segments_as_masks(self, target: object) -> TrackerArray:
+        """Return a target's ``segments`` as ``(B, 1, H, W)``; a ``(B, H, W)`` array gets the channel axis.
+
+        Raises:
+            TypeError: If ``segments`` is not an array.
+            ValueError: For any other shape.
+        """
+        segments_value = (
+            cast(Mapping[str, object], target).get("segments")
+            if isinstance(target, Mapping)
+            else getattr(target, "segments", None)
+        )
+        if not (is_mlx_array(segments_value) or isinstance(segments_value, np.ndarray)):
+            raise TypeError("find_targets segments must be an MLX or NumPy array")
+        segments = cast(TrackerArray, segments_value)
+        if len(segments.shape) == 3:
+            return (
+                mx.expand_dims(segments, axis=1)
+                if is_mlx_array(segments)
+                else np.expand_dims(segments, axis=1)
+            )
+        if len(segments.shape) == 4 and segments.shape[1] == 1:
+            return segments
+        raise ValueError("find_targets segments must have shape [B,H,W] or [B,1,H,W]")
+
+    def _prepare_prompt_inputs_meta(
+        self,
+        backbone_out: RawBackboneOutput[mx.array],
+        input: TrackingInput,
+        start_frame_idx: int = 0,
+    ) -> PromptBackboneOutput:
+        """Choose which frames receive initial prompts and correction points for an evaluation run.
+
+        Adds to ``backbone_out``: ``gt_masks_per_frame`` (``(B, 1, H, W)`` per frame from
+        ``input.find_targets``), ``num_frames``, ``use_pt_input`` (point prompts instead of
+        masks, drawn with probability ``prob_to_use_pt_input_for_eval`` and forced for a
+        single frame), ``init_cond_frames`` (``start_frame_idx`` plus random extra frames),
+        ``frames_not_in_init_cond`` and ``frames_to_add_correction_pt``. Randomness comes
+        from the model's seeded NumPy generator. Dynamic VOS evaluation additionally runs
+        ``_prepare_dynamic_vos_eval_prompt_inputs``.
+
+        Raises:
+            ValueError: For missing targets or inconsistent frame counts.
+        """
+        find_targets = cast(Sequence[TrackingTarget | Mapping[str, mx.array] | None] | None, getattr(input, "find_targets", None))
+        if find_targets is None:
+            raise ValueError("forward requires input.find_targets for mask prompts")
+
+        missing_target_indices = [
+            stage_id for stage_id, target in enumerate(find_targets) if target is None
+        ]
+        if missing_target_indices:
+            raise ValueError(
+                "mask-prompt preparation requires populated find_targets entries; "
+                f"missing indices: {missing_target_indices}"
+            )
+
+        gt_masks_per_frame = {
+            stage_id: self._target_segments_as_masks(targets)
+            for stage_id, targets in enumerate(find_targets)
+            if targets is not None
+        }
+        prompt_out = cast(PromptBackboneOutput, backbone_out)
+        prompt_out["gt_masks_per_frame"] = gt_masks_per_frame
+        num_frames = len(find_targets)
+        prompt_out["num_frames"] = num_frames
+
+        prob_to_use_pt_input = self.prob_to_use_pt_input_for_eval
+        num_frames_to_correct = self.num_frames_to_correct_for_eval
+        rand_frames_to_correct = self.rand_frames_to_correct_for_eval
+        num_init_cond_frames = self.num_init_cond_frames_for_eval
+        rand_init_cond_frames = self.rand_init_cond_frames_for_eval
+
+        if num_frames == 1:
+            prob_to_use_pt_input = 1.0
+            num_frames_to_correct = 1
+            num_init_cond_frames = 1
+        if num_init_cond_frames < 1:
+            raise ValueError("num_init_cond_frames must be at least 1")
+        if start_frame_idx < 0 or start_frame_idx >= num_frames:
+            raise ValueError("start_frame_idx must refer to an existing frame")
+
+        use_pt_input = self.rng.random() < prob_to_use_pt_input
+        if rand_init_cond_frames and num_init_cond_frames > 1:
+            num_init_cond_frames = int(self.rng.integers(1, num_init_cond_frames + 1))
+        if num_init_cond_frames > num_frames - start_frame_idx:
+            raise ValueError("num_init_cond_frames exceeds available frames")
+        if (
+            use_pt_input
+            and rand_frames_to_correct
+            and num_frames_to_correct > num_init_cond_frames
+        ):
+            num_frames_to_correct = int(
+                self.rng.integers(num_init_cond_frames, num_frames_to_correct + 1)
+            )
+        prompt_out["use_pt_input"] = use_pt_input
+
+        if num_init_cond_frames == 1:
+            init_cond_frames = [start_frame_idx]
+        else:
+            remaining = np.arange(start_frame_idx + 1, num_frames)
+            if num_init_cond_frames - 1 > remaining.size:
+                raise ValueError("not enough frames for init conditioning")
+            sampled = self.rng.choice(
+                remaining,
+                num_init_cond_frames - 1,
+                replace=False,
+            )
+            init_cond_frames = [start_frame_idx] + [int(x) for x in sampled]
+        prompt_out["init_cond_frames"] = init_cond_frames
+        prompt_out["frames_not_in_init_cond"] = [
+            t for t in range(start_frame_idx, num_frames) if t not in init_cond_frames
+        ]
+
+        if not use_pt_input:
+            frames_to_add_correction_pt = []
+        elif num_frames_to_correct == num_init_cond_frames:
+            frames_to_add_correction_pt = init_cond_frames
+        else:
+            if num_frames_to_correct <= num_init_cond_frames:
+                raise ValueError(
+                    "num_frames_to_correct must exceed num_init_cond_frames"
+                )
+            extra_num = num_frames_to_correct - num_init_cond_frames
+            candidates = prompt_out["frames_not_in_init_cond"]
+            if extra_num > len(candidates):
+                raise ValueError("not enough non-conditioning frames to correct")
+            extra = self.rng.choice(candidates, extra_num, replace=False)
+            frames_to_add_correction_pt = init_cond_frames + [int(x) for x in extra]
+        prompt_out["frames_to_add_correction_pt"] = frames_to_add_correction_pt
+        if getattr(self, "is_dynamic_vos_evaluation", False):
+            self._prepare_dynamic_vos_eval_prompt_inputs(
+                prompt_out,
+                input,
+                start_frame_idx=start_frame_idx,
+            )
+        return prompt_out
+
+    def _prepare_dynamic_vos_eval_prompt_inputs(
+        self,
+        backbone_out: PromptBackboneOutput,
+        input: TrackingInput,
+        *,
+        start_frame_idx: int,
+    ) -> None:
+        """Reorder ground-truth masks by object appearance for dynamic evaluation (objects appearing over time).
+
+        Adds ``valid_idx_per_frame``, ``new_idx_per_transition``,
+        ``valid_objects_prior_to_each_transition``, ``transition_points`` (frames outside
+        the initial conditioning frames where a new object first appears) and
+        ``object_appearance_order`` to ``backbone_out``. The ground-truth masks of each frame
+        are reordered by first appearance and cut to that frame's ``valid_idx_per_frame``
+        (the objects seen so far); the ``find_targets`` segments of a transition frame keep
+        only the objects seen before it. An empty start frame moves the initial
+        conditioning frame to the first frame with a visible object.
+
+        Raises:
+            ValueError: If ``input.visible_objects_per_frame`` is missing.
+        """
+        visible_objects_per_frame = cast(Mapping[int, set[int]] | None, getattr(input, "visible_objects_per_frame", None))
+        if visible_objects_per_frame is None:
+            raise ValueError(
+                "dynamic VOS evaluation requires input.visible_objects_per_frame."
+            )
+
+        num_frames = backbone_out["num_frames"]
+        gt_masks_per_frame = backbone_out["gt_masks_per_frame"]
+        init_cond_frames = sorted(backbone_out["init_cond_frames"])
+        frames_not_in_init_cond = list(backbone_out["frames_not_in_init_cond"])
+
+        if len(visible_objects_per_frame.get(start_frame_idx, set())) == 0:
+            if len(init_cond_frames) != 1:
+                raise ValueError(
+                    "empty dynamic VOS start frame requires one initial cond frame."
+                )
+            for stage_id in range(start_frame_idx, num_frames):
+                if len(visible_objects_per_frame.get(stage_id, set())) > 0:
+                    init_cond_frames = [stage_id]
+                    break
+            for stage_id in range(init_cond_frames[0] + 1):
+                if stage_id in frames_not_in_init_cond:
+                    frames_not_in_init_cond.remove(stage_id)
+            backbone_out["init_cond_frames"] = init_cond_frames
+            backbone_out["frames_not_in_init_cond"] = frames_not_in_init_cond
+
+        valid_idx_per_frame: dict[int, list[int]] = {}
+        valid_idx_prior_to_each_transition: dict[int, list[int]] = {}
+        new_idx_per_transition: dict[int, list[int]] = {}
+
+        object_appearance_order: list[int] = []
+        object_appear_at_stage: dict[int, int] = {}
+        transition_points: list[int] = []
+        stage_to_new_objects: dict[int, list[int]] = {}
+        for stage_id in range(start_frame_idx, num_frames):
+            visible_objects = sorted(
+                int(obj_id) for obj_id in visible_objects_per_frame.get(stage_id, set())
+            )
+            for obj_id in visible_objects:
+                if obj_id in object_appear_at_stage:
+                    continue
+                object_appear_at_stage[obj_id] = stage_id
+                object_appearance_order.append(obj_id)
+                stage_to_new_objects.setdefault(stage_id, []).append(obj_id)
+                if stage_id not in init_cond_frames:
+                    transition_points.append(stage_id)
+
+        objects_seen_so_far: list[int] = []
+        for stage_id in range(start_frame_idx, num_frames):
+            if stage_id in transition_points:
+                new_objects = stage_to_new_objects.get(stage_id, [])
+                num_objects_before = len(objects_seen_so_far)
+                valid_idx_prior_to_each_transition[stage_id] = list(
+                    range(num_objects_before)
+                )
+                new_idx_per_transition[stage_id] = list(
+                    range(num_objects_before, num_objects_before + len(new_objects))
+                )
+                objects_seen_so_far.extend(new_objects)
+
+            if stage_id in init_cond_frames:
+                valid_idx_per_frame[stage_id] = list(
+                    range(len(stage_to_new_objects.get(stage_id, [])))
+                )
+                objects_seen_so_far.extend(stage_to_new_objects.get(stage_id, []))
+            else:
+                valid_idx_per_frame[stage_id] = list(range(len(objects_seen_so_far)))
+
+        for stage_id in range(start_frame_idx, num_frames):
+            remapped = _take_rows(gt_masks_per_frame[stage_id], object_appearance_order)
+            gt_masks_per_frame[stage_id] = _take_rows(
+                remapped,
+                valid_idx_per_frame[stage_id],
+            )
+
+        find_targets = cast(Sequence[TrackingTarget | Mapping[str, mx.array] | None], input.find_targets)
+        for stage_id, targets in enumerate(find_targets):
+            if stage_id < start_frame_idx or stage_id >= num_frames:
+                continue
+            if stage_id in transition_points:
+                prev_objects = valid_idx_prior_to_each_transition[stage_id]
+                target_masks = _take_rows(gt_masks_per_frame[stage_id], prev_objects)
+            else:
+                target_masks = gt_masks_per_frame[stage_id]
+            dynamic_target = cast(DynamicTrackingTarget, targets)
+            dynamic_target.segments = target_masks.squeeze(1)
+            if hasattr(targets, "num_boxes"):
+                dynamic_target.num_boxes = dynamic_target.num_boxes[: dynamic_target.segments.shape[0]]
+
+        backbone_out["valid_idx_per_frame"] = valid_idx_per_frame
+        backbone_out["new_idx_per_transition"] = new_idx_per_transition
+        backbone_out["valid_objects_prior_to_each_transition"] = (
+            valid_idx_prior_to_each_transition
+        )
+        backbone_out["transition_points"] = set(transition_points)
+        backbone_out["gt_masks_per_frame"] = gt_masks_per_frame
+        backbone_out["object_appearance_order"] = object_appearance_order
+
+    def _prepare_conditional_frames(
+        self,
+        backbone_out: PromptBackboneOutput,
+    ) -> PromptBackboneOutput:
+        """Create the prompts of the initial conditioning frames.
+
+        Each frame gets its ground-truth masks or, with ``use_pt_input``, a point prompt
+        sampled by ``pt_sampling_for_eval`` (box-derived points with probability
+        ``prob_to_use_box_input_for_eval``). Stored in ``mask_inputs_per_frame`` and
+        ``point_inputs_per_frame``.
+        """
+        init_cond_frames = backbone_out["init_cond_frames"]
+        gt_masks_per_frame = backbone_out["gt_masks_per_frame"]
+        use_pt_input = backbone_out["use_pt_input"]
+
+        prob_to_use_box_input = self.prob_to_use_box_input_for_eval
+
+        backbone_out["mask_inputs_per_frame"] = {}
+        backbone_out["point_inputs_per_frame"] = {}
+        for t in init_cond_frames:
+            if not use_pt_input:
+                backbone_out["mask_inputs_per_frame"][t] = gt_masks_per_frame[t]
+                continue
+
+            if self.rng.random() < prob_to_use_box_input:
+                points, labels = sample_box_points(gt_masks_per_frame[t])
+            else:
+                points, labels = get_next_point(
+                    gt_masks=gt_masks_per_frame[t],
+                    pred_masks=None,
+                    method=self.pt_sampling_for_eval,
+                )
+            backbone_out["point_inputs_per_frame"][t] = {
+                "point_coords": points,
+                "point_labels": labels,
+            }
+        return backbone_out
+
+    def prepare_prompt_inputs(
+        self,
+        backbone_out: RawBackboneOutput[mx.array],
+        input: TrackingInput,
+        start_frame_idx: int = 0,
+    ) -> PromptBackboneOutput:
+        """Prepare evaluation prompts: ``_prepare_prompt_inputs_meta`` followed by ``_prepare_conditional_frames``."""
+        prompt_out = self._prepare_prompt_inputs_meta(
+            backbone_out,
+            input,
+            start_frame_idx,
+        )
+        return self._prepare_conditional_frames(prompt_out)
+
+    @overload
+    def _prepare_backbone_features(
+        self, backbone_out: RawBackboneOutput[mx.array]
+    ) -> PreparedBackboneOutput[mx.array]: ...
+
+    @overload
+    def _prepare_backbone_features(
+        self, backbone_out: RawBackboneOutput[TrackerArray]
+    ) -> PreparedBackboneOutput[TrackerArray]: ...
+
+    def _prepare_backbone_features(
+        self,
+        backbone_out: RawBackboneOutput[mx.array] | RawBackboneOutput[TrackerArray],
+    ) -> PreparedBackboneOutput[mx.array] | PreparedBackboneOutput[TrackerArray]:
+        """Flatten precomputed neck features into ``(HW, B, C)`` form."""
+        backbone_features: PreparedBackboneOutput[TrackerArray] = {}
+        raw_necks = cast(Mapping[NeckName, RawBackboneFeatures[mx.array] | RawBackboneFeatures[TrackerArray]], backbone_out)
+        for neck_k in neck_outs:
+            if neck_k not in raw_necks:
+                continue
+            neck_out = raw_necks[neck_k]
+            if len(neck_out["backbone_fpn"]) != len(neck_out["vision_pos_enc"]):
+                raise ValueError("backbone_fpn and vision_pos_enc length mismatch")
+            if len(neck_out["backbone_fpn"]) < self.num_feature_levels:
+                raise ValueError("not enough feature levels for multiplex tracking")
+
+            feature_maps = neck_out["backbone_fpn"][-self.num_feature_levels :]
+            pos_maps = neck_out["vision_pos_enc"][-self.num_feature_levels :]
+            feature_tensors: list[TrackerArray] = [
+                _feature_tensor(x) for x in feature_maps
+            ]
+            pos_tensors: list[TrackerArray] = [_feature_tensor(x) for x in pos_maps]
+            feat_sizes: list[tuple[int, int]] = [
+                (x.shape[-2], x.shape[-1]) for x in pos_tensors
+            ]
+            vision_feats: list[TrackerArray] = [
+                mx.transpose(mx.reshape(x, (x.shape[0], x.shape[1], -1)), (2, 0, 1))
+                if is_mlx_array(x)
+                else np.transpose(
+                    np.reshape(x, (x.shape[0], x.shape[1], -1)), (2, 0, 1)
+                )
+                for x in feature_tensors
+            ]
+            vision_pos_embeds: list[TrackerArray] = [
+                mx.transpose(mx.reshape(x, (x.shape[0], x.shape[1], -1)), (2, 0, 1))
+                if is_mlx_array(x)
+                else np.transpose(
+                    np.reshape(x, (x.shape[0], x.shape[1], -1)), (2, 0, 1)
+                )
+                for x in pos_tensors
+            ]
+            vision_masks = [_feature_mask(x) for x in feature_maps]
+            vision_masks = [
+                (
+                    mx.reshape(mask, (mask.shape[0], -1))
+                    if is_mlx_array(mask)
+                    else np.reshape(mask, (mask.shape[0], -1))
+                )
+                if mask is not None
+                else None
+                for mask in vision_masks
+            ]
+
+            backbone_features[neck_k] = {
+                "vision_feats": vision_feats,
+                "vision_masks": vision_masks,
+                "vision_pos_embeds": vision_pos_embeds,
+                "feat_sizes": feat_sizes,
+            }
+        return backbone_features
+
+    def _prepare_backbone_features_per_frame(
+        self,
+        img_batch: ImageBatch,
+        img_ids: TrackerArray,
+        *,
+        need_interactive_out: bool = False,
+        need_propagation_out: bool = False,
+    ) -> tuple[ImageBatch, PreparedBackboneOutput[mx.array]]:
+        """Compute and flatten backbone features for a batch of identical image ids (one frame)."""
+        img_ids_np = _to_numpy(img_ids).reshape(-1).astype(np.int64)
+        if img_ids_np.size == 0:
+            raise ValueError("img_ids must contain at least one image id")
+        if not np.all(img_ids_np == img_ids_np[0]):
+            raise ValueError("all image ids for a multiplex stage must match")
+        unique_img_ids = np.array([int(img_ids_np[0])], dtype=np.int64)
+
+        image = _take_image_batch(img_batch, unique_img_ids)
+        backbone_out = self.forward_image(
+            image,
+            need_interactive_out=need_interactive_out,
+            need_propagation_out=need_propagation_out,
+        )
+        return image, self._prepare_backbone_features(backbone_out)
+
+    def _get_tpos_enc(
+        self,
+        rel_pos_list: list[int],
+        device: object = None,
+        max_abs_pos: int | None = None,
+        dummy: bool = False,
+    ) -> mx.array:
+        """Temporal position encoding ``(len(rel_pos_list), mem_dim)`` of relative frame offsets.
+
+        Offsets are divided by ``max_abs_pos - 1`` (by 1 when None), sine-encoded and
+        projected with ``obj_ptr_tpos_proj``. ``dummy`` returns zeros; ``device`` is unused.
+
+        Raises:
+            UnsupportedMultiplexRuntimeError: If ``sincos_tpos_enc`` is off.
+        """
+        del device
+        if dummy:
+            return mx.zeros((len(rel_pos_list), self.mem_dim), dtype=mx.float32)
+        if not self.sincos_tpos_enc:
+            raise_unsupported_multiplex_runtime(
+                "VideoTrackingMultiplex._get_tpos_enc(sincos_tpos_enc=False)"
+            )
+
+        t_diff_max = max_abs_pos - 1 if max_abs_pos is not None else 1
+        pos_enc = mx.array(rel_pos_list, dtype=mx.float32) / t_diff_max
+        tpos_dim = self.hidden_dim if self.proj_tpos_enc_in_obj_ptrs else self.mem_dim
+        pos_enc = get_1d_sine_pe(pos_enc, dim=tpos_dim)
+        return self.obj_ptr_tpos_proj(pos_enc)
+
+    def _get_interactive_pix_mem(
+        self,
+        features: list[mx.array],
+        feat_sizes: list[tuple[int, int]],
+    ) -> mx.array:
+        """Interactive-path pixel features ``(B, C, H, W)``: the last-level features plus the learned no-memory embedding.
+
+        Raises:
+            ValueError: If ``directly_add_no_mem_embed`` is off.
+        """
+        if not self.directly_add_no_mem_embed:
+            raise ValueError("directly_add_no_mem_embed is required for interactivity")
+        pix_feat_with_mem = features[-1] + self.interactivity_no_mem_embed
+        B = features[-1].shape[1]
+        C = self.hidden_dim
+        H, W = feat_sizes[-1]
+        return mx.reshape(mx.transpose(pix_feat_with_mem, (1, 2, 0)), (B, C, H, W))
+
+    def cal_mem_score(self, object_score_logits: mx.array, iou_score: mx.array) -> mx.array:
+        """Memory-selection score: mean of ``presence * iou_score``, with presence ``2 * sigmoid(logit) - 1`` where the logit is positive and 0 otherwise."""
+        object_score_norm = mx.where(
+            object_score_logits > 0,
+            mx.sigmoid(object_score_logits) * 2 - 1,
+            mx.zeros_like(object_score_logits),
+        )
+        return (object_score_norm * iou_score).mean()
+
+    def frame_filter(
+        self,
+        output_dict: dict[str, dict[int, StageOutput]],
+        track_in_reverse: bool,
+        frame_idx: int,
+        num_frames: int,
+        r: int,
+    ) -> list[int]:
+        """Select past non-conditioning frames to keep when memory selection is on.
+
+        Walks back from the frame before ``frame_idx`` in steps of ``r`` (forward in
+        reverse tracking) and keeps frames whose ``eff_iou_score`` exceeds
+        ``mf_threshold``, up to ``min(num_frames, max_obj_ptrs_in_encoder) - 1`` of them,
+        and always includes the adjacent frame. Returns frame indices, farthest first with
+        the adjacent frame last; empty at the first (last, in reverse) frame.
+        """
+        if (frame_idx == 0 and not track_in_reverse) or (
+            frame_idx == num_frames - 1 and track_in_reverse
+        ):
+            return []
+
+        max_num = min(num_frames, self.max_obj_ptrs_in_encoder)
+        if not track_in_reverse:
+            start = frame_idx - 1
+            end = 0
+            step = -r
+            must_include = frame_idx - 1
+        else:
+            start = frame_idx + 1
+            end = num_frames
+            step = r
+            must_include = frame_idx + 1
+
+        valid_indices: list[int] = []
+        for i in range(start, end, step):
+            out = output_dict["non_cond_frame_outputs"].get(i)
+            if out is None or "eff_iou_score" not in out:
+                continue
+            if _to_scalar(out["eff_iou_score"]) > self.mf_threshold:
+                valid_indices.insert(0, i)
+            if len(valid_indices) >= max_num - 1:
+                break
+
+        if must_include not in valid_indices:
+            valid_indices.append(must_include)
+        return valid_indices
+
+    def _broadcast_to_buckets(self, value: mx.array, num_buckets: int) -> mx.array:
+        """Broadcast ``(S, 1, C)`` features to ``(S, num_buckets, C)``; arrays that already match are returned unchanged.
+
+        Raises:
+            ValueError: If axis 1 is neither 1 nor ``num_buckets``.
+        """
+        if value.shape[1] == num_buckets:
+            return value
+        if value.shape[1] != 1:
+            raise ValueError(
+                "multiplex frame features must have batch 1 or num_buckets: "
+                f"{value.shape[1]} != 1 or {num_buckets}"
+            )
+        return mx.broadcast_to(value, (value.shape[0], num_buckets, value.shape[2]))
+
+    def _prepare_memory_conditioned_features[ObjectIdT](
+        self,
+        *,
+        frame_idx: int,
+        is_init_cond_frame: bool,
+        current_vision_feats: list[mx.array],
+        current_vision_masks: list[mx.array | None],
+        current_vision_pos_embeds: list[mx.array],
+        feat_sizes: list[tuple[int, int]],
+        output_dict: dict[str, dict[int, StageOutput]],
+        num_frames: int | None,
+        track_in_reverse: bool = False,
+        use_prev_mem_frame: bool = True,
+        multiplex_state: MultiplexState[ObjectIdT],
+    ) -> mx.array:
+        """Fuse current-frame visual features with previous multiplex memories."""
+        B = multiplex_state.num_buckets
+        C = self.hidden_dim
+        H, W = feat_sizes[-1]
+        vision_feat = self._broadcast_to_buckets(current_vision_feats[-1], B)
+        vision_pos_embed = self._broadcast_to_buckets(current_vision_pos_embeds[-1], B)
+
+        vision_mask = current_vision_masks[-1]
+        if vision_mask is not None:
+            if vision_mask.shape[0] == 1:
+                vision_mask = mx.broadcast_to(vision_mask, (B, vision_mask.shape[1]))
+            elif vision_mask.shape[0] != B:
+                raise ValueError(
+                    "multiplex vision mask must have batch 1 or num_buckets"
+                )
+
+        if self.num_maskmem == 0:
+            return mx.reshape(mx.transpose(vision_feat, (1, 2, 0)), (B, C, H, W))
+
+        num_obj_ptr_tokens = 0
+        tpos_sign_mul = -1 if track_in_reverse else 1
+        if is_init_cond_frame or not use_prev_mem_frame:
+            raise_unsupported_multiplex_runtime(
+                "VideoTrackingMultiplex._prepare_memory_conditioned_features(init-or-no-prev-memory)"
+            )
+
+        to_cat_prompt: list[mx.array] = []
+        to_cat_prompt_pos_embed: list[mx.array] = []
+        to_cat_image_feat: list[mx.array] = []
+        to_cat_image_pos_embed: list[mx.array] = []
+        if len(output_dict["cond_frame_outputs"]) == 0:
+            raise ValueError("at least one conditioning frame is required")
+
+        cond_outputs = output_dict["cond_frame_outputs"]
+        selected_cond_outputs, unselected_cond_outputs = select_closest_cond_frames(
+            frame_idx,
+            cond_outputs,
+            self.max_cond_frames_in_attn,
+            keep_first_cond_frame=self.keep_first_cond_frame,
+        )
+        t_pos_and_prevs: list[tuple[int, StageOutput | None, bool]] = [
+            ((frame_idx - t) * tpos_sign_mul, out, True)
+            for t, out in selected_cond_outputs.items()
+        ]
+
+        r = self.memory_temporal_stride_for_eval
+        valid_indices: list[int] = []
+        if self.use_memory_selection:
+            if num_frames is None:
+                raise ValueError(
+                    "num_frames is required when use_memory_selection=True"
+                )
+            valid_indices = self.frame_filter(
+                output_dict,
+                track_in_reverse,
+                frame_idx,
+                num_frames,
+                r,
+            )
+
+        for t_pos in range(1, self.num_maskmem):
+            t_rel = self.num_maskmem - t_pos
+            prev_frame_idx = previous_memory_frame_index(
+                frame_idx=frame_idx,
+                temporal_distance=t_rel,
+                stride=r,
+                track_in_reverse=track_in_reverse,
+                selected_indices=valid_indices if self.use_memory_selection else None,
+            )
+            if prev_frame_idx is None:
+                continue
+
+            out = output_dict["non_cond_frame_outputs"].get(prev_frame_idx)
+            if out is None:
+                out = unselected_cond_outputs.get(prev_frame_idx)
+            t_pos_and_prevs.append((t_pos, out, False))
+
+        for t_pos, prev, is_selected_cond_frame in t_pos_and_prevs:
+            if prev is None:
+                continue
+            feats = prev.get("maskmem_features")
+            maskmem_pos_list = prev.get("maskmem_pos_enc")
+            if feats is None or not maskmem_pos_list:
+                continue
+            maskmem_enc = maskmem_pos_list[-1]
+            if feats.shape[0] == 0:
+                continue
+
+            if len(feats.shape) == 5:
+                feats = multiplex_state.demux(feats)
+                prev["maskmem_features"] = feats
+            if len(maskmem_enc.shape) == 5:
+                maskmem_enc = multiplex_state.demux(maskmem_enc)
+                maskmem_pos_list[-1] = maskmem_enc
+
+            seq_len = feats.shape[-2] * feats.shape[-1]
+            to_cat_prompt.append(
+                mx.transpose(
+                    mx.reshape(feats, (feats.shape[0], self.mem_dim, seq_len)),
+                    (2, 0, 1),
+                )
+            )
+            maskmem_enc = mx.transpose(
+                mx.reshape(maskmem_enc, (maskmem_enc.shape[0], self.mem_dim, seq_len)),
+                (2, 0, 1),
+            )
+
+            if self.use_maskmem_tpos_v2:
+                if t_pos <= 0 or t_pos >= self.num_maskmem:
+                    tpos_enc = self.maskmem_tpos_enc[self.num_maskmem - 1]
+                else:
+                    tpos_enc = self.maskmem_tpos_enc[self.num_maskmem - t_pos - 1]
+            else:
+                t = t_pos if not is_selected_cond_frame else 0
+                tpos_enc = self.maskmem_tpos_enc[self.num_maskmem - t - 1]
+            to_cat_prompt_pos_embed.append(maskmem_enc + tpos_enc)
+
+            if self.save_image_features:
+                image_feat = prev.get("image_features")
+                image_pos_embed = prev.get("image_pos_enc")
+                if image_feat is None or image_pos_embed is None:
+                    to_cat_prompt.pop()
+                    to_cat_prompt_pos_embed.pop()
+                    continue
+                to_cat_image_feat.append(image_feat)
+                to_cat_image_pos_embed.append(image_pos_embed + tpos_enc)
+
+        if self.use_obj_ptrs_in_encoder:
+            max_obj_ptrs_in_encoder = (
+                self.max_obj_ptrs_in_encoder
+                if num_frames is None
+                else min(num_frames, self.max_obj_ptrs_in_encoder)
+            )
+            if self.only_obj_ptrs_in_the_past_for_eval:
+                ptr_cond_outputs = {
+                    t: out
+                    for t, out in selected_cond_outputs.items()
+                    if (t >= frame_idx if track_in_reverse else t <= frame_idx)
+                }
+            else:
+                ptr_cond_outputs = selected_cond_outputs
+
+            pos_and_outs_for_ptr = [
+                (
+                    (
+                        (frame_idx - t) * tpos_sign_mul
+                        if self.use_signed_tpos_enc_to_obj_ptrs
+                        else abs(frame_idx - t)
+                    ),
+                    out,
+                    True,
+                )
+                for t, out in ptr_cond_outputs.items()
+            ]
+
+            for t_diff in range(1, max_obj_ptrs_in_encoder):
+                if not self.use_memory_selection:
+                    t = frame_idx + t_diff if track_in_reverse else frame_idx - t_diff
+                    if t < 0 or (num_frames is not None and t >= num_frames):
+                        break
+                else:
+                    if -t_diff <= -len(valid_indices):
+                        break
+                    t = valid_indices[-t_diff]
+                out = output_dict["non_cond_frame_outputs"].get(
+                    t,
+                    unselected_cond_outputs.get(t),
+                )
+                if out is not None:
+                    pos_and_outs_for_ptr.append((t_diff, out, False))
+
+            filtered_ptrs = [
+                (pos, out, is_cond)
+                for pos, out, is_cond in pos_and_outs_for_ptr
+                if "obj_ptr" in out
+            ]
+            if filtered_ptrs:
+                pos_list, out_list, _ = zip(*filtered_ptrs)
+                obj_ptrs = mx.concat([out["obj_ptr"] for out in out_list], axis=1)
+                obj_ptrs = mx.transpose(obj_ptrs, (1, 0, 2))
+                if self.add_tpos_enc_to_obj_ptrs:
+                    obj_pos = self._get_tpos_enc(
+                        list(pos_list),
+                        max_abs_pos=max_obj_ptrs_in_encoder,
+                    )
+                else:
+                    obj_pos = self._get_tpos_enc(list(pos_list), dummy=True)
+                obj_pos = mx.broadcast_to(
+                    obj_pos[:, None, :], (obj_pos.shape[0], B, obj_pos.shape[1])
+                )
+                if self.mem_dim != C:
+                    raise ValueError("multiplex object pointers require mem_dim == C")
+                obj_pos = mx.repeat(obj_pos, multiplex_state.multiplex_count, axis=0)
+                to_cat_prompt.append(obj_ptrs)
+                to_cat_prompt_pos_embed.append(obj_pos)
+                num_obj_ptr_tokens = obj_ptrs.shape[0]
+
+        if len(to_cat_prompt) == 0:
+            return mx.reshape(mx.transpose(vision_feat, (1, 2, 0)), (B, C, H, W))
+
+        prompt = mx.concat(to_cat_prompt, axis=0)
+        prompt_pos_embed = mx.concat(to_cat_prompt_pos_embed, axis=0)
+        encoder_value = getattr(self.transformer, "encoder", None)
+        if not callable(encoder_value):
+            raise RuntimeError("transformer encoder is required for memory fusion")
+        encoder = cast(Callable[..., dict[str, mx.array]], encoder_value)
+        if self.save_image_features:
+            if vision_mask is not None:
+                raise ValueError(
+                    "save_image_features memory fusion does not support vision masks"
+                )
+            if len(to_cat_image_feat) == 0 or len(to_cat_image_pos_embed) == 0:
+                return mx.reshape(mx.transpose(vision_feat, (1, 2, 0)), (B, C, H, W))
+            image_feat = mx.concat(to_cat_image_feat, axis=0)
+            image_pos_embed = mx.concat(to_cat_image_pos_embed, axis=0)
+            encoder_out = encoder(
+                image=current_vision_feats[-1],
+                src=vision_feat,
+                memory_image=image_feat,
+                memory=prompt,
+                image_pos=current_vision_pos_embeds[-1],
+                src_pos=vision_pos_embed,
+                memory_image_pos=image_pos_embed,
+                memory_pos=prompt_pos_embed,
+                num_obj_ptr_tokens=num_obj_ptr_tokens,
+            )
+        else:
+            encoder_out = encoder(
+                src=vision_feat,
+                src_key_padding_mask=vision_mask,
+                src_pos=vision_pos_embed,
+                prompt=prompt,
+                prompt_pos=prompt_pos_embed,
+                prompt_key_padding_mask=None,
+                feat_sizes=feat_sizes,
+                num_obj_ptr_tokens=num_obj_ptr_tokens,
+            )
+        return mx.reshape(mx.transpose(encoder_out["memory"], (1, 2, 0)), (B, C, H, W))
+
+    def _apply_non_overlapping_constraints(self, pred_masks: mx.array) -> mx.array:
+        """Keep, at every pixel, only the object with the highest logit; the others are capped at -10. Input ``(N, 1, H, W)``; unchanged for one object."""
+        batch_size = pred_masks.shape[0]
+        if batch_size == 1:
+            return pred_masks
+
+        max_obj_inds = mx.reshape(
+            mx.argmax(pred_masks, axis=0), (1,) + pred_masks.shape[1:]
+        )
+        batch_obj_inds = mx.reshape(mx.arange(batch_size), (batch_size, 1, 1, 1))
+        keep = max_obj_inds == batch_obj_inds
+        return mx.where(
+            keep,
+            pred_masks,
+            mx.minimum(pred_masks, mx.array(-10.0, dtype=pred_masks.dtype)),
+        )
+
+    def _apply_object_wise_non_overlapping_constraints(
+        self,
+        pred_masks: mx.array,
+        obj_scores: mx.array,
+        background_value: float = -10.0,
+    ) -> mx.array:
+        """Resolve overlaps by object score instead of pixel logit.
+
+        Each object's foreground pixels (logit > 0) are given its ``obj_scores`` entry
+        (``background_value`` elsewhere), the highest-scoring object wins every pixel and
+        the logits of the losing objects are capped at ``background_value``.
+        """
+        pred_masks_single_score = mx.where(
+            pred_masks > 0,
+            obj_scores[..., None, None],
+            mx.array(background_value, dtype=obj_scores.dtype),
+        )
+        pixel_level_non_overlapping_masks = self._apply_non_overlapping_constraints(
+            pred_masks_single_score
+        )
+        return mx.where(
+            pixel_level_non_overlapping_masks > 0,
+            pred_masks,
+            mx.minimum(pred_masks, mx.array(background_value, dtype=pred_masks.dtype)),
+        )
+
+    def _encode_new_memory[ObjectIdT](
+        self,
+        image: ImageBatch | None,
+        current_vision_feats: list[mx.array],
+        feat_sizes: list[tuple[int, int]],
+        pred_masks_high_res: mx.array,
+        object_score_logits: mx.array | None,
+        is_mask_from_pts: bool,
+        *,
+        conditioning_objects: set[int] | None = None,
+        multiplex_state: MultiplexState[ObjectIdT],
+    ) -> tuple[mx.array, list[mx.array]]:
+        """Encode the current image and its multiplexed masks into memory."""
+        B = current_vision_feats[-1].shape[1]
+        C = self.hidden_dim
+        H, W = feat_sizes[-1]
+        pix_feat = mx.reshape(
+            mx.transpose(current_vision_feats[-1], (1, 2, 0)), (B, C, H, W)
+        )
+
+        if self.non_overlap_masks_for_mem_enc:
+            pred_masks_high_res = self._apply_non_overlapping_constraints(
+                pred_masks_high_res
+            )
+
+        if self.apply_sigmoid_to_mask_logits_for_mem_enc:
+            assert not self.binarize_mask_from_pts_for_mem_enc, (
+                "haven't been trained this way; beware of hardcoded config override"
+            )
+            binarize = self.binarize_mask_from_pts_for_mem_enc and is_mask_from_pts
+            if binarize:
+                mask_for_mem = (pred_masks_high_res > 0).astype(mx.float32)
+            else:
+                mask_for_mem = mx.sigmoid(pred_masks_high_res)
+            if self.sigmoid_scale_for_mem_enc != 1.0:
+                mask_for_mem = mask_for_mem * self.sigmoid_scale_for_mem_enc
+            if self.sigmoid_bias_for_mem_enc != 0.0:
+                mask_for_mem = mask_for_mem + self.sigmoid_bias_for_mem_enc
+        else:
+            mask_for_mem = pred_masks_high_res
+
+        unconditioning_objects: list[int] = []
+        if self.add_object_conditional_embeddings or self.condition_as_mask_input:
+            if conditioning_objects is None:
+                conditioning_objects = set()
+                unconditioning_objects = sorted(
+                    multiplex_state.get_all_valid_object_idx()
+                )
+            else:
+                conditioning_objects = set(conditioning_objects)
+                all_objects_idx = multiplex_state.get_all_valid_object_idx()
+                unconditioning_objects = sorted(
+                    [idx for idx in all_objects_idx if idx not in conditioning_objects]
+                )
+
+        mux_mask_for_mem = multiplex_state.mux(mask_for_mem)
+        if mux_mask_for_mem.shape[2] != 1:
+            raise ValueError("mask_for_mem must have a singleton channel dimension")
+        mux_mask_for_mem = mx.reshape(
+            mux_mask_for_mem,
+            mux_mask_for_mem.shape[:2] + mux_mask_for_mem.shape[3:],
+        )
+
+        if self.condition_as_mask_input:
+            cond_values_np = np.full(
+                (mask_for_mem.shape[0],),
+                self.condition_as_mask_input_bg,
+                dtype=np.float32,
+            )
+            if conditioning_objects:
+                cond_values_np[list(conditioning_objects)] = (
+                    self.condition_as_mask_input_fg
+                )
+            cond_values = mx.array(cond_values_np, dtype=mask_for_mem.dtype)
+            embedded_conditions = mx.reshape(cond_values, (-1, 1, 1, 1)) * mx.ones_like(
+                mask_for_mem
+            )
+            embedded_conditions = multiplex_state.mux(embedded_conditions)
+            embedded_conditions = mx.reshape(
+                embedded_conditions,
+                embedded_conditions.shape[:2] + embedded_conditions.shape[3:],
+            )
+            mux_mask_for_mem = mx.concat(
+                [mux_mask_for_mem, embedded_conditions],
+                axis=1,
+            )
+
+        if isinstance(self.maskmem_backbone, SimpleMaskEncoder):
+            maskmem_out: MemoryEncoderOutput = self.maskmem_backbone(
+                pix_feat,
+                mux_mask_for_mem,
+                skip_mask_sigmoid=True,
+            )
+        else:
+            if image is None:
+                raise ValueError("image is required by the configured memory encoder")
+            encode_value = getattr(self.maskmem_backbone, "__call__")
+            encode = cast(
+                Callable[[ImageBatch, mx.array, mx.array], MemoryEncoderOutput],
+                encode_value,
+            )
+            maskmem_out = encode(image, pix_feat, mux_mask_for_mem)
+
+        maskmem_features = self._maybe_clone(maskmem_out["vision_features"])
+        maskmem_pos_enc: list[mx.array] = [
+            self._maybe_clone(m) for m in maskmem_out["vision_pos_enc"]
+        ]
+
+        if self.no_obj_embed_spatial is not None:
+            if object_score_logits is None:
+                raise ValueError(
+                    "object_score_logits are required when no_obj_embed_spatial is set"
+                )
+            obj_expected = multiplex_state.total_valid_entries
+            obj_current = object_score_logits.shape[0]
+            if obj_current != obj_expected:
+                if obj_current < obj_expected:
+                    pad_shape = (obj_expected - obj_current,) + tuple(
+                        object_score_logits.shape[1:]
+                    )
+                    obj_pad = mx.zeros(pad_shape, dtype=object_score_logits.dtype)
+                    object_score_logits = mx.concat(
+                        [object_score_logits, obj_pad],
+                        axis=0,
+                    )
+                else:
+                    object_score_logits = object_score_logits[:obj_expected]
+
+            object_score_logits = multiplex_state.mux(object_score_logits)
+            is_obj_appearing = (
+                object_score_logits > self.object_score_logit_threshold
+            ).astype(mx.float32)
+            no_obj_embed_spatial = mx.broadcast_to(
+                self.no_obj_embed_spatial[None, :, :],
+                (
+                    multiplex_state.num_buckets,
+                    self.no_obj_embed_spatial.shape[0],
+                    self.no_obj_embed_spatial.shape[1],
+                ),
+            )
+            no_obj_embed = ((1 - is_obj_appearing) * no_obj_embed_spatial).sum(axis=1)
+            maskmem_features = maskmem_features + no_obj_embed[..., None, None]
+
+        if self.add_object_conditional_embeddings:
+            obj_cond_embed = mx.broadcast_to(
+                self.obj_cond_embed[None, :, :],
+                (
+                    multiplex_state.num_buckets,
+                    self.obj_cond_embed.shape[0],
+                    self.obj_cond_embed.shape[1],
+                ),
+            )
+            obj_cond_embed = multiplex_state.demux(obj_cond_embed)
+            obj_merged_embed = obj_cond_embed
+
+            if self.add_object_unconditional_embeddings:
+                obj_non_cond_embed = mx.broadcast_to(
+                    self.obj_non_cond_embed[None, :, :],
+                    (
+                        multiplex_state.num_buckets,
+                        self.obj_non_cond_embed.shape[0],
+                        self.obj_non_cond_embed.shape[1],
+                    ),
+                )
+                obj_non_cond_embed = multiplex_state.demux(obj_non_cond_embed)
+                if unconditioning_objects:
+                    obj_merged_embed = _replace_rows(
+                        obj_merged_embed,
+                        unconditioning_objects,
+                        obj_non_cond_embed[unconditioning_objects],
+                    )
+
+            obj_merged_embed = multiplex_state.mux(obj_merged_embed).sum(axis=1)
+            maskmem_features = maskmem_features + obj_merged_embed[..., None, None]
+
+        if len(maskmem_features.shape) == 5:
+            maskmem_features = multiplex_state.demux(maskmem_features)
+
+        demuxed_pos_enc: list[mx.array] = []
+        for pos_enc in maskmem_pos_enc:
+            if len(pos_enc.shape) == 5:
+                pos_enc = multiplex_state.demux(pos_enc)
+            demuxed_pos_enc.append(pos_enc)
+
+        return maskmem_features, demuxed_pos_enc
+
+    def _use_mask_as_output[ObjectIdT](
+        self,
+        backbone_features: mx.array,
+        high_res_features: list[mx.array] | None,
+        mask_inputs: mx.array,
+        multiplex_state: MultiplexState[ObjectIdT],
+        objects_in_mask: list[int] | None = None,
+    ) -> SAMOutput:
+        """
+        Directly convert binary mask inputs into SAM-style mask logits.
+
+        ``mask_inputs`` is ``(N, 1, H, W)``. High-resolution logits are
+        ``20 * mask - 10`` (foreground +10, background -10), low-resolution masks are their
+        bilinear resize to a quarter of the size, IoU scores are 1 and the object score
+        logit is +10 when a mask has any foreground pixel and -10 otherwise. With
+        ``use_obj_ptrs_in_encoder`` the object pointers come from ``_forward_sam_heads`` on
+        the downsampled masks and, with ``pred_obj_scores`` and ``use_no_obj_ptr``, are
+        blended with the no-object pointer for objects that do not appear.
+
+        Raises:
+            ValueError: If ``mask_inputs`` is not ``(N, 1, H, W)`` or does not match
+                ``objects_in_mask``.
+        """
+        if len(mask_inputs.shape) != 4 or mask_inputs.shape[1] != 1:
+            raise ValueError("mask_inputs must have shape [N, 1, H, W].")
+        if objects_in_mask is None:
+            objects_in_mask = list(range(multiplex_state.total_valid_entries))
+        if mask_inputs.shape[0] != len(objects_in_mask):
+            raise ValueError(
+                "mask_inputs batch must match objects_in_mask length: "
+                f"{mask_inputs.shape[0]} != {len(objects_in_mask)}"
+            )
+
+        out_scale, out_bias = 20.0, -10.0
+        dtype = backbone_features.dtype
+        mask_inputs_float = mask_inputs.astype(dtype)
+        high_res_masks = mask_inputs_float * out_scale + out_bias
+        low_res_masks = interpolate(
+            high_res_masks,
+            size=(
+                max(1, high_res_masks.shape[-2] // 4),
+                max(1, high_res_masks.shape[-1] // 4),
+            ),
+            align_corners=False,
+            mode="bilinear",
+        )
+        ious = mx.ones((mask_inputs.shape[0], 1), dtype=dtype)
+
+        is_obj_appearing = mx.any(
+            mx.reshape(mask_inputs, (mask_inputs.shape[0], -1)).astype(mx.float32)
+            > 0.0,
+            axis=1,
+        )[:, None]
+        lambda_is_obj_appearing = is_obj_appearing.astype(dtype)
+        object_score_logits = out_scale * lambda_is_obj_appearing + out_bias
+
+        outputs: SAMOutput = {
+            "low_res_multimasks": low_res_masks,
+            "high_res_multimasks": high_res_masks,
+            "ious": ious,
+            "low_res_masks": low_res_masks,
+            "high_res_masks": high_res_masks,
+            "object_score_logits": object_score_logits,
+        }
+
+        if self.use_obj_ptrs_in_encoder:
+            forward_sam_heads = getattr(self, "_forward_sam_heads", None)
+            if forward_sam_heads is None:
+                raise_unsupported_multiplex_runtime(
+                    "VideoTrackingMultiplex._use_mask_as_output(obj_ptrs)"
+                )
+            sam_outputs = forward_sam_heads(
+                backbone_features=backbone_features,
+                mask_inputs=self.interactive_mask_downsample(mask_inputs_float),
+                interactive_high_res_features=high_res_features,
+                gt_masks=mask_inputs,
+                objects_to_interact=objects_in_mask,
+                multiplex_state=multiplex_state,
+            )
+            obj_ptr = _require_sam_obj_ptr(sam_outputs)
+
+            if self.pred_obj_scores and self.use_no_obj_ptr:
+                if self.use_linear_no_obj_ptr:
+                    obj_ptr = lambda_is_obj_appearing * obj_ptr + (
+                        1 - lambda_is_obj_appearing
+                    ) * self.no_obj_ptr_linear(obj_ptr)
+                else:
+                    if self.fixed_no_obj_ptr:
+                        obj_ptr = lambda_is_obj_appearing * obj_ptr
+                    selected_no_obj_ptr = mx.broadcast_to(
+                        self.no_obj_ptr[None, :, :],
+                        (
+                            multiplex_state.num_buckets,
+                            self.no_obj_ptr.shape[0],
+                            self.no_obj_ptr.shape[1],
+                        ),
+                    )
+                    selected_no_obj_ptr = multiplex_state.demux(selected_no_obj_ptr)
+                    selected_no_obj_ptr = selected_no_obj_ptr[objects_in_mask]
+                    obj_ptr = (
+                        obj_ptr + (1 - lambda_is_obj_appearing) * selected_no_obj_ptr
+                    )
+
+            outputs["obj_ptr"] = obj_ptr
+
+        return outputs
+
+    def _forward_sam_heads[ObjectIdT](
+        self,
+        backbone_features: mx.array,
+        *,
+        point_inputs: dict[str, mx.array] | None = None,
+        mask_inputs: mx.array | None = None,
+        interactive_high_res_features: list[mx.array] | None = None,
+        propagation_high_res_features: list[mx.array] | None = None,
+        multimask_output: bool = False,
+        gt_masks: mx.array | None = None,
+        multiplex_state: MultiplexState[ObjectIdT],
+        objects_to_interact: list[int] | None = None,
+    ) -> SAMOutput:
+        """Forward the interactive SAM prompt encoder and mask decoder path."""
+        del gt_masks
+        image_batch = backbone_features.shape[0]
+        if backbone_features.shape[1] != self.sam_prompt_embed_dim:
+            raise ValueError("backbone feature channels must match prompt embed dim")
+        if backbone_features.shape[2] != self.sam_image_embedding_size:
+            raise ValueError("backbone feature height must match SAM image embedding")
+        if backbone_features.shape[3] != self.sam_image_embedding_size:
+            raise ValueError("backbone feature width must match SAM image embedding")
+
+        is_interactive = point_inputs is not None or mask_inputs is not None
+        if is_interactive:
+            if interactive_high_res_features is None:
+                raise ValueError("interactive_high_res_features are required")
+            if objects_to_interact is None:
+                raise ValueError("objects_to_interact are required")
+
+            if point_inputs is not None:
+                sam_point_coords = point_inputs["point_coords"]
+                sam_point_labels = point_inputs["point_labels"]
+                prompt_batch = sam_point_coords.shape[0]
+                if sam_point_labels.shape[0] != prompt_batch:
+                    raise ValueError(
+                        "point prompt labels must match point coords batch"
+                    )
+            else:
+                if mask_inputs is None:
+                    raise ValueError("interactive inference requires points or masks")
+                prompt_batch = mask_inputs.shape[0]
+                sam_point_coords = mx.zeros((prompt_batch, 1, 2), dtype=mx.float32)
+                sam_point_labels = -mx.ones((prompt_batch, 1), dtype=mx.int32)
+
+            if image_batch not in (1, prompt_batch):
+                raise ValueError(
+                    "interactive image batch must be 1 or match prompt batch"
+                )
+            repeat_image = image_batch == 1 and prompt_batch != 1
+
+            if mask_inputs is not None:
+                if len(mask_inputs.shape) != 4 or tuple(mask_inputs.shape[:2]) != (
+                    prompt_batch,
+                    1,
+                ):
+                    raise ValueError(
+                        "mask_inputs must have shape [prompt_batch, 1, H, W]"
+                    )
+                if tuple(mask_inputs.shape[-2:]) != tuple(
+                    self.interactive_sam_prompt_encoder.mask_input_size
+                ):
+                    sam_mask_prompt = interpolate(
+                        mask_inputs.astype(mx.float32),
+                        size=self.interactive_sam_prompt_encoder.mask_input_size,
+                        align_corners=False,
+                        mode="bilinear",
+                    )
+                else:
+                    sam_mask_prompt = mask_inputs
+            else:
+                sam_mask_prompt = None
+
+            sparse_embeddings, dense_embeddings = self.interactive_sam_prompt_encoder(
+                points=(sam_point_coords, sam_point_labels),
+                boxes=None,
+                masks=sam_mask_prompt,
+            )
+            sparse_embeddings = self._maybe_clone(sparse_embeddings)
+            dense_embeddings = self._maybe_clone(dense_embeddings)
+            image_pe = self._maybe_clone(
+                self.interactive_sam_prompt_encoder.get_dense_pe()
+            )
+            (
+                low_res_multimasks,
+                ious,
+                sam_output_tokens,
+                object_score_logits,
+            ) = self.interactive_sam_mask_decoder(
+                image_embeddings=backbone_features,
+                image_pe=image_pe,
+                sparse_prompt_embeddings=sparse_embeddings,
+                dense_prompt_embeddings=dense_embeddings,
+                multimask_output=multimask_output,
+                repeat_image=repeat_image,
+                high_res_features=interactive_high_res_features,
+            )
+        else:
+            if propagation_high_res_features is None:
+                raise ValueError("propagation_high_res_features are required")
+            if self.add_output_suppression_embeddings:
+                output_valid_embed = self.output_valid_embed[None, :, :]
+                output_invalid_embed = self.output_invalid_embed[None, :, :]
+                valid_object_mask = multiplex_state.get_valid_object_mask()[
+                    ..., None
+                ].astype(mx.float32)
+                output_merged_embed = (
+                    valid_object_mask * output_valid_embed
+                    + (1 - valid_object_mask) * output_invalid_embed
+                )
+            else:
+                output_merged_embed = None
+
+            image_pe = self._maybe_clone(self.get_propagation_dense_pe())
+            out = self.sam_mask_decoder(
+                image_embeddings=backbone_features,
+                image_pe=image_pe,
+                high_res_features=propagation_high_res_features,
+                multimask_output=multimask_output,
+                extra_per_object_embeddings=output_merged_embed,
+            )
+            low_res_multimasks = multiplex_state.demux(out["masks"])
+            ious = multiplex_state.demux(out["iou_pred"])
+            sam_output_tokens = multiplex_state.demux(out["sam_tokens_out"])
+            object_score_logits = multiplex_state.demux(out["object_score_logits"])
+
+        low_res_multimasks = self._maybe_clone(low_res_multimasks)
+        ious = self._maybe_clone(ious)
+        object_score_logits = self._maybe_clone(object_score_logits)
+        sam_output_tokens = self._maybe_clone(sam_output_tokens)
+
+        is_obj_appearing = None
+        if self.pred_obj_scores:
+            is_obj_appearing = object_score_logits > self.object_score_logit_threshold
+            if len(is_obj_appearing.shape) > 1 and is_obj_appearing.shape[-1] == 1:
+                is_obj_appearing = mx.reshape(is_obj_appearing, is_obj_appearing.shape[:-1])
+            appearing_mask_shape = (object_score_logits.shape[0],) + (1,) * (
+                len(low_res_multimasks.shape) - 1
+            )
+            low_res_multimasks = mx.where(
+                mx.reshape(is_obj_appearing, appearing_mask_shape),
+                low_res_multimasks,
+                mx.array(NO_OBJ_SCORE, dtype=low_res_multimasks.dtype),
+            )
+
+        low_res_multimasks = low_res_multimasks.astype(mx.float32)
+        high_res_multimasks = interpolate(
+            low_res_multimasks,
+            size=(self.image_size, self.image_size),
+            mode="bilinear",
+            align_corners=False,
+        )
+
+        sam_output_token = sam_output_tokens[:, 0]
+        if multimask_output:
+            if self.stability_score_attentuation:
+                get_stability_scores = cast(
+                    Callable[[mx.array], mx.array],
+                    getattr(self.sam_mask_decoder, "_get_stability_scores"),
+                )
+                stability_scores = get_stability_scores(low_res_multimasks)
+                ious = ious * stability_scores
+            best_iou_inds = mx.argmax(ious, axis=-1)
+            batch_inds = mx.arange(ious.shape[0])
+            low_res_masks = low_res_multimasks[batch_inds, best_iou_inds][:, None]
+            high_res_masks = high_res_multimasks[batch_inds, best_iou_inds][:, None]
+            if sam_output_tokens.shape[1] > 1:
+                sam_output_token = sam_output_tokens[batch_inds, best_iou_inds]
+        else:
+            if multimask_output and not is_interactive:
+                assert self.decode_mask_with_shared_tokens
+                low_res_masks = low_res_multimasks[:, 0:1]
+                high_res_masks = high_res_multimasks[:, 0:1]
+            else:
+                low_res_masks = low_res_multimasks
+                high_res_masks = high_res_multimasks
+
+        outputs: SAMOutput = {
+            "low_res_multimasks": low_res_multimasks,
+            "high_res_multimasks": high_res_multimasks,
+            "ious": ious,
+            "low_res_masks": low_res_masks,
+            "high_res_masks": high_res_masks,
+            "object_score_logits": object_score_logits,
+        }
+
+        if self.use_obj_ptrs_in_encoder:
+            obj_ptr = (
+                self.interactive_obj_ptr_proj(sam_output_token)
+                if is_interactive
+                else self.obj_ptr_proj(sam_output_token)
+            )
+            if self.pred_obj_scores and self.use_no_obj_ptr:
+                assert is_obj_appearing is not None
+                lambda_is_obj_appearing = mx.reshape(is_obj_appearing, (-1, 1)).astype(
+                    mx.float32
+                )
+                if self.use_linear_no_obj_ptr:
+                    obj_ptr = lambda_is_obj_appearing * obj_ptr + (
+                        1 - lambda_is_obj_appearing
+                    ) * self.no_obj_ptr_linear(obj_ptr)
+                else:
+                    if self.fixed_no_obj_ptr:
+                        obj_ptr = lambda_is_obj_appearing * obj_ptr
+                    selected_no_obj_ptr = mx.broadcast_to(
+                        self.no_obj_ptr[None, :, :],
+                        (
+                            multiplex_state.num_buckets,
+                            self.no_obj_ptr.shape[0],
+                            self.no_obj_ptr.shape[1],
+                        ),
+                    )
+                    selected_no_obj_ptr = multiplex_state.demux(selected_no_obj_ptr)
+                    if is_interactive:
+                        selected_no_obj_ptr = selected_no_obj_ptr[objects_to_interact]
+                    obj_ptr = (
+                        obj_ptr + (1 - lambda_is_obj_appearing) * selected_no_obj_ptr
+                    )
+            outputs["obj_ptr"] = obj_ptr
+
+        return outputs
+
+    def _use_multimask(self, is_init_cond_frame: bool, point_inputs: dict[str, mx.array] | None) -> bool:
+        """Whether the SAM head outputs several candidate masks.
+
+        Requires ``multimask_output_in_sam``, an initial conditioning frame (or
+        ``multimask_output_for_tracking``), a point count within
+        ``[multimask_min_pt_num, multimask_max_pt_num]`` and ``num_multimask_outputs > 0``.
+        """
+        num_pts = 0 if point_inputs is None else point_inputs["point_labels"].shape[1]
+        return (
+            self.multimask_output_in_sam
+            and (is_init_cond_frame or self.multimask_output_for_tracking)
+            and (self.multimask_min_pt_num <= num_pts <= self.multimask_max_pt_num)
+            and self.num_multimask_outputs > 0
+        )
+
+    def _track_step_aux[ObjectIdT](
+        self,
+        *,
+        frame_idx: int,
+        is_init_cond_frame: bool,
+        backbone_features_interactive: PreparedBackboneFeatures[mx.array] | None,
+        backbone_features_propagation: PreparedBackboneFeatures[mx.array] | None,
+        image: ImageBatch | None,
+        point_inputs: dict[str, mx.array] | None,
+        mask_inputs: mx.array | None,
+        gt_masks: mx.array | None,
+        frames_to_add_correction_pt: list[int],
+        output_dict: dict[str, dict[int, StageOutput]],
+        num_frames: int,
+        track_in_reverse: bool = False,
+        run_mem_encoder: bool = True,
+        prev_sam_mask_logits: mx.array | None = None,
+        multiplex_state: MultiplexState[ObjectIdT],
+        objects_to_interact: list[int] | None = None,
+        need_aux_output: bool = False,
+    ) -> tuple[StageOutput, TrackingAuxOutput]:
+        """Run one tracking step and return the frame output with auxiliary features.
+
+        The mode follows from the inputs. ``mask_inputs`` gives mask-as-output (needs
+        ``use_mask_input_as_output_without_sam``); no points gives propagation only;
+        points on an initial conditioning frame, or refining ``prev_sam_mask_logits``,
+        give interaction only; points with ``objects_to_interact`` on a later frame give
+        propagation followed by interaction, whose rows replace the propagated ones for
+        those objects. On frames in ``frames_to_add_correction_pt`` further points are
+        sampled from ``gt_masks`` (``num_correction_pt_per_frame`` times) and the
+        interaction repeated; the ``multistep_*`` entries keep every step.
+
+        The output holds ``pred_masks`` (low-resolution logits), ``pred_masks_high_res``,
+        ``object_score_logits``, the packed ``obj_ptr`` when pointers are used,
+        memory-selection scores when enabled and, if ``run_mem_encoder``, the encoded
+        ``maskmem_features`` and ``maskmem_pos_enc``. The auxiliary output (only with
+        ``need_aux_output``) carries features reused to add new masks.
+
+        Raises:
+            ValueError: For inputs that match no mode or are inconsistent, or when the
+                features a mode needs are missing.
+        """
+        current_out: StageOutput = {
+            "conditioning_objects": set(),
+            "point_inputs": point_inputs,
+            "mask_inputs": mask_inputs,
+        }
+
+        mode = None
+        if mask_inputs is not None:
+            mode = "mask_as_output"
+        elif point_inputs is None:
+            mode = "propagation_only"
+        elif prev_sam_mask_logits is not None:
+            if objects_to_interact is None:
+                raise ValueError(
+                    "objects_to_interact must be specified when refining "
+                    "prev_sam_mask_logits"
+                )
+            mode = "interaction_only"
+        elif is_init_cond_frame:
+            mode = "interaction_only"
+        elif objects_to_interact is not None:
+            mode = "propagation_and_interaction"
+
+        if mode is None:
+            raise ValueError(
+                "Unable to determine tracking case. "
+                f"mask_inputs={mask_inputs is not None}, "
+                f"point_inputs={point_inputs is not None}, "
+                f"prev_sam_mask_logits={prev_sam_mask_logits is not None}, "
+                f"objects_to_interact={objects_to_interact}, "
+                f"is_init_cond_frame={is_init_cond_frame}"
+            )
+
+        interactive_vision_feats = interactive_feat_sizes = None
+        interactive_high_res_features = None
+        if backbone_features_interactive is not None:
+            interactive_vision_feats = backbone_features_interactive["vision_feats"]
+            interactive_feat_sizes = backbone_features_interactive["feat_sizes"]
+            if len(interactive_vision_feats) > 1:
+                interactive_high_res_features = [
+                    _reshape_spatial_feature(x, s)
+                    for x, s in zip(
+                        interactive_vision_feats[:-1],
+                        interactive_feat_sizes[:-1],
+                    )
+                ]
+        elif mode in (
+            "interaction_only",
+            "propagation_and_interaction",
+            "mask_as_output",
+        ):
+            raise ValueError("interactive features are required for prompt interaction")
+
+        propagation_vision_feats = propagation_vision_masks = None
+        propagation_vision_pos_embeds = propagation_feat_sizes = None
+        propagation_high_res_features = None
+        if backbone_features_propagation is not None:
+            propagation_vision_feats = backbone_features_propagation["vision_feats"]
+            if "vision_masks" not in backbone_features_propagation:
+                raise KeyError("vision_masks")
+            if "vision_pos_embeds" not in backbone_features_propagation:
+                raise KeyError("vision_pos_embeds")
+            propagation_vision_masks = backbone_features_propagation["vision_masks"]
+            propagation_vision_pos_embeds = backbone_features_propagation[
+                "vision_pos_embeds"
+            ]
+            propagation_feat_sizes = backbone_features_propagation["feat_sizes"]
+            if len(propagation_vision_feats) > 1:
+                propagation_high_res_features = [
+                    _reshape_spatial_feature(x, s)
+                    for x, s in zip(
+                        propagation_vision_feats[:-1],
+                        propagation_feat_sizes[:-1],
+                    )
+                ]
+        elif (
+            mode in ("propagation_only", "propagation_and_interaction")
+            or run_mem_encoder
+        ):
+            raise ValueError("propagation features are required")
+
+        interactive_pix_feat = None
+        if mode == "mask_as_output":
+            if not self.use_mask_input_as_output_without_sam:
+                raise_unsupported_multiplex_runtime(
+                    "VideoTrackingMultiplex._track_step_aux(mask_as_output)"
+                )
+            assert interactive_vision_feats is not None
+            assert interactive_feat_sizes is not None
+            if mask_inputs is None:
+                raise ValueError("mask_as_output mode requires mask inputs")
+            interactive_pix_feat = self._get_interactive_pix_mem(
+                interactive_vision_feats,
+                interactive_feat_sizes,
+            )
+            sam_outputs = self._use_mask_as_output(
+                backbone_features=interactive_pix_feat,
+                high_res_features=interactive_high_res_features,
+                mask_inputs=mask_inputs,
+                multiplex_state=multiplex_state,
+            )
+            current_out["conditioning_objects"].update(range(mask_inputs.shape[0]))
+        else:
+            propagation_out = None
+            if mode in ("propagation_only", "propagation_and_interaction"):
+                assert propagation_vision_feats is not None
+                assert propagation_vision_masks is not None
+                assert propagation_vision_pos_embeds is not None
+                assert propagation_feat_sizes is not None
+                pix_feat_with_mem = self._prepare_memory_conditioned_features(
+                    frame_idx=frame_idx,
+                    is_init_cond_frame=is_init_cond_frame,
+                    current_vision_feats=propagation_vision_feats[-1:],
+                    current_vision_masks=propagation_vision_masks[-1:],
+                    current_vision_pos_embeds=propagation_vision_pos_embeds[-1:],
+                    feat_sizes=propagation_feat_sizes[-1:],
+                    output_dict=output_dict,
+                    num_frames=num_frames,
+                    track_in_reverse=track_in_reverse,
+                    multiplex_state=multiplex_state,
+                )
+                propagation_out = self._forward_sam_heads(
+                    backbone_features=pix_feat_with_mem,
+                    propagation_high_res_features=propagation_high_res_features,
+                    multimask_output=self._use_multimask(
+                        is_init_cond_frame,
+                        point_inputs=None,
+                    ),
+                    objects_to_interact=list(
+                        range(multiplex_state.total_valid_entries)
+                    ),
+                    multiplex_state=multiplex_state,
+                )
+
+            interaction_out = None
+            if mode in ("interaction_only", "propagation_and_interaction"):
+                assert interactive_vision_feats is not None
+                assert interactive_feat_sizes is not None
+                interactive_pix_feat = self._get_interactive_pix_mem(
+                    interactive_vision_feats,
+                    interactive_feat_sizes,
+                )
+                if mask_inputs is not None or point_inputs is None:
+                    raise ValueError("interaction mode requires point inputs only")
+                if prev_sam_mask_logits is not None:
+                    assert objects_to_interact is not None
+                    if not self.iter_use_prev_mask_pred:
+                        raise ValueError("iter_use_prev_mask_pred is required")
+                    mask_inputs = _take_rows(prev_sam_mask_logits, objects_to_interact)
+                elif mode == "propagation_and_interaction":
+                    assert objects_to_interact is not None
+                    assert propagation_out is not None
+                    mask_inputs = _take_rows(
+                        propagation_out["low_res_masks"],
+                        objects_to_interact,
+                    )
+
+                if objects_to_interact is not None:
+                    if point_inputs["point_coords"].shape[0] != len(
+                        objects_to_interact
+                    ):
+                        raise ValueError(
+                            "point prompt batch must match objects_to_interact"
+                        )
+                    if point_inputs["point_labels"].shape[0] != len(
+                        objects_to_interact
+                    ):
+                        raise ValueError(
+                            "point label batch must match objects_to_interact"
+                        )
+
+                interaction_objects = (
+                    objects_to_interact
+                    if objects_to_interact is not None
+                    else sorted(multiplex_state.get_all_valid_object_idx())
+                )
+                interaction_out = self._forward_sam_heads(
+                    backbone_features=interactive_pix_feat,
+                    point_inputs=point_inputs,
+                    mask_inputs=mask_inputs,
+                    interactive_high_res_features=interactive_high_res_features,
+                    multimask_output=self._use_multimask(
+                        is_init_cond_frame,
+                        point_inputs=point_inputs,
+                    ),
+                    objects_to_interact=interaction_objects,
+                    multiplex_state=multiplex_state,
+                )
+                current_out["conditioning_objects"].update(interaction_objects)
+
+            if propagation_out is None and interaction_out is not None:
+                sam_outputs = interaction_out
+            elif interaction_out is None and propagation_out is not None:
+                sam_outputs = propagation_out
+            else:
+                assert propagation_out is not None and interaction_out is not None
+                assert objects_to_interact is not None
+                sam_outputs = propagation_out
+                sam_output_values = cast(dict[_SAMOutputKey, mx.array], sam_outputs)
+                interaction_values = cast(dict[_SAMOutputKey, mx.array], interaction_out)
+                merge_keys: tuple[_SAMOutputKey, ...] = (
+                    "low_res_multimasks",
+                    "high_res_multimasks",
+                    "low_res_masks",
+                    "high_res_masks",
+                    "ious",
+                    "object_score_logits",
+                    "obj_ptr",
+                )
+                for key in merge_keys:
+                    if key in sam_output_values and key in interaction_values:
+                        sam_output_values[key] = _replace_rows(
+                            sam_output_values[key],
+                            objects_to_interact,
+                            interaction_values[key],
+                        )
+
+        low_res_multimasks: mx.array = sam_outputs["low_res_multimasks"]
+        high_res_multimasks: mx.array = sam_outputs["high_res_multimasks"]
+        ious: mx.array = sam_outputs["ious"]
+        low_res_masks: mx.array = sam_outputs["low_res_masks"]
+        high_res_masks: mx.array = sam_outputs["high_res_masks"]
+        object_score_logits: mx.array = sam_outputs["object_score_logits"]
+        obj_ptr = (
+            _require_sam_obj_ptr(sam_outputs) if self.use_obj_ptrs_in_encoder else None
+        )
+
+        current_out["multistep_pred_masks"] = low_res_masks
+        current_out["multistep_pred_masks_high_res"] = high_res_masks
+        current_out["multistep_pred_multimasks"] = [low_res_multimasks]
+        current_out["multistep_pred_multimasks_high_res"] = [high_res_multimasks]
+        current_out["multistep_pred_ious"] = [ious]
+        current_out["multistep_point_inputs"] = [point_inputs]
+        current_out["multistep_object_score_logits"] = [object_score_logits]
+
+        if (
+            frame_idx in frames_to_add_correction_pt
+            and self.num_correction_pt_per_frame > 0
+        ):
+            if gt_masks is None:
+                raise ValueError("correction points require gt_masks")
+            if objects_to_interact is None:
+                raise ValueError("correction points require objects_to_interact")
+            if interactive_vision_feats is None or interactive_feat_sizes is None:
+                raise ValueError("correction points require interactive features")
+            if point_inputs is not None:
+                if point_inputs["point_coords"].shape[0] != len(objects_to_interact):
+                    raise ValueError(
+                        "point prompt batch must match objects_to_interact"
+                    )
+                if point_inputs["point_labels"].shape[0] != len(objects_to_interact):
+                    raise ValueError("point label batch must match objects_to_interact")
+
+            all_pred_masks = [low_res_masks]
+            all_pred_high_res_masks = [high_res_masks]
+            all_pred_multimasks = [low_res_multimasks]
+            all_pred_high_res_multimasks = [high_res_multimasks]
+            all_pred_ious = [ious]
+            all_point_inputs = [point_inputs]
+            all_object_score_logits = [object_score_logits]
+
+            for _ in range(self.num_correction_pt_per_frame):
+                pred_for_new_pt = high_res_masks > 0
+                new_points, new_labels = get_next_point(
+                    gt_masks=_take_rows(gt_masks, objects_to_interact),
+                    pred_masks=_take_rows(pred_for_new_pt, objects_to_interact),
+                    method=self.pt_sampling_for_eval,
+                )
+                point_inputs = concat_points(point_inputs, new_points, new_labels)
+                if self.iter_use_prev_mask_pred:
+                    mask_inputs = _take_rows(low_res_masks, objects_to_interact)
+
+                pix_feat_with_mem = self._get_interactive_pix_mem(
+                    interactive_vision_feats,
+                    interactive_feat_sizes,
+                )
+                correction_outputs = self._forward_sam_heads(
+                    backbone_features=pix_feat_with_mem,
+                    point_inputs=point_inputs,
+                    mask_inputs=mask_inputs,
+                    interactive_high_res_features=interactive_high_res_features,
+                    propagation_high_res_features=propagation_high_res_features,
+                    multimask_output=self._use_multimask(
+                        is_init_cond_frame,
+                        point_inputs,
+                    ),
+                    gt_masks=gt_masks,
+                    objects_to_interact=objects_to_interact,
+                    multiplex_state=multiplex_state,
+                )
+
+                low_res_masks = _replace_rows(
+                    low_res_masks,
+                    objects_to_interact,
+                    correction_outputs["low_res_masks"],
+                )
+                high_res_masks = _replace_rows(
+                    high_res_masks,
+                    objects_to_interact,
+                    correction_outputs["high_res_masks"],
+                )
+                low_res_multimasks = _replace_rows(
+                    low_res_multimasks,
+                    objects_to_interact,
+                    correction_outputs["low_res_multimasks"],
+                )
+                high_res_multimasks = _replace_rows(
+                    high_res_multimasks,
+                    objects_to_interact,
+                    correction_outputs["high_res_multimasks"],
+                )
+                ious = _replace_rows(
+                    ious, objects_to_interact, correction_outputs["ious"]
+                )
+                object_score_logits = _replace_rows(
+                    object_score_logits,
+                    objects_to_interact,
+                    correction_outputs["object_score_logits"],
+                )
+                if self.use_obj_ptrs_in_encoder:
+                    assert obj_ptr is not None
+                    obj_ptr = _replace_rows(
+                        obj_ptr,
+                        objects_to_interact,
+                        _require_sam_obj_ptr(correction_outputs),
+                    )
+
+                all_pred_masks.append(low_res_masks)
+                all_pred_high_res_masks.append(high_res_masks)
+                all_pred_multimasks.append(low_res_multimasks)
+                all_pred_high_res_multimasks.append(high_res_multimasks)
+                all_pred_ious.append(ious)
+                all_point_inputs.append(point_inputs)
+                all_object_score_logits.append(object_score_logits)
+
+            current_out["multistep_pred_masks"] = _concat(all_pred_masks, axis=1)
+            current_out["multistep_pred_masks_high_res"] = _concat(
+                all_pred_high_res_masks,
+                axis=1,
+            )
+            current_out["multistep_pred_multimasks"] = all_pred_multimasks
+            current_out["multistep_pred_multimasks_high_res"] = (
+                all_pred_high_res_multimasks
+            )
+            current_out["multistep_pred_ious"] = all_pred_ious
+            current_out["multistep_point_inputs"] = all_point_inputs
+            current_out["multistep_object_score_logits"] = all_object_score_logits
+
+            if self.add_all_frames_to_correct_as_cond:
+                current_out["conditioning_objects"].update(objects_to_interact)
+
+        current_out["pred_masks"] = low_res_masks
+        current_out["pred_masks_high_res"] = high_res_masks
+        if self.use_obj_ptrs_in_encoder:
+            assert obj_ptr is not None
+            current_out["obj_ptr"] = multiplex_state.mux(obj_ptr)
+
+        if self.use_memory_selection:
+            iou_score = mx.max(ious, axis=-1)
+            current_out["iou_score"] = iou_score
+            current_out["eff_iou_score"] = self.cal_mem_score(
+                object_score_logits,
+                iou_score,
+            )
+        current_out["object_score_logits"] = object_score_logits
+
+        if run_mem_encoder and self.num_maskmem > 0:
+            assert propagation_vision_feats is not None
+            assert propagation_feat_sizes is not None
+            maskmem_features, maskmem_pos_enc = self._encode_new_memory(
+                image=image,
+                current_vision_feats=propagation_vision_feats,
+                feat_sizes=propagation_feat_sizes,
+                pred_masks_high_res=high_res_masks,
+                object_score_logits=object_score_logits,
+                is_mask_from_pts=(point_inputs is not None),
+                conditioning_objects=current_out["conditioning_objects"],
+                multiplex_state=multiplex_state,
+            )
+            current_out["maskmem_features"] = maskmem_features
+            current_out["maskmem_pos_enc"] = maskmem_pos_enc
+        else:
+            current_out["maskmem_features"] = None
+            current_out["maskmem_pos_enc"] = None
+
+        if self.save_image_features:
+            if (
+                propagation_vision_feats is None
+                or propagation_vision_pos_embeds is None
+            ):
+                raise ValueError(
+                    "propagation features are required to save image features"
+                )
+            current_out["image_features"] = propagation_vision_feats[-1]
+            current_out["image_pos_enc"] = propagation_vision_pos_embeds[-1]
+
+        aux_output: TrackingAuxOutput = {}
+        if need_aux_output:
+            if interactive_pix_feat is None:
+                if interactive_vision_feats is None or interactive_feat_sizes is None:
+                    raise ValueError("interactive features are required for aux output")
+                interactive_pix_feat = self._get_interactive_pix_mem(
+                    interactive_vision_feats,
+                    interactive_feat_sizes,
+                )
+            aux_output["interactive_pix_feat"] = interactive_pix_feat
+            aux_output["interactive_high_res_features"] = interactive_high_res_features
+            aux_output["propagation_vision_feats"] = propagation_vision_feats
+            aux_output["propagation_feat_sizes"] = propagation_feat_sizes
+
+        return current_out, aux_output
+
+    def _trim_output_and_memory(
+        self,
+        frame_idx: int,
+        output_dict: dict[str, dict[int, StageOutput]],
+        current_out: StageOutput,
+        memory_encoder_was_used: bool,
+    ) -> StageOutput:
+        """Drop tensors that are no longer needed, to bound the memory held by stored outputs.
+
+        With ``offload_output_to_cpu_for_eval`` the current output keeps only masks,
+        scores, pointers, memories and optionally image features (nothing is moved to
+        another device). With ``trim_past_non_cond_mem_for_eval`` the older
+        non-conditioning outputs chosen by ``memory_trim_plan`` are reduced to masks,
+        scores, point inputs and pointers. Returns the possibly trimmed current output.
+        """
+        if self.offload_output_to_cpu_for_eval:
+            current_values = _require_stage_values(
+                current_out,
+                "pred_masks",
+                "pred_masks_high_res",
+                "object_score_logits",
+                "multistep_point_inputs",
+            )
+            trimmed_out: StageOutput = {
+                "conditioning_objects": current_out["conditioning_objects"],
+                "pred_masks": current_values["pred_masks"],
+                "pred_masks_high_res": current_values["pred_masks_high_res"],
+                "object_score_logits": current_values["object_score_logits"],
+                "multistep_point_inputs": current_values["multistep_point_inputs"],
+            }
+            if self.use_obj_ptrs_in_encoder:
+                trimmed_out["obj_ptr"] = _require_stage_obj_ptr(current_out)
+            if memory_encoder_was_used and self.num_maskmem > 0:
+                memory_values = _require_stage_values(
+                    current_out, "maskmem_features", "maskmem_pos_enc"
+                )
+                trimmed_out["maskmem_features"] = memory_values["maskmem_features"]
+                trimmed_out["maskmem_pos_enc"] = memory_values["maskmem_pos_enc"]
+            if self.save_image_features:
+                image_values = _require_stage_values(
+                    current_out, "image_features", "image_pos_enc"
+                )
+                trimmed_out["image_features"] = image_values["image_features"]
+                trimmed_out["image_pos_enc"] = image_values["image_pos_enc"]
+            current_out = trimmed_out
+
+        def _trim_past_out(past_out: StageOutput) -> StageOutput:
+            past_values = _require_stage_values(
+                past_out,
+                "pred_masks",
+                "object_score_logits",
+                "multistep_point_inputs",
+            )
+            trimmed_past_out: StageOutput = {
+                "conditioning_objects": past_out["conditioning_objects"],
+                "pred_masks": past_values["pred_masks"],
+                "object_score_logits": past_values["object_score_logits"],
+                "multistep_point_inputs": past_values["multistep_point_inputs"],
+            }
+            if self.use_obj_ptrs_in_encoder:
+                trimmed_past_out["obj_ptr"] = _require_stage_obj_ptr(past_out)
+            return trimmed_past_out
+
+        if self.trim_past_non_cond_mem_for_eval:
+            trim_plan = memory_trim_plan(
+                frame_idx=frame_idx,
+                stride=self.memory_temporal_stride_for_eval,
+                num_maskmem=self.num_maskmem,
+                use_memory_selection=self.use_memory_selection,
+                max_object_pointers=self.max_obj_ptrs_in_encoder,
+            )
+            past_frame_idx = trim_plan.expired_frame_idx
+            past_out = output_dict["non_cond_frame_outputs"].get(past_frame_idx)
+            if past_out is not None:
+                if (
+                    self.use_memory_selection
+                    and _to_scalar(past_out.get("eff_iou_score", 0)) < self.mf_threshold
+                ) or not self.use_memory_selection:
+                    output_dict["non_cond_frame_outputs"][past_frame_idx] = (
+                        _trim_past_out(past_out)
+                    )
+
+            far_old_frame_idx = trim_plan.far_history_frame_idx
+            if far_old_frame_idx is not None:
+                past_out = output_dict["non_cond_frame_outputs"].get(far_old_frame_idx)
+                if past_out is not None:
+                    output_dict["non_cond_frame_outputs"][far_old_frame_idx] = (
+                        _trim_past_out(past_out)
+                    )
+
+        del memory_encoder_was_used
+        return current_out
+
+    def track_step[ObjectIdT](
+        self,
+        *,
+        frame_idx: int,
+        is_init_cond_frame: bool,
+        backbone_features_interactive: PreparedBackboneFeatures[mx.array] | None,
+        backbone_features_propagation: PreparedBackboneFeatures[mx.array] | None,
+        image: ImageBatch | None,
+        point_inputs: dict[str, mx.array] | None,
+        mask_inputs: mx.array | None,
+        gt_masks: mx.array | None,
+        frames_to_add_correction_pt: list[int],
+        output_dict: dict[str, dict[int, StageOutput]],
+        num_frames: int,
+        track_in_reverse: bool = False,
+        run_mem_encoder: bool = True,
+        prev_sam_mask_logits: mx.array | None = None,
+        multiplex_state: MultiplexState[ObjectIdT],
+        objects_to_interact: list[int] | None = None,
+        new_object_masks: mx.array | None = None,
+        new_object_idxs: list[int] | None = None,
+        new_object_ids: list[ObjectIdT] | None = None,
+        are_new_masks_from_pts: bool = False,
+        allow_new_buckets: bool = False,
+        prefer_new_buckets: bool = False,
+        reconditioning: bool = False,
+    ) -> StageOutput:
+        """Run a tracking step and optionally add or recondition objects in the same frame.
+
+        Arguments are as in ``_track_step_aux``. When ``new_object_masks`` is given, the
+        step runs without the memory encoder and the masks (``(K, 1, H, W)``, with
+        ``new_object_idxs`` and ``new_object_ids`` identifying the objects) are added to the
+        output and multiplex state with ``add_new_masks_to_existing_state``, or replace
+        existing objects with ``recondition_masks_in_existing_state`` when
+        ``reconditioning``; ``allow_new_buckets`` and ``prefer_new_buckets`` steer bucket
+        choice for new objects. In that case ``run_mem_encoder`` is passed on as
+        ``add_mask_to_memory``, so memory is encoded once, after the masks are merged.
+        Returns the output after ``_trim_output_and_memory``.
+
+        Raises:
+            ValueError: If ``new_object_masks`` is given without ``new_object_idxs`` or
+                the step inputs are inconsistent.
+            KeyError: If the auxiliary features needed to add masks are missing.
+        """
+        interactive_features = (
+            cast(PreparedBackboneFeatures[mx.array], _require_string_dict(
+                backbone_features_interactive, name="backbone_features_interactive"
+            ))
+            if backbone_features_interactive is not None else None
+        )
+        propagation_features = (
+            cast(PreparedBackboneFeatures[mx.array], _require_string_dict(
+                backbone_features_propagation, name="backbone_features_propagation"
+            ))
+            if backbone_features_propagation is not None else None
+        )
+        current_out, aux_out = self._track_step_aux(
+            frame_idx=frame_idx,
+            is_init_cond_frame=is_init_cond_frame,
+            backbone_features_interactive=interactive_features,
+            backbone_features_propagation=propagation_features,
+            image=image,
+            point_inputs=point_inputs,
+            mask_inputs=mask_inputs,
+            gt_masks=gt_masks,
+            frames_to_add_correction_pt=frames_to_add_correction_pt,
+            output_dict=output_dict,
+            num_frames=num_frames,
+            track_in_reverse=track_in_reverse,
+            run_mem_encoder=(run_mem_encoder and new_object_masks is None),
+            prev_sam_mask_logits=prev_sam_mask_logits,
+            multiplex_state=multiplex_state,
+            objects_to_interact=objects_to_interact,
+            need_aux_output=(new_object_masks is not None),
+        )
+
+        if new_object_masks is not None:
+            if new_object_idxs is None:
+                raise ValueError("new_object_idxs are required with new_object_masks")
+            if "interactive_pix_feat" not in aux_out:
+                raise KeyError("interactive_pix_feat")
+            if "interactive_high_res_features" not in aux_out:
+                raise KeyError("interactive_high_res_features")
+            if "propagation_vision_feats" not in aux_out:
+                raise KeyError("propagation_vision_feats")
+            if "propagation_feat_sizes" not in aux_out:
+                raise KeyError("propagation_feat_sizes")
+            mask_state_kwargs = _MaskStateKwargs[ObjectIdT](
+                interactive_pix_feat=aux_out["interactive_pix_feat"],
+                interactive_high_res_features=aux_out["interactive_high_res_features"],
+                propagation_vision_feats=aux_out["propagation_vision_feats"],
+                propagation_feat_sizes=aux_out["propagation_feat_sizes"],
+                new_masks=new_object_masks,
+                obj_idxs_in_mask=new_object_idxs,
+                obj_ids_in_mask=new_object_ids,
+                prev_output=current_out,
+                multiplex_state=multiplex_state,
+                add_mask_to_memory=run_mem_encoder,
+            )
+            if reconditioning:
+                self.recondition_masks_in_existing_state(**mask_state_kwargs)
+            else:
+                self.add_new_masks_to_existing_state(
+                    **mask_state_kwargs,
+                    are_masks_from_pts=are_new_masks_from_pts,
+                    allow_new_buckets=allow_new_buckets,
+                    prefer_new_buckets=prefer_new_buckets,
+                )
+
+        return self._trim_output_and_memory(
+            frame_idx=frame_idx,
+            output_dict=output_dict,
+            current_out=current_out,
+            memory_encoder_was_used=run_mem_encoder,
+        )
+
+    def _prepared_features_from_state(
+        self,
+        inference_state: dict[str, object] | MultiplexDemoState,
+        *,
+        frame_idx: int | None = None,
+    ) -> PreparedBackboneOutput[mx.array]:
+        """Backbone features of the state's current frame in prepared (flattened) form.
+
+        Uses ``backbone_out`` of the state, or the entry of ``cached_features[frame_idx]``
+        (stored back as ``backbone_out``); raw features are flattened with
+        ``_prepare_backbone_features``.
+
+        Raises:
+            ValueError: If neither source exists or the features lack the ``interactive``
+                and ``sam2_backbone_out`` necks.
+            TypeError: If a cached entry is not an ``(image, backbone_out)`` pair.
+        """
+        state = cast(dict[str, object], inference_state)
+        backbone_value: object = state.get("backbone_out")
+        if not isinstance(backbone_value, dict):
+            cached_features_value: object = state.get("cached_features")
+            cached: object = None
+            if frame_idx is not None and isinstance(cached_features_value, Mapping):
+                cached_features = cast(Mapping[int, object], cached_features_value)
+                cached = cached_features.get(frame_idx)
+            if cached is None:
+                raise ValueError(
+                    "SAM2 state must contain backbone_out or cached_features[frame_idx] "
+                    "for mask addition."
+                )
+            if not isinstance(cached, tuple):
+                raise TypeError("cached_features values must be (image, backbone_out).")
+            cached_items = cast(tuple[object, ...], cached)
+            if len(cached_items) != 2:
+                raise TypeError("cached_features values must be (image, backbone_out).")
+            _, backbone_value = cached_items
+            if not isinstance(backbone_value, dict):
+                raise ValueError(
+                    "cached_features current frame backbone_out must be a dict."
+                )
+            state["backbone_out"] = backbone_value
+        backbone_out = cast(Mapping[str, object], backbone_value)
+        if "interactive" not in backbone_out or "sam2_backbone_out" not in backbone_out:
+            raise ValueError(
+                "backbone_out must contain interactive and sam2_backbone_out features."
+            )
+        interactive = backbone_out["interactive"]
+        propagation = backbone_out["sam2_backbone_out"]
+        if (
+            isinstance(interactive, dict)
+            and "vision_feats" in interactive
+            and isinstance(propagation, dict)
+            and "vision_feats" in propagation
+        ):
+            return cast(PreparedBackboneOutput[mx.array], backbone_out)
+        return self._prepare_backbone_features(cast(RawBackboneOutput[mx.array], backbone_out))
+
+    @staticmethod
+    def _current_frame_output(
+        inference_state: dict[str, object] | MultiplexDemoState,
+        frame_idx: int,
+    ) -> StageOutput:
+        """The stored output of ``frame_idx`` (in exactly one of the conditioning and non-conditioning stores).
+
+        Raises:
+            ValueError: If the state has no ``output_dict`` or the frame is not found in
+                exactly one store.
+        """
+        state = cast(dict[str, object], inference_state)
+        output_value: object = state.get("output_dict")
+        if not isinstance(output_value, Mapping):
+            raise ValueError("SAM2 state must contain output_dict for mask addition.")
+        output_dict = cast(Mapping[str, object], output_value)
+
+        matches: list[StageOutput] = []
+        for storage_key in ("non_cond_frame_outputs", "cond_frame_outputs"):
+            storage_value = output_dict.get(storage_key)
+            if isinstance(storage_value, Mapping):
+                storage = cast(Mapping[int, StageOutput], storage_value)
+                if frame_idx in storage:
+                    matches.append(storage[frame_idx])
+        if len(matches) != 1:
+            raise ValueError(
+                "SAM2 state must contain exactly one current frame output for mask "
+                f"addition at frame_idx={frame_idx}; found {len(matches)}."
+            )
+        return matches[0]
+
+    def add_new_masks(
+        self,
+        *,
+        inference_state: dict[str, object] | MultiplexDemoState,
+        frame_idx: int,
+        obj_ids: TrackerArray | Sequence[int],
+        masks: TrackerArray,
+        add_mask_to_memory: bool = True,
+        are_masks_from_pts: bool = False,
+    ) -> tuple[int, list[object], None, mx.array | None]:
+        """Official-shaped adapter for adding detector masks to packed MLX state.
+
+        ``masks`` is ``(N, H, W)`` or ``(N, 1, H, W)`` for the ``N`` object ids in
+        ``obj_ids``. They are added to the current frame's stored output and the state's
+        multiplex state through ``add_new_masks_to_existing_state``, and
+        ``inference_state['obj_ids']`` is refreshed from the multiplex state. Returns
+        ``(frame_idx, the state's complete obj_ids list, None, None)``; no ids returns the
+        current list unchanged.
+
+        Raises:
+            ValueError: For wrongly shaped masks, a count mismatch, a state without
+                ``multiplex_state`` or the backbone features of the frame, or missing
+                propagation features when ``add_mask_to_memory``.
+        """
+        state = cast(dict[str, object], inference_state)
+        frame_idx = int(frame_idx)
+        obj_ids_np = _to_numpy(obj_ids).astype(np.int64).reshape(-1)
+        obj_ids_list = [int(obj_id) for obj_id in obj_ids_np.tolist()]
+        if len(obj_ids_list) == 0:
+            return frame_idx, cast(list[object], state.setdefault("obj_ids", [])), None, None
+
+        new_masks = masks if is_mlx_array(masks) else mlx_array(masks)
+        new_masks = new_masks.astype(mx.float32)
+        if new_masks.ndim == 3:
+            new_masks = new_masks[:, None, :, :]
+        if new_masks.ndim != 4 or new_masks.shape[1] != 1:
+            raise ValueError(
+                "masks must have shape (N, H, W) or (N, 1, H, W), "
+                f"got {new_masks.shape}."
+            )
+        if new_masks.shape[0] != len(obj_ids_list):
+            raise ValueError(
+                "masks batch must match obj_ids; got "
+                f"{new_masks.shape[0]} masks for {len(obj_ids_list)} ids."
+            )
+
+        multiplex_state = state.get("multiplex_state")
+        if multiplex_state is None:
+            raise ValueError(
+                "SAM2 state must contain multiplex_state for mask addition."
+            )
+        multiplex_state = cast(MultiplexState, multiplex_state)
+        prev_output = self._current_frame_output(inference_state, frame_idx)
+        backbone_features = self._prepared_features_from_state(
+            inference_state,
+            frame_idx=frame_idx,
+        )
+
+        interactive = backbone_features["interactive"]
+        interactive_vision_feats = interactive["vision_feats"]
+        interactive_feat_sizes = interactive["feat_sizes"]
+        interactive_high_res_features = None
+        if len(interactive_vision_feats) > 1:
+            interactive_high_res_features = [
+                _reshape_spatial_feature(x, s)
+                for x, s in zip(
+                    interactive_vision_feats[:-1],
+                    interactive_feat_sizes[:-1],
+                )
+            ]
+        interactive_pix_feat = self._get_interactive_pix_mem(
+            interactive_vision_feats,
+            interactive_feat_sizes,
+        )
+
+        propagation = cast(Mapping[str, list[mx.array] | list[tuple[int, int]]], backbone_features["sam2_backbone_out"])
+        propagation_vision_feats = cast(list[mx.array] | None, propagation.get("vision_feats"))
+        propagation_feat_sizes = cast(list[tuple[int, int]] | None, propagation.get("feat_sizes"))
+        if add_mask_to_memory and (
+            propagation_vision_feats is None or propagation_feat_sizes is None
+        ):
+            raise ValueError(
+                "sam2_backbone_out vision_feats and feat_sizes are required when "
+                "add_mask_to_memory=True."
+            )
+
+        self.add_new_masks_to_existing_state(
+            interactive_pix_feat=interactive_pix_feat,
+            interactive_high_res_features=interactive_high_res_features,
+            propagation_vision_feats=propagation_vision_feats,
+            propagation_feat_sizes=propagation_feat_sizes,
+            new_masks=new_masks,
+            obj_idxs_in_mask=list(range(len(obj_ids_list))),
+            obj_ids_in_mask=obj_ids_list,
+            prev_output=prev_output,
+            multiplex_state=multiplex_state,
+            add_mask_to_memory=add_mask_to_memory,
+            are_masks_from_pts=are_masks_from_pts,
+        )
+
+        state_obj_ids = cast(list[object], state.setdefault("obj_ids", []))
+        for obj_id in obj_ids_list:
+            if obj_id not in state_obj_ids:
+                state_obj_ids.append(obj_id)
+        object_ids = cast(list[int] | None, getattr(multiplex_state, "object_ids", None))
+        if object_ids is not None:
+            state["obj_ids"] = [int(obj_id) for obj_id in object_ids]
+        return frame_idx, cast(list[object], state["obj_ids"]), None, None
+
+    def propagate_in_video_preflight(
+        self,
+        sam2_state: object,
+        run_mem_encoder: bool = True,
+    ) -> None:
+        """Mark the state as having started tracking (``tracking_has_started``); ``run_mem_encoder`` is unused.
+
+        Raises:
+            TypeError: If the state is not a dict.
+        """
+        del run_mem_encoder
+        if not isinstance(sam2_state, dict):
+            raise TypeError("SAM2 state must be a dictionary.")
+        state = cast(dict[str, object], sam2_state)
+        state["tracking_has_started"] = True
+
+    @overload
+    def forward_tracking(
+        self,
+        backbone_out: PromptBackboneOutput,
+        input: TrackingInput,
+        return_dict: Literal[True],
+        objects_to_interact: list[int] | None = None,
+    ) -> TrackingResult: ...
+
+    @overload
+    def forward_tracking(
+        self,
+        backbone_out: PromptBackboneOutput,
+        input: TrackingInput,
+        return_dict: Literal[False] = False,
+        objects_to_interact: list[int] | None = None,
+    ) -> list[PublicFrameOutput]: ...
+
+    @overload
+    def forward_tracking(
+        self,
+        backbone_out: PromptBackboneOutput,
+        input: TrackingInput,
+        return_dict: bool,
+        objects_to_interact: list[int] | None = None,
+    ) -> TrackingResult | list[PublicFrameOutput]: ...
+
+    def forward_tracking(
+        self,
+        backbone_out: PromptBackboneOutput,
+        input: TrackingInput,
+        return_dict: bool = False,
+        objects_to_interact: list[int] | None = None,
+    ) -> TrackingResult | list[PublicFrameOutput]:
+        """Forward tracking over precomputed or per-frame backbone features.
+
+        Processes ``init_cond_frames`` first and then the other frames of ``backbone_out``
+        (from ``prepare_prompt_inputs``) with ``track_step``, sharing one multiplex state
+        created for the first frame's ground-truth objects. On transition frames of dynamic
+        models the objects first appearing there are added from their ground-truth masks. A
+        frame output is stored as conditioning when the frame is an initial conditioning
+        frame, a correction frame with ``add_all_frames_to_correct_as_cond``, or a
+        transition frame with ``add_all_transition_frames_as_cond``.
+
+        Returns:
+            With ``return_dict``, ``{'cond_frame_outputs', 'non_cond_frame_outputs',
+            'multiplex_state'}``. Otherwise one output per frame with ``obj_ptr`` removed.
+            Dynamic VOS evaluation fills frames without an output with zero masks and, when
+            a frame has fewer objects than ``find_metadatas[0]`` lists, zero-pads its
+            ``pred_masks`` and puts the rows back in the original object order.
+
+        Raises:
+            ValueError: For inconsistent image ids, transition indices or missing
+                dynamic-evaluation metadata.
+        """
+        img_feats_already_computed = (
+            "interactive" in backbone_out or "sam2_backbone_out" in backbone_out
+        )
+        backbone_features = (
+            self._prepare_backbone_features(backbone_out)
+            if img_feats_already_computed
+            else None
+        )
+
+        num_frames = backbone_out["num_frames"]
+        init_cond_frames = backbone_out["init_cond_frames"]
+        frames_to_add_correction_pt = backbone_out["frames_to_add_correction_pt"]
+        processing_order = init_cond_frames + backbone_out["frames_not_in_init_cond"]
+        transition_points = backbone_out.get("transition_points", [])
+        new_idx_per_transition = backbone_out.get("new_idx_per_transition", {})
+        valid_objects_prior_to_each_transition = backbone_out.get(
+            "valid_objects_prior_to_each_transition",
+            {},
+        )
+
+        cond_frame_outputs: dict[int, StageOutput] = {}
+        non_cond_frame_outputs: dict[int, StageOutput] = {}
+        output_dict: dict[str, dict[int, StageOutput]] = {
+            "cond_frame_outputs": cond_frame_outputs,
+            "non_cond_frame_outputs": non_cond_frame_outputs,
+        }
+        first_stage = processing_order[0]
+        gt_masks_per_frame = backbone_out["gt_masks_per_frame"]
+        multiplex_state = self.multiplex_controller.get_state(
+            gt_masks_per_frame[first_stage].shape[0], dtype=mx.float32, random=False
+        )
+
+        point_inputs_per_frame = backbone_out.get("point_inputs_per_frame", {})
+        mask_inputs_per_frame = backbone_out.get("mask_inputs_per_frame", {})
+
+        for stage_id in processing_order:
+            img_ids = _to_numpy(input.find_inputs[stage_id].img_ids).reshape(-1)
+            if img_ids.size == 0:
+                raise ValueError("img_ids must contain at least one image id")
+            if not np.all(img_ids == img_ids[0]):
+                raise ValueError("all image ids for a multiplex stage must match")
+            img_ids = np.array([int(img_ids[0])], dtype=np.int64)
+
+            if img_feats_already_computed:
+                assert backbone_features is not None
+                current_image = _take_image_batch(input.img_batch, img_ids)
+                current_backbone_features: PreparedBackboneOutput[mx.array] = {}
+                for neck_k, neck_out in backbone_features.items():
+                    if "vision_masks" not in neck_out:
+                        raise KeyError("vision_masks")
+                    if "vision_pos_embeds" not in neck_out:
+                        raise KeyError("vision_pos_embeds")
+                    current_backbone_features[neck_k] = {
+                        "vision_feats": [
+                            _take_along_axis(x, img_ids, axis=1)
+                            for x in neck_out["vision_feats"]
+                        ],
+                        "vision_masks": [
+                            _take_along_axis(x, img_ids, axis=0)
+                            if x is not None
+                            else None
+                            for x in neck_out["vision_masks"]
+                        ],
+                        "vision_pos_embeds": [
+                            _take_along_axis(x, img_ids, axis=1)
+                            for x in neck_out["vision_pos_embeds"]
+                        ],
+                        "feat_sizes": neck_out["feat_sizes"],
+                    }
+            else:
+                need_interactive_out = (
+                    stage_id in frames_to_add_correction_pt
+                    or stage_id in init_cond_frames
+                    or stage_id in transition_points
+                )
+                (
+                    current_image,
+                    current_backbone_features,
+                ) = self._prepare_backbone_features_per_frame(
+                    input.img_batch,
+                    img_ids,
+                    need_interactive_out=need_interactive_out,
+                    need_propagation_out=True,
+                )
+
+            gt_masks = gt_masks_per_frame.get(stage_id)
+            if stage_id in transition_points:
+                if gt_masks is None:
+                    raise ValueError("transition points require gt masks")
+                new_object_idxs = new_idx_per_transition[stage_id]
+                if new_object_idxs != sorted(new_object_idxs):
+                    raise ValueError("new_object_idxs must be sorted")
+                valid_prior = valid_objects_prior_to_each_transition.get(stage_id)
+                if valid_prior is not None and new_object_idxs[0] != len(valid_prior):
+                    raise ValueError("new_object_idxs must start after prior objects")
+                if new_object_idxs[-1] != gt_masks.shape[0] - 1:
+                    raise ValueError("new_object_idxs must end at the last gt mask")
+                new_object_masks = _take_rows(gt_masks, new_object_idxs)
+                gt_masks = gt_masks[: new_object_idxs[0]]
+            else:
+                new_object_masks = None
+                new_object_idxs = None
+
+            current_out = self.track_step(
+                frame_idx=stage_id,
+                is_init_cond_frame=stage_id in init_cond_frames,
+                backbone_features_interactive=current_backbone_features.get(
+                    "interactive"
+                ),
+                backbone_features_propagation=current_backbone_features.get(
+                    "sam2_backbone_out"
+                ),
+                image=current_image,
+                point_inputs=point_inputs_per_frame.get(stage_id),
+                mask_inputs=mask_inputs_per_frame.get(stage_id),
+                gt_masks=gt_masks,
+                frames_to_add_correction_pt=frames_to_add_correction_pt,
+                output_dict=output_dict,
+                num_frames=num_frames,
+                multiplex_state=multiplex_state,
+                objects_to_interact=objects_to_interact,
+                new_object_masks=new_object_masks,
+                new_object_idxs=new_object_idxs,
+            )
+
+            add_output_as_cond_frame = (
+                stage_id in init_cond_frames
+                or (
+                    self.add_all_frames_to_correct_as_cond
+                    and stage_id in frames_to_add_correction_pt
+                )
+                or (
+                    getattr(self, "add_all_transition_frames_as_cond", False)
+                    and stage_id in transition_points
+                )
+            )
+            if add_output_as_cond_frame:
+                output_dict["cond_frame_outputs"][stage_id] = current_out
+            else:
+                output_dict["non_cond_frame_outputs"][stage_id] = current_out
+
+        output_values = cast(TrackingResult, output_dict)
+        output_values["multiplex_state"] = multiplex_state
+        if return_dict:
+            return output_values
+
+        all_frame_outputs: dict[int, StageOutput] = {}
+        all_frame_outputs.update(output_dict["cond_frame_outputs"])
+        all_frame_outputs.update(output_dict["non_cond_frame_outputs"])
+
+        dynamic_vos_eval = getattr(self, "is_dynamic_vos_evaluation", False)
+        if dynamic_vos_eval:
+            frame_outputs: list[StageOutput | None] = [
+                all_frame_outputs.get(t) for t in range(num_frames)
+            ]
+        else:
+            frame_outputs = [all_frame_outputs[t] for t in range(num_frames)]
+        public_frame_outputs: list[PublicFrameOutput | None] = [
+            (
+                cast(PublicFrameOutput, {
+                    k: v
+                    for k, v in frame_out.items()
+                    if k != "obj_ptr"
+                })
+                if frame_out is not None
+                else None
+            )
+            for frame_out in frame_outputs
+        ]
+
+        if dynamic_vos_eval:
+            if "object_appearance_order" not in backbone_out:
+                raise KeyError("object_appearance_order")
+            object_appearance_order = backbone_out["object_appearance_order"]
+            find_metadatas = getattr(input, "find_metadatas", None)
+            if not find_metadatas or find_metadatas[0] is None:
+                raise ValueError(
+                    "dynamic VOS evaluation requires populated find_metadatas[0]"
+                )
+            num_objects = len(find_metadatas[0].coco_image_id)
+            inverse_object_appearance_order: list[int | None] = [
+                None for _ in object_appearance_order
+            ]
+            for idx, obj_id in enumerate(object_appearance_order):
+                inverse_object_appearance_order[int(obj_id)] = idx
+            if any(idx is None for idx in inverse_object_appearance_order):
+                raise ValueError("object_appearance_order must be a dense remapping.")
+            if len(inverse_object_appearance_order) < num_objects:
+                inverse_object_appearance_order.extend(
+                    range(len(inverse_object_appearance_order), num_objects)
+                )
+            row_order = [
+                int(idx) for idx in inverse_object_appearance_order if idx is not None
+            ]
+
+            last_output = public_frame_outputs[-1]
+            if last_output is None:
+                raise ValueError(
+                    "dynamic VOS evaluation requires a final frame output."
+                )
+            if "pred_masks" not in last_output:
+                raise KeyError("pred_masks")
+            last_mask = cast(TrackerArray, last_output["pred_masks"])
+            pad_shape = last_mask.shape[1:]
+            for stage_i, frame_out in enumerate(public_frame_outputs):
+                if frame_out is None:
+                    zero_masks = _zero_mask_rows_like(last_mask, num_objects, pad_shape)
+                    public_frame_outputs[stage_i] = {"pred_masks": zero_masks}
+                    continue
+
+                if "pred_masks" not in frame_out:
+                    raise KeyError("pred_masks")
+                pred_mask = cast(TrackerArray, frame_out["pred_masks"])
+                if pred_mask.shape[0] < num_objects:
+                    mask_shape = pred_mask.shape[1:]
+                    zero_pad = _zero_mask_rows_like(
+                        pred_mask,
+                        num_objects - pred_mask.shape[0],
+                        mask_shape,
+                    )
+                    padded_mask = _concat([pred_mask, zero_pad], axis=0)
+                    frame_out["pred_masks"] = _take_rows(padded_mask, row_order)
+
+        assert all(frame_out is not None for frame_out in public_frame_outputs)
+        return cast(list[PublicFrameOutput], public_frame_outputs)
+
+    def add_new_masks_to_existing_state[ObjectIdT](
+        self,
+        *,
+        interactive_pix_feat: mx.array,
+        interactive_high_res_features: list[mx.array] | None,
+        propagation_vision_feats: list[mx.array] | None,
+        propagation_feat_sizes: list[tuple[int, int]] | None,
+        new_masks: mx.array,
+        obj_idxs_in_mask: list[int],
+        obj_ids_in_mask: list[ObjectIdT] | None,
+        prev_output: StageOutput,
+        multiplex_state: MultiplexState[ObjectIdT],
+        add_mask_to_memory: bool = True,
+        are_masks_from_pts: bool = False,
+        allow_new_buckets: bool = False,
+        prefer_new_buckets: bool = False,
+    ) -> None:
+        """
+        Add new objects to an existing output/multiplex state.
+
+        New object entries are appended in data space, then muxed back to the
+        updated multiplex assignment just like the official helper. ``new_masks``
+        ``(K, 1, H, W)`` are converted with ``_use_mask_as_output``; the objects get the next
+        free slots (``allow_new_buckets`` and ``prefer_new_buckets`` choose whether new
+        buckets are opened) and their masks, scores, pointers and, with
+        ``add_mask_to_memory``, the frame memory are updated in ``prev_output`` in place.
+        Existing high-resolution masks are resized to the new masks' resolution, new
+        low-resolution masks (antialiased) to the existing size. Only the length of
+        ``obj_idxs_in_mask`` is used; the slots come from the multiplex state.
+
+        Raises:
+            UnsupportedMultiplexRuntimeError: Unless ``use_mask_input_as_output_without_sam``.
+            ValueError: If the mask, index and id counts disagree or propagation features
+                are missing for memory encoding.
+        """
+        if not self.use_mask_input_as_output_without_sam:
+            raise_unsupported_multiplex_runtime(
+                "VideoTrackingMultiplex.add_new_masks_to_existing_state"
+            )
+
+        num_new_objects = new_masks.shape[0]
+        if num_new_objects != len(obj_idxs_in_mask):
+            raise ValueError(
+                "new_masks batch must match obj_idxs_in_mask length: "
+                f"{num_new_objects} != {len(obj_idxs_in_mask)}"
+            )
+        if obj_ids_in_mask is not None and len(obj_ids_in_mask) != num_new_objects:
+            raise ValueError(
+                "obj_ids_in_mask length must match new_masks batch: "
+                f"{len(obj_ids_in_mask)} != {num_new_objects}"
+            )
+
+        existing_pointers = None
+        if self.use_obj_ptrs_in_encoder:
+            existing_pointers = multiplex_state.demux(
+                _require_stage_obj_ptr(prev_output)
+            )
+
+        new_object_idx = multiplex_state.find_next_batch_of_available_indices(
+            num_objects=num_new_objects,
+            allow_new_buckets=allow_new_buckets,
+            prefer_new_buckets=prefer_new_buckets,
+        )
+        multiplex_state.add_objects(
+            object_indices=new_object_idx,
+            object_ids=obj_ids_in_mask,
+            allow_new_buckets=allow_new_buckets,
+            prefer_new_buckets=prefer_new_buckets,
+        )
+
+        mask_output = self._use_mask_as_output(
+            backbone_features=interactive_pix_feat,
+            high_res_features=interactive_high_res_features,
+            mask_inputs=new_masks,
+            multiplex_state=multiplex_state,
+            objects_in_mask=new_object_idx,
+        )
+
+        pred_masks = prev_output.get("pred_masks")
+        if pred_masks is None:
+            pred_masks = mx.zeros(
+                (0, *mask_output["low_res_masks"].shape[1:]),
+                dtype=mask_output["low_res_masks"].dtype,
+            )
+            prev_output["pred_masks"] = pred_masks
+
+        pred_masks_high_res = prev_output.get("pred_masks_high_res")
+        if pred_masks_high_res is None:
+            pred_masks_high_res = mx.zeros(
+                (0, *mask_output["high_res_masks"].shape[1:]),
+                dtype=mask_output["high_res_masks"].dtype,
+            )
+            prev_output["pred_masks_high_res"] = pred_masks_high_res
+
+        if "object_score_logits" not in prev_output:
+            prev_output["object_score_logits"] = mx.zeros(
+                (0, *mask_output["object_score_logits"].shape[1:]),
+                dtype=mask_output["object_score_logits"].dtype,
+            )
+
+        interactive_resolution = mask_output["high_res_masks"].shape[-1]
+        existing_resolution = pred_masks_high_res.shape[-1]
+        if existing_resolution != interactive_resolution:
+            prev_output["pred_masks_high_res"] = interpolate(
+                pred_masks_high_res,
+                size=(interactive_resolution, interactive_resolution),
+                mode="bilinear",
+                align_corners=False,
+            )
+
+        h, w = pred_masks.shape[-2:]
+        mask_output["low_res_masks"] = interpolate(
+            mask_output["low_res_masks"],
+            size=(h, w),
+            mode="bilinear",
+            align_corners=False,
+            antialias=True,
+        )
+
+        _append(prev_output, mask_output, "pred_masks", "low_res_masks")
+        _append(
+            prev_output,
+            mask_output,
+            "pred_masks_high_res",
+            "high_res_masks",
+            strict=False,
+        )
+        _append(prev_output, mask_output, "object_score_logits", "object_score_logits")
+
+        if self.use_memory_selection:
+            ious = mask_output["ious"]
+            if len(ious.shape) > 1 and ious.shape[-1] == 1:
+                ious = mx.reshape(ious, ious.shape[:-1])
+            mask_output["ious"] = ious
+            _append(prev_output, mask_output, "iou_score", "ious")
+
+        if "input_masks" in prev_output:
+            prev_output["input_masks"] = _concat(
+                [prev_output["input_masks"], new_masks],
+                axis=0,
+            )
+
+        if self.use_obj_ptrs_in_encoder:
+            assert existing_pointers is not None
+            new_pointers = _require_sam_obj_ptr(mask_output).astype(
+                existing_pointers.dtype
+            )
+            combined_pointers = _concat([existing_pointers, new_pointers], axis=0)
+            prev_output["obj_ptr"] = multiplex_state.mux(combined_pointers)
+
+        prev_output["conditioning_objects"].update(new_object_idx)
+
+        if add_mask_to_memory:
+            if propagation_vision_feats is None or propagation_feat_sizes is None:
+                raise ValueError(
+                    "propagation features are required when adding masks to memory"
+                )
+            memory_values = _require_stage_values(
+                prev_output, "pred_masks_high_res", "object_score_logits"
+            )
+            pred_masks_high_res = cast(mx.array, memory_values["pred_masks_high_res"])
+            if pred_masks_high_res.shape[0] != multiplex_state.total_valid_entries:
+                raise ValueError(
+                    "pred_masks_high_res must have one row per valid multiplex "
+                    "entry before memory encoding"
+                )
+            maskmem_features, maskmem_pos_enc = self._encode_new_memory(
+                image=None,
+                current_vision_feats=propagation_vision_feats,
+                feat_sizes=propagation_feat_sizes,
+                pred_masks_high_res=pred_masks_high_res,
+                object_score_logits=cast(
+                    mx.array | None, memory_values["object_score_logits"]
+                ),
+                conditioning_objects=prev_output["conditioning_objects"],
+                is_mask_from_pts=are_masks_from_pts,
+                multiplex_state=multiplex_state,
+            )
+            prev_output["maskmem_features"] = maskmem_features
+            prev_output["maskmem_pos_enc"] = maskmem_pos_enc
+
+            if self.save_image_features:
+                if "image_features" not in prev_output:
+                    raise ValueError("image_features missing from saved state")
+                if "image_pos_enc" not in prev_output:
+                    raise ValueError("image_pos_enc missing from saved state")
+
+    def recondition_masks_in_existing_state[ObjectIdT](
+        self,
+        *,
+        interactive_pix_feat: mx.array,
+        interactive_high_res_features: list[mx.array] | None,
+        propagation_vision_feats: list[mx.array] | None,
+        propagation_feat_sizes: list[tuple[int, int]] | None,
+        new_masks: mx.array,
+        obj_idxs_in_mask: list[int],
+        obj_ids_in_mask: list[ObjectIdT] | None,
+        prev_output: StageOutput,
+        multiplex_state: MultiplexState[ObjectIdT],
+        add_mask_to_memory: bool = True,
+        are_masks_from_pts: bool = False,
+    ) -> None:
+        """
+        Recondition existing objects in an existing output/multiplex state.
+
+        ``new_masks`` ``(K, 1, H, W)`` replace the masks, scores, pointers and (with
+        ``add_mask_to_memory``) the frame memory of the objects at ``obj_idxs_in_mask`` in
+        ``prev_output``, in place; no objects are added and ``obj_ids_in_mask`` is only
+        length-checked. Low-resolution masks are resized (antialiased) to the existing size.
+
+        Raises:
+            UnsupportedMultiplexRuntimeError: Unless ``use_mask_input_as_output_without_sam``.
+            ValueError: If the mask, index and id counts disagree or propagation features
+                are missing for memory encoding.
+        """
+        if not self.use_mask_input_as_output_without_sam:
+            raise_unsupported_multiplex_runtime(
+                "VideoTrackingMultiplex.recondition_masks_in_existing_state"
+            )
+
+        num_new_objects = new_masks.shape[0]
+        if num_new_objects != len(obj_idxs_in_mask):
+            raise ValueError(
+                "new_masks batch must match obj_idxs_in_mask length: "
+                f"{num_new_objects} != {len(obj_idxs_in_mask)}"
+            )
+        if obj_ids_in_mask is not None and len(obj_ids_in_mask) != num_new_objects:
+            raise ValueError(
+                "obj_ids_in_mask length must match new_masks batch: "
+                f"{len(obj_ids_in_mask)} != {num_new_objects}"
+            )
+
+        existing_pointers = None
+        if self.use_obj_ptrs_in_encoder:
+            existing_pointers = multiplex_state.demux(
+                _require_stage_obj_ptr(prev_output)
+            )
+
+        mask_output = self._use_mask_as_output(
+            backbone_features=interactive_pix_feat,
+            high_res_features=interactive_high_res_features,
+            mask_inputs=new_masks,
+            multiplex_state=multiplex_state,
+            objects_in_mask=obj_idxs_in_mask,
+        )
+
+        pred_masks = cast(
+            mx.array, _require_stage_values(prev_output, "pred_masks")["pred_masks"]
+        )
+        h, w = pred_masks.shape[-2:]
+        mask_output["low_res_masks"] = interpolate(
+            mask_output["low_res_masks"],
+            size=(h, w),
+            mode="bilinear",
+            align_corners=False,
+            antialias=True,
+        )
+
+        _merge(
+            prev_output,
+            mask_output,
+            "pred_masks",
+            "low_res_masks",
+            obj_idxs_in_mask,
+        )
+        _merge(
+            prev_output,
+            mask_output,
+            "pred_masks_high_res",
+            "high_res_masks",
+            obj_idxs_in_mask,
+            strict=False,
+        )
+        _merge(
+            prev_output,
+            mask_output,
+            "object_score_logits",
+            "object_score_logits",
+            obj_idxs_in_mask,
+        )
+
+        if self.use_memory_selection:
+            ious = mask_output["ious"]
+            if len(ious.shape) > 1 and ious.shape[-1] == 1:
+                ious = mx.reshape(ious, ious.shape[:-1])
+            mask_output["ious"] = ious
+            _merge(prev_output, mask_output, "iou_score", "ious", obj_idxs_in_mask)
+
+        if "input_masks" in prev_output:
+            prev_output["input_masks"] = _replace_rows(
+                prev_output["input_masks"],
+                obj_idxs_in_mask,
+                new_masks,
+            )
+
+        if self.use_obj_ptrs_in_encoder:
+            assert existing_pointers is not None
+            new_pointers = _require_sam_obj_ptr(mask_output).astype(
+                existing_pointers.dtype
+            )
+            existing_pointers = _replace_rows(
+                existing_pointers,
+                obj_idxs_in_mask,
+                new_pointers,
+            )
+            prev_output["obj_ptr"] = multiplex_state.mux(existing_pointers)
+
+        prev_output["conditioning_objects"].update(obj_idxs_in_mask)
+
+        if add_mask_to_memory:
+            if propagation_vision_feats is None or propagation_feat_sizes is None:
+                raise ValueError(
+                    "propagation features are required when adding masks to memory"
+                )
+            memory_values = _require_stage_values(
+                prev_output, "pred_masks_high_res", "object_score_logits"
+            )
+            pred_masks_high_res = cast(mx.array, memory_values["pred_masks_high_res"])
+            if pred_masks_high_res.shape[0] != multiplex_state.total_valid_entries:
+                raise ValueError(
+                    "pred_masks_high_res must have one row per valid multiplex "
+                    "entry before memory encoding"
+                )
+            maskmem_features, maskmem_pos_enc = self._encode_new_memory(
+                image=None,
+                current_vision_feats=propagation_vision_feats,
+                feat_sizes=propagation_feat_sizes,
+                pred_masks_high_res=pred_masks_high_res,
+                object_score_logits=cast(
+                    mx.array | None, memory_values["object_score_logits"]
+                ),
+                conditioning_objects=prev_output["conditioning_objects"],
+                is_mask_from_pts=are_masks_from_pts,
+                multiplex_state=multiplex_state,
+            )
+            prev_output["maskmem_features"] = maskmem_features
+            prev_output["maskmem_pos_enc"] = maskmem_pos_enc
+
+            if self.save_image_features:
+                if "image_features" not in prev_output:
+                    raise ValueError("image_features missing from saved state")
+                if "image_pos_enc" not in prev_output:
+                    raise ValueError("image_pos_enc missing from saved state")
+
+    def forward(
+        self, input: TrackingInput | None = None, is_inference: bool = False
+    ) -> tuple[list[PublicFrameOutput], None]:
+        """Evaluation forward: run the backbone, prepare prompts from ``input.find_targets`` and track all frames.
+
+        The backbone runs once for the whole batch unless ``forward_backbone_per_frame_for_eval``.
+        Returns ``(per-frame outputs, None)``; ``is_inference`` is unused.
+
+        Raises:
+            UnsupportedMultiplexRuntimeError: If ``input`` is None.
+        """
+        del is_inference
+        if input is None:
+            raise_unsupported_multiplex_runtime("VideoTrackingMultiplex.forward(input)")
+        if not self.forward_backbone_per_frame_for_eval:
+            backbone_out = self.forward_image(
+                input.img_batch,
+                need_interactive_out=True,
+                need_propagation_out=True,
+            )
+        else:
+            backbone_out: RawBackboneOutput[mx.array] = {}
+        prompt_out = self.prepare_prompt_inputs(backbone_out, input)
+        previous_stages_out = self.forward_tracking(prompt_out, input)
+        return previous_stages_out, None
+
+
+class VideoTrackingDynamicMultiplex(VideoTrackingMultiplex):
+    """Multiplex tracker for videos in which objects appear over time.
+
+    Sets ``is_dynamic_model`` and keeps the transition-point options.
+    ``add_all_transition_frames_as_cond`` and ``is_dynamic_vos_evaluation`` are read by
+    ``forward_tracking``; ``rand_num_transition_points``, ``max_num_transition_points``
+    and ``max_trans_frames_in_attn`` are stored but not read in this repository.
+    """
+
+    def __init__(
+        self,
+        rand_num_transition_points: bool = True,
+        max_num_transition_points: int = 3,
+        add_all_transition_frames_as_cond: bool = True,
+        max_trans_frames_in_attn: int = 4,
+        is_dynamic_model: bool = True,
+        is_dynamic_vos_evaluation: bool = False,
+        **kwargs: Unpack[MultiplexTrackingConstructorArgs],
+    ):
+        super().__init__(is_dynamic_model=is_dynamic_model, **kwargs)
+        self.rand_num_transition_points = rand_num_transition_points
+        self.max_num_transition_points = max_num_transition_points
+        self.add_all_transition_frames_as_cond = add_all_transition_frames_as_cond
+        self.max_trans_frames_in_attn = max_trans_frames_in_attn
+        self.is_dynamic_vos_evaluation = is_dynamic_vos_evaluation
+
+
+__all__ = [
+    "MLP",
+    "MultiplexController",
+    "MultiplexMaskDecoder",
+    "MultiplexState",
+    "NO_OBJ_SCORE",
+    "SAMOutput",
+    "StageOutput",
+    "VideoTrackingDynamicMultiplex",
+    "VideoTrackingMultiplex",
+    "_append",
+    "_merge",
+    "_replace_rows",
+    "_reshape_spatial_feature",
+    "concat_points",
+    "neck_outs",
+]

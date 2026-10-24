@@ -1,0 +1,299 @@
+from pathlib import Path
+from typing import cast
+
+import mlx.core as mx
+import numpy as np
+from numpy.typing import NDArray
+
+from sam3_mlx.eval.coco_writer import PredictionDumper, Predictions
+from sam3_mlx.eval.postprocessors import PostProcessImage
+from sam3_mlx.mlx_runtime import to_numpy
+
+UPSTREAM_EVAL_POSTPROCESSORS_SOURCE_COMMIT = "2814fa619404a722d03e9a012e083e4f293a4e53"
+
+
+def _sigmoid(value: float) -> float:
+    return float(1.0 / (1.0 + np.exp(-np.float32(value))))
+
+
+class _UnusedPostprocessor:
+    def process_results(self, *args: object, **kwargs: object) -> Predictions:
+        del args, kwargs
+        return {}
+
+
+def test_postprocess_image_scales_boxes_and_applies_forced_labels() -> None:
+    processor = PostProcessImage(
+        max_dets_per_img=100,
+        iou_type="bbox",
+        use_presence=False,
+    )
+    outputs = {
+        "pred_logits": mx.array(
+            np.array(
+                [
+                    [[0.0, 2.0, -2.0], [3.0, -1.0, 0.0]],
+                    [[-2.0, -1.0, 4.0], [1.0, 0.0, -3.0]],
+                ],
+                dtype=np.float32,
+            )
+        ),
+        "pred_boxes": mx.array(
+            np.array(
+                [
+                    [[0.5, 0.5, 0.2, 0.4], [0.25, 0.25, 0.5, 0.5]],
+                    [[0.5, 0.5, 1.0, 1.0], [0.75, 0.25, 0.25, 0.5]],
+                ],
+                dtype=np.float32,
+            )
+        ),
+        "presence_logit_dec": mx.array(np.zeros((2, 2), dtype=np.float32)),
+    }
+
+    results = processor(
+        outputs,
+        target_sizes_boxes=mx.array([[100, 200], [50, 80]], dtype=mx.int64),
+        target_sizes_masks=mx.array([[100, 200], [50, 80]], dtype=mx.int64),
+        forced_labels=mx.array([5, 9], dtype=mx.int64),
+    )
+
+    assert len(results) == 2
+    np.testing.assert_allclose(
+        cast(NDArray[np.float32], to_numpy(results[0]["boxes"])),
+        np.array([[80.0, 30.0, 120.0, 70.0], [0.0, 0.0, 100.0, 50.0]]),
+        rtol=0,
+        atol=1e-5,
+    )
+    np.testing.assert_allclose(
+        cast(NDArray[np.float32], to_numpy(results[1]["boxes"])),
+        np.array([[0.0, 0.0, 80.0, 50.0], [50.0, 0.0, 70.0, 25.0]]),
+        rtol=0,
+        atol=1e-5,
+    )
+    np.testing.assert_allclose(
+        cast(NDArray[np.float32], to_numpy(results[0]["scores"])),
+        np.array([_sigmoid(2.0), _sigmoid(3.0)]),
+        rtol=0,
+        atol=1e-6,
+    )
+    np.testing.assert_allclose(
+        cast(NDArray[np.float32], to_numpy(results[1]["scores"])),
+        np.array([_sigmoid(4.0), _sigmoid(1.0)]),
+        rtol=0,
+        atol=1e-6,
+    )
+    np.testing.assert_array_equal(results[0]["labels"], np.array([5, 5]))
+    np.testing.assert_array_equal(results[1]["labels"], np.array([9, 9]))
+
+
+def test_postprocess_image_detection_threshold_is_strictly_greater_than_threshold() -> (
+    None
+):
+    processor = PostProcessImage(
+        max_dets_per_img=100,
+        iou_type="bbox",
+        use_presence=False,
+        detection_threshold=0.5,
+    )
+    outputs = {
+        "pred_logits": mx.array(np.array([[[0.0], [2.0]]], dtype=np.float32)),
+        "pred_boxes": mx.array(
+            np.array([[[0.25, 0.5, 0.5, 1.0], [0.5, 0.5, 0.2, 0.2]]])
+        ),
+        "presence_logit_dec": mx.array(np.zeros((1, 2), dtype=np.float32)),
+    }
+
+    result = processor(
+        outputs,
+        target_sizes_boxes=mx.array([[10, 20]], dtype=mx.int64),
+        target_sizes_masks=mx.array([[10, 20]], dtype=mx.int64),
+    )[0]
+
+    np.testing.assert_allclose(
+        cast(NDArray[np.float32], to_numpy(result["boxes"])),
+        np.array([[8.0, 4.0, 12.0, 6.0]]),
+        rtol=0,
+        atol=1e-6,
+    )
+    np.testing.assert_allclose(
+        cast(NDArray[np.float32], to_numpy(result["scores"])),
+        np.array([_sigmoid(2.0)]),
+        rtol=0,
+        atol=1e-6,
+    )
+    np.testing.assert_array_equal(result["labels"], np.array([1]))
+
+
+def test_postprocess_image_resizes_masks_with_mlx_interpolation_contract() -> None:
+    processor = PostProcessImage(
+        max_dets_per_img=100,
+        iou_type="segm",
+        use_presence=False,
+    )
+    outputs = {
+        "pred_logits": mx.array(np.array([[[2.0]]], dtype=np.float32)),
+        "pred_masks": mx.array(
+            np.array([[[[-4.0, 4.0], [4.0, -4.0]]]], dtype=np.float32)
+        ),
+        "presence_logit_dec": mx.array(np.zeros((1, 1), dtype=np.float32)),
+    }
+
+    result = processor(
+        outputs,
+        target_sizes_boxes=mx.array([[4, 4]], dtype=mx.int64),
+        target_sizes_masks=mx.array([[4, 4]], dtype=mx.int64),
+        consistent=False,
+    )[0]
+
+    assert result["boxes"] is None
+    assert result["scores"] is None
+    assert result["labels"] is None
+    np.testing.assert_array_equal(
+        to_numpy(result["masks"]),
+        np.array(
+            [
+                [
+                    [False, False, True, True],
+                    [False, False, True, True],
+                    [True, True, False, False],
+                    [True, True, False, False],
+                ]
+            ],
+            dtype=bool,
+        ),
+    )
+
+
+def test_postprocess_image_to_cpu_false_returns_mlx_arrays_for_tensor_outputs() -> None:
+    processor = PostProcessImage(
+        max_dets_per_img=100,
+        iou_type="segm",
+        to_cpu=False,
+        use_presence=False,
+    )
+    outputs = {
+        "pred_logits": mx.array(np.array([[[2.0]]], dtype=np.float32)),
+        "pred_boxes": mx.array(np.array([[[0.5, 0.5, 1.0, 1.0]]], dtype=np.float32)),
+        "pred_masks": mx.array(
+            np.array([[[[-10.0, 10.0], [10.0, -10.0]]]], dtype=np.float32)
+        ),
+        "presence_logit_dec": mx.array(np.zeros((1, 1), dtype=np.float32)),
+    }
+
+    result = processor(
+        outputs,
+        target_sizes_boxes=mx.array([[8, 10]], dtype=mx.int64),
+        target_sizes_masks=mx.array([[2, 2]], dtype=mx.int64),
+        consistent=False,
+    )[0]
+
+    assert isinstance(result["boxes"], mx.array)
+    assert isinstance(result["scores"], mx.array)
+    assert isinstance(result["labels"], mx.array)
+    assert isinstance(result["masks"], mx.array)
+    np.testing.assert_allclose(
+        cast(NDArray[np.float32], to_numpy(result["boxes"])),
+        np.array([[0.0, 0.0, 10.0, 8.0]]),
+        rtol=0,
+        atol=1e-6,
+    )
+    np.testing.assert_array_equal(
+        to_numpy(result["masks"]),
+        np.array([[[False, True], [True, False]]], dtype=bool),
+    )
+
+
+def test_postprocess_image_rle_output_is_compressed_and_filtered_by_detection_keep() -> (
+    None
+):
+    processor = PostProcessImage(
+        max_dets_per_img=100,
+        iou_type="segm",
+        use_presence=False,
+        convert_mask_to_rle=True,
+        detection_threshold=0.5,
+    )
+    outputs = {
+        "pred_logits": mx.array(np.array([[[0.0], [2.0]]], dtype=np.float32)),
+        "pred_boxes": mx.array(
+            np.array(
+                [[[0.25, 0.5, 0.5, 1.0], [0.5, 0.5, 0.2, 0.2]]],
+                dtype=np.float32,
+            )
+        ),
+        "pred_masks": mx.array(
+            np.array(
+                [
+                    [
+                        [[10.0, -10.0, -10.0], [-10.0, -10.0, -10.0]],
+                        [[-10.0, 10.0, -10.0], [10.0, 10.0, -10.0]],
+                    ]
+                ],
+                dtype=np.float32,
+            )
+        ),
+        "presence_logit_dec": mx.array(np.zeros((1, 2), dtype=np.float32)),
+    }
+
+    result = processor(
+        outputs,
+        target_sizes_boxes=mx.array([[2, 3]], dtype=mx.int64),
+        target_sizes_masks=mx.array([[2, 3]], dtype=mx.int64),
+        consistent=False,
+    )[0]
+
+    assert result["masks_rle"] == [{"size": [2, 3], "counts": "132"}]
+    assert "masks" not in result
+    np.testing.assert_allclose(
+        cast(NDArray[np.float32], to_numpy(result["boxes"])),
+        np.array([[1.2, 0.8, 1.8, 1.2]]),
+        rtol=0,
+        atol=1e-6,
+    )
+
+
+def test_prediction_dumper_prepares_typed_detection_and_segmentation_records(
+    tmp_path: Path,
+) -> None:
+    dumper = PredictionDumper(
+        dump_dir=str(tmp_path),
+        postprocessor=_UnusedPostprocessor(),
+        maxdets=10,
+        iou_type="bbox",
+    )
+    common = {
+        "scores": np.array([0.875], dtype=np.float32),
+        "labels": np.array([4], dtype=np.int64),
+        "boxes": np.array([[1.0, 2.0, 6.0, 8.0]], dtype=np.float32),
+    }
+
+    detections = dumper.prepare({17: common}, "bbox")
+    segmentations = dumper.prepare(
+        {
+            17: {
+                **common,
+                "masks": np.array([[[True, False], [True, False]]], dtype=bool),
+            }
+        },
+        "segm",
+    )
+
+    assert detections == [
+        {
+            "image_id": 17,
+            "category_id": 4,
+            "bbox": [1.0, 2.0, 5.0, 6.0],
+            "score": 0.875,
+        }
+    ]
+    assert segmentations[0]["segmentation"] == {
+        "counts": "022",
+        "size": [2, 2],
+    }
+    assert segmentations[0]["area"] == 0.5
+
+    preencoded = dumper.prepare(
+        {17: {**common, "masks_rle": [{"size": [2, 2], "counts": "022"}]}},
+        "segm",
+    )
+    assert preencoded == segmentations
