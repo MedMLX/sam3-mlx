@@ -13,7 +13,7 @@
     "shape_mismatches": [],
     "value_mismatches": []
   },
-  "generated_at": "2026-10-25T00:10:07.584745+00:00",
+  "generated_at": "2026-10-25T00:18:57.728759+00:00",
   "published_artifact": {
     "converter_version": "0.1.2",
     "repo": "mlx-community/sam3-image",
@@ -354,6 +354,6 @@
     "repo": "facebook/sam3",
     "revision": "3c879f39826c281e95690f02c7821c4de09afae7"
   },
-  "source_commit": "8b54faad8daee5bd4a42c65a6d8b035b897aa146",
+  "source_commit": "6d9a6c6af5b7f5bc95feca36d100ac79b81f09e7",
   "status": "passed"
 }
