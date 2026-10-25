@@ -4,6 +4,10 @@ Segment images from text and geometric prompts with an unofficial native MLX por
 
 [Docs](docs/usage.md) · [MedMLX](https://github.com/MedMLX)
 
+![Text prompt “red circle” selects both circles in a synthetic image.](https://raw.githubusercontent.com/MedMLX/sam3-mlx/main/docs/example.png)
+
+*Text prompt “red circle” selects both circles in a synthetic image.*
+
 | Input | Output |
 | :--- | :--- |
 | Image + text, boxes or points | Masks, boxes and confidence scores |
