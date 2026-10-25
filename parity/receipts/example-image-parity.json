@@ -1,0 +1,669 @@
+{
+  "case_profile": "example",
+  "cases": [
+    {
+      "box_l_inf_max": 0.0001220703125,
+      "detection_count_match": true,
+      "geometric_prompts": [],
+      "mask_iou_mean": 1.0,
+      "mask_iou_min": 1.0,
+      "matches": [
+        {
+          "mask_iou": 1.0,
+          "mlx_index": 0,
+          "official_index": 0
+        },
+        {
+          "mask_iou": 1.0,
+          "mlx_index": 1,
+          "official_index": 1
+        },
+        {
+          "mask_iou": 1.0,
+          "mlx_index": 2,
+          "official_index": 2
+        },
+        {
+          "mask_iou": 1.0,
+          "mlx_index": 3,
+          "official_index": 3
+        },
+        {
+          "mask_iou": 1.0,
+          "mlx_index": 4,
+          "official_index": 4
+        },
+        {
+          "mask_iou": 1.0,
+          "mlx_index": 5,
+          "official_index": 5
+        },
+        {
+          "mask_iou": 1.0,
+          "mlx_index": 6,
+          "official_index": 6
+        },
+        {
+          "mask_iou": 1.0,
+          "mlx_index": 7,
+          "official_index": 7
+        },
+        {
+          "mask_iou": 1.0,
+          "mlx_index": 8,
+          "official_index": 8
+        },
+        {
+          "mask_iou": 1.0,
+          "mlx_index": 9,
+          "official_index": 9
+        },
+        {
+          "mask_iou": 1.0,
+          "mlx_index": 10,
+          "official_index": 10
+        },
+        {
+          "mask_iou": 1.0,
+          "mlx_index": 11,
+          "official_index": 11
+        }
+      ],
+      "mlx_detection_count": 12,
+      "name": "text_shoe_1008",
+      "official_detection_count": 12,
+      "prompt": "shoe",
+      "resolution": 1008,
+      "score_abs_max": 5.662441253662109e-06,
+      "status": "passed"
+    },
+    {
+      "box_l_inf_max": null,
+      "detection_count_match": true,
+      "geometric_prompts": [],
+      "mask_iou_mean": null,
+      "mask_iou_min": null,
+      "matches": [],
+      "mlx_detection_count": 0,
+      "name": "text_nonsense_1008",
+      "official_detection_count": 0,
+      "prompt": "zzzz_not_a_real_class_qqq",
+      "resolution": 1008,
+      "score_abs_max": null,
+      "status": "passed"
+    },
+    {
+      "box_l_inf_max": 0.000152587890625,
+      "detection_count_match": true,
+      "geometric_prompts": [
+        {
+          "box": [
+            0.41796875,
+            0.6527777777777778,
+            0.0859375,
+            0.5
+          ],
+          "label": true
+        }
+      ],
+      "mask_iou_mean": 1.0,
+      "mask_iou_min": 1.0,
+      "matches": [
+        {
+          "mask_iou": 1.0,
+          "mlx_index": 0,
+          "official_index": 0
+        },
+        {
+          "mask_iou": 1.0,
+          "mlx_index": 1,
+          "official_index": 1
+        },
+        {
+          "mask_iou": 1.0,
+          "mlx_index": 2,
+          "official_index": 2
+        },
+        {
+          "mask_iou": 1.0,
+          "mlx_index": 3,
+          "official_index": 3
+        },
+        {
+          "mask_iou": 1.0,
+          "mlx_index": 4,
+          "official_index": 4
+        },
+        {
+          "mask_iou": 1.0,
+          "mlx_index": 5,
+          "official_index": 5
+        }
+      ],
+      "mlx_detection_count": 6,
+      "name": "positive_box_1008",
+      "official_detection_count": 6,
+      "prompt": null,
+      "resolution": 1008,
+      "score_abs_max": 2.3245811462402344e-06,
+      "status": "passed"
+    },
+    {
+      "box_l_inf_max": 0.00018310546875,
+      "detection_count_match": true,
+      "geometric_prompts": [
+        {
+          "box": [
+            0.41796875,
+            0.6527777777777778,
+            0.0859375,
+            0.5
+          ],
+          "label": true
+        },
+        {
+          "box": [
+            0.333984375,
+            0.6493055555555556,
+            0.08984375,
+            0.5208333333333334
+          ],
+          "label": false
+        }
+      ],
+      "mask_iou_mean": 1.0,
+      "mask_iou_min": 1.0,
+      "matches": [
+        {
+          "mask_iou": 1.0,
+          "mlx_index": 0,
+          "official_index": 0
+        },
+        {
+          "mask_iou": 1.0,
+          "mlx_index": 1,
+          "official_index": 1
+        },
+        {
+          "mask_iou": 1.0,
+          "mlx_index": 2,
+          "official_index": 2
+        },
+        {
+          "mask_iou": 1.0,
+          "mlx_index": 3,
+          "official_index": 3
+        },
+        {
+          "mask_iou": 1.0,
+          "mlx_index": 4,
+          "official_index": 4
+        }
+      ],
+      "mlx_detection_count": 5,
+      "name": "positive_negative_box_1008",
+      "official_detection_count": 5,
+      "prompt": null,
+      "resolution": 1008,
+      "score_abs_max": 1.5497207641601562e-06,
+      "status": "passed"
+    },
+    {
+      "box_l_inf_max": 0.00018310546875,
+      "detection_count_match": true,
+      "geometric_prompts": [],
+      "mask_iou_mean": 1.0,
+      "mask_iou_min": 1.0,
+      "matches": [
+        {
+          "mask_iou": 1.0,
+          "mlx_index": 0,
+          "official_index": 0
+        },
+        {
+          "mask_iou": 1.0,
+          "mlx_index": 1,
+          "official_index": 1
+        },
+        {
+          "mask_iou": 1.0,
+          "mlx_index": 2,
+          "official_index": 2
+        },
+        {
+          "mask_iou": 1.0,
+          "mlx_index": 3,
+          "official_index": 3
+        },
+        {
+          "mask_iou": 1.0,
+          "mlx_index": 4,
+          "official_index": 4
+        },
+        {
+          "mask_iou": 1.0,
+          "mlx_index": 5,
+          "official_index": 5
+        },
+        {
+          "mask_iou": 1.0,
+          "mlx_index": 6,
+          "official_index": 6
+        },
+        {
+          "mask_iou": 1.0,
+          "mlx_index": 7,
+          "official_index": 7
+        },
+        {
+          "mask_iou": 1.0,
+          "mlx_index": 8,
+          "official_index": 8
+        },
+        {
+          "mask_iou": 1.0,
+          "mlx_index": 9,
+          "official_index": 9
+        },
+        {
+          "mask_iou": 1.0,
+          "mlx_index": 10,
+          "official_index": 10
+        },
+        {
+          "mask_iou": 1.0,
+          "mlx_index": 11,
+          "official_index": 11
+        },
+        {
+          "mask_iou": 1.0,
+          "mlx_index": 12,
+          "official_index": 12
+        }
+      ],
+      "mlx_detection_count": 13,
+      "name": "text_shoe_672",
+      "official_detection_count": 13,
+      "prompt": "shoe",
+      "resolution": 672,
+      "score_abs_max": 4.0531158447265625e-06,
+      "status": "passed"
+    },
+    {
+      "box_l_inf_max": 0.0001220703125,
+      "detection_count_match": true,
+      "geometric_prompts": [],
+      "mask_iou_mean": 1.0,
+      "mask_iou_min": 1.0,
+      "matches": [
+        {
+          "mask_iou": 1.0,
+          "mlx_index": 0,
+          "official_index": 0
+        },
+        {
+          "mask_iou": 1.0,
+          "mlx_index": 1,
+          "official_index": 1
+        },
+        {
+          "mask_iou": 1.0,
+          "mlx_index": 2,
+          "official_index": 2
+        },
+        {
+          "mask_iou": 1.0,
+          "mlx_index": 3,
+          "official_index": 3
+        },
+        {
+          "mask_iou": 1.0,
+          "mlx_index": 4,
+          "official_index": 4
+        },
+        {
+          "mask_iou": 1.0,
+          "mlx_index": 5,
+          "official_index": 5
+        },
+        {
+          "mask_iou": 1.0,
+          "mlx_index": 6,
+          "official_index": 6
+        },
+        {
+          "mask_iou": 1.0,
+          "mlx_index": 7,
+          "official_index": 7
+        },
+        {
+          "mask_iou": 1.0,
+          "mlx_index": 8,
+          "official_index": 8
+        },
+        {
+          "mask_iou": 1.0,
+          "mlx_index": 9,
+          "official_index": 9
+        },
+        {
+          "mask_iou": 1.0,
+          "mlx_index": 10,
+          "official_index": 10
+        },
+        {
+          "mask_iou": 1.0,
+          "mlx_index": 11,
+          "official_index": 11
+        }
+      ],
+      "mlx_detection_count": 12,
+      "name": "text_shoe_504",
+      "official_detection_count": 12,
+      "prompt": "shoe",
+      "resolution": 504,
+      "score_abs_max": 5.364418029785156e-07,
+      "status": "passed"
+    }
+  ],
+  "comparison_algorithm": "hungarian-max-mask-iou-v1",
+  "confidence_threshold": 0.5,
+  "converted_checkpoint": {
+    "repo": "mlx-community/sam3-image",
+    "revision": "b72a14d8127e17e6f2a3d2e075bbbf4307ba146e"
+  },
+  "generated_at": "2026-10-25T00:14:12.928548+00:00",
+  "host": {
+    "machine": "arm64",
+    "mlx": "0.32.4",
+    "platform": "macOS-27.0.1-arm64-arm-64bit-Mach-O",
+    "python": "3.13.17"
+  },
+  "image": {
+    "path": "official-checkout/assets/images/test_image.jpg",
+    "size": [
+      1280,
+      720
+    ]
+  },
+  "official_checkpoint": {
+    "repo": "facebook/sam3",
+    "revision": "3c879f39826c281e95690f02c7821c4de09afae7"
+  },
+  "official_code": {
+    "repo": "https://github.com/facebookresearch/sam3",
+    "revision": "2814fa619404a722d03e9a012e083e4f293a4e53"
+  },
+  "oracle": {
+    "autocast_enabled": false,
+    "bindings": {
+      "case_spec": "cases.json",
+      "confidence_threshold": 0.5,
+      "cpu_adapters": [
+        "sam3.model.edt replaced with fail-fast unused stub",
+        "construction-time CUDA cache tensors redirected to CPU",
+        "pin_memory disabled for CPU-only staging",
+        "legacy tokenizer resource location via importlib.resources; exact pinned Git blob bytes",
+        "explicit FP32 bilinear resize then uint8 rounding preserves TorchVision 0.24 inputs",
+        "exactly three fused addmm_act casts promoted from BF16 to FP32; autocast disabled",
+        "global-attention RoPE frequencies recomputed with the official formula for non-1008 processor grids"
+      ],
+      "fp32_fused_adapter": {
+        "adapter_source": "scripts/_oracle_runtime.py",
+        "ast_omissions": [],
+        "official_file": "sam3/perflib/fused.py",
+        "profile": "addmm-act-three-cast-fp32-v1",
+        "rewrite": "exactly self/mat1/mat2.to(torch.bfloat16) -> .to(torch.float32)",
+        "rewritten_cast_count": 3
+      },
+      "image": "test_image.jpg",
+      "native_precision": "mlx.float32",
+      "official_checkpoint": {
+        "repo": "facebook/sam3",
+        "revision": "3c879f39826c281e95690f02c7821c4de09afae7"
+      },
+      "official_code": {
+        "repo": "https://github.com/facebookresearch/sam3",
+        "revision": "2814fa619404a722d03e9a012e083e4f293a4e53"
+      },
+      "precision": "torch.cpu.float32; autocast disabled",
+      "reference_profile": "pinned-source-cpu-fp32-v1",
+      "schema_version": 5
+    },
+    "buffer_dtypes": {
+      "torch.complex64": 32,
+      "torch.float32": 1
+    },
+    "case_spec": "cases.json",
+    "cases": [
+      {
+        "detection_count": 12,
+        "geometric_prompts": [],
+        "image_latency_s": 5.689867541001149,
+        "name": "text_shoe_1008",
+        "prompt": "shoe",
+        "prompt_latency_s": 0.9204653750020952,
+        "resolution": 1008,
+        "tensor_dtypes": {
+          "boxes": "torch.float32",
+          "masks": "torch.bool",
+          "masks_logits": "torch.float32",
+          "scores": "torch.float32"
+        }
+      },
+      {
+        "detection_count": 0,
+        "geometric_prompts": [],
+        "image_latency_s": 0.0,
+        "name": "text_nonsense_1008",
+        "prompt": "zzzz_not_a_real_class_qqq",
+        "prompt_latency_s": 0.9236331669999345,
+        "resolution": 1008,
+        "tensor_dtypes": {
+          "boxes": "torch.float32",
+          "masks": "torch.bool",
+          "masks_logits": "torch.float32",
+          "scores": "torch.float32"
+        }
+      },
+      {
+        "detection_count": 6,
+        "geometric_prompts": [
+          {
+            "box": [
+              0.41796875,
+              0.6527777777777778,
+              0.0859375,
+              0.5
+            ],
+            "label": true
+          }
+        ],
+        "image_latency_s": 0.0,
+        "name": "positive_box_1008",
+        "prompt": null,
+        "prompt_latency_s": 0.8699101669990341,
+        "resolution": 1008,
+        "tensor_dtypes": {
+          "boxes": "torch.float32",
+          "masks": "torch.bool",
+          "masks_logits": "torch.float32",
+          "scores": "torch.float32"
+        }
+      },
+      {
+        "detection_count": 5,
+        "geometric_prompts": [
+          {
+            "box": [
+              0.41796875,
+              0.6527777777777778,
+              0.0859375,
+              0.5
+            ],
+            "label": true
+          },
+          {
+            "box": [
+              0.333984375,
+              0.6493055555555556,
+              0.08984375,
+              0.5208333333333334
+            ],
+            "label": false
+          }
+        ],
+        "image_latency_s": 0.0,
+        "name": "positive_negative_box_1008",
+        "prompt": null,
+        "prompt_latency_s": 1.685944249999011,
+        "resolution": 1008,
+        "tensor_dtypes": {
+          "boxes": "torch.float32",
+          "masks": "torch.bool",
+          "masks_logits": "torch.float32",
+          "scores": "torch.float32"
+        }
+      },
+      {
+        "detection_count": 13,
+        "geometric_prompts": [],
+        "image_latency_s": 2.448509917001502,
+        "name": "text_shoe_672",
+        "prompt": "shoe",
+        "prompt_latency_s": 0.36787366699718405,
+        "resolution": 672,
+        "tensor_dtypes": {
+          "boxes": "torch.float32",
+          "masks": "torch.bool",
+          "masks_logits": "torch.float32",
+          "scores": "torch.float32"
+        }
+      },
+      {
+        "detection_count": 12,
+        "geometric_prompts": [],
+        "image_latency_s": 1.701117583001178,
+        "name": "text_shoe_504",
+        "prompt": "shoe",
+        "prompt_latency_s": 0.22901087499849382,
+        "resolution": 504,
+        "tensor_dtypes": {
+          "boxes": "torch.float32",
+          "masks": "torch.bool",
+          "masks_logits": "torch.float32",
+          "scores": "torch.float32"
+        }
+      }
+    ],
+    "cold_load_s": 7.800187584001833,
+    "confidence_threshold": 0.5,
+    "cpu_adapters": [
+      "sam3.model.edt replaced with fail-fast unused stub",
+      "construction-time CUDA cache tensors redirected to CPU",
+      "pin_memory disabled for CPU-only staging",
+      "legacy tokenizer resource location via importlib.resources; exact pinned Git blob bytes",
+      "explicit FP32 bilinear resize then uint8 rounding preserves TorchVision 0.24 inputs",
+      "exactly three fused addmm_act casts promoted from BF16 to FP32; autocast disabled",
+      "global-attention RoPE frequencies recomputed with the official formula for non-1008 processor grids"
+    ],
+    "environment": {
+      "machine": "arm64",
+      "platform": "macOS-27.0.1-arm64-arm-64bit-Mach-O",
+      "python": "3.13.17",
+      "torch": "2.13.0"
+    },
+    "fp32_fused_adapter": {
+      "adapter_source": "scripts/_oracle_runtime.py",
+      "ast_omissions": [],
+      "official_file": "sam3/perflib/fused.py",
+      "profile": "addmm-act-three-cast-fp32-v1",
+      "rewrite": "exactly self/mat1/mat2.to(torch.bfloat16) -> .to(torch.float32)",
+      "rewritten_cast_count": 3
+    },
+    "generated_at": "2026-10-25T00:08:49.041128+00:00",
+    "image": "test_image.jpg",
+    "metadata_projection": {
+      "omitted_transport_fields": [
+        "cache_identity"
+      ],
+      "purpose": "public-report"
+    },
+    "native_precision": "mlx.float32",
+    "official_checkpoint": {
+      "repo": "facebook/sam3",
+      "revision": "3c879f39826c281e95690f02c7821c4de09afae7"
+    },
+    "official_code": {
+      "repo": "https://github.com/facebookresearch/sam3",
+      "revision": "2814fa619404a722d03e9a012e083e4f293a4e53"
+    },
+    "official_imports": {
+      "image_processor": "sam3/model/sam3_image_processor.py",
+      "model_builder": "sam3/model_builder.py"
+    },
+    "parameter_dtypes": {
+      "torch.float32": 1102
+    },
+    "precision": "torch.cpu.float32; autocast disabled",
+    "reference_profile": "pinned-source-cpu-fp32-v1",
+    "schema_version": 5
+  },
+  "performance": {
+    "cold_load_s": 0.2944697500024631,
+    "latency_by_resolution_s": {
+      "1008": {
+        "median": 1.0144148750005115,
+        "p95": 1.0444213339978887,
+        "samples": [
+          1.0178536249986792,
+          1.0082995000011579,
+          1.0107753339980263,
+          1.0444213339978887,
+          1.0144148750005115
+        ]
+      },
+      "504": {
+        "median": 0.3533020419999957,
+        "p95": 0.3644983750018582,
+        "samples": [
+          0.3533020419999957,
+          0.352970332998666,
+          0.3492607500011218,
+          0.3644983750018582,
+          0.3626492910007073
+        ]
+      },
+      "672": {
+        "median": 0.46556774999771733,
+        "p95": 0.473436958000093,
+        "samples": [
+          0.46556774999771733,
+          0.473436958000093,
+          0.46728554199944483,
+          0.4610544999995909,
+          0.46218462500110036
+        ]
+      }
+    },
+    "measurement_boundary": "MLX active allocator peak after model load; synchronized full set_image plus text-grounding latency",
+    "peak_active_memory_bytes": 8422370806,
+    "precision": "fp32",
+    "preprocessing": "parity",
+    "repetitions": 5,
+    "status": "passed",
+    "warmup_runs": 1
+  },
+  "raw_evidence": {
+    "path": "parity/evidence/example-image-parity.npz"
+  },
+  "schema_version": 3,
+  "source_commit": "8b54faad8daee5bd4a42c65a6d8b035b897aa146",
+  "status": "passed",
+  "thresholds": {
+    "box_l_inf_max": 2.0,
+    "mask_iou_mean_min": 0.99,
+    "mask_iou_min": 0.95,
+    "score_abs_max": 0.025
+  }
+}
