@@ -4,6 +4,10 @@ Segment images from text and geometric prompts with an unofficial native MLX por
 
 [Docs](docs/usage.md) · [MedMLX](https://github.com/MedMLX)
 
+![Text prompts “person” and “helmet” → masks on a real photograph.](https://raw.githubusercontent.com/MedMLX/sam3-mlx/main/docs/showcase.png)
+
+*Text prompts “person” and “helmet” → masks on a real photograph.*
+
 | Input | Output |
 | :--- | :--- |
 | Image + text, boxes or points | Masks, boxes and confidence scores |

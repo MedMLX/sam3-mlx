@@ -78,3 +78,9 @@ NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE
 LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
 OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
 WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+## Showcase image
+
+The photograph of astronaut Eileen Collins is by NASA, public domain,
+provided by [scikit-image](https://scikit-image.org/docs/0.24.x/api/skimage.data.html#skimage.data.astronaut).
+The showcase adds SAM 3 masks.
