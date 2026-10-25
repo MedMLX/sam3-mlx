@@ -10,6 +10,7 @@ from typing import (
     Literal,
     NotRequired,
     Required,
+    TypeAliasType,
     Union,
     cast,
     get_args,
@@ -43,15 +44,23 @@ def _record_hints(annotation: type[object]) -> dict[str, object]:
     return get_type_hints(annotation, include_extras=True)
 
 
-def _array_scalar_type(arguments: tuple[object, ...]) -> type[object]:
-    canonical_shape: object = get_args(NDArray[np.generic])[0]
-    if (
-        len(arguments) != 2
-        or arguments[0] != canonical_shape
-        or get_origin(arguments[1]) is not np.dtype
-    ):
-        raise ValueError("unsupported NumPy array annotation")
-    dtype_arguments: tuple[object, ...] = get_args(arguments[1])
+def _array_scalar_type(origin: object, arguments: tuple[object, ...]) -> type[object]:
+    if origin is NDArray:
+        # NumPy 2.5 exposes NDArray as a PEP 695 alias with one scalar parameter.
+        dtype_arguments = arguments
+    else:
+        canonical_array: object = NDArray[np.generic]
+        canonical_origin: object = get_origin(canonical_array)
+        if isinstance(canonical_origin, TypeAliasType):
+            canonical_array = canonical_origin.__value__
+        canonical_shape: object = get_args(canonical_array)[0]
+        if (
+            len(arguments) != 2
+            or arguments[0] != canonical_shape
+            or get_origin(arguments[1]) is not np.dtype
+        ):
+            raise ValueError("unsupported NumPy array annotation")
+        dtype_arguments: tuple[object, ...] = get_args(arguments[1])
     if len(dtype_arguments) != 1 or not isinstance(dtype_arguments[0], type):
         raise ValueError("unsupported NumPy dtype annotation")
     if not issubclass(dtype_arguments[0], np.generic):
@@ -69,8 +78,8 @@ def _require_supported_annotation(annotation: object) -> None:
         for field in _record_hints(annotation).values():
             _require_supported_annotation(field)
         return
-    if origin is np.ndarray:
-        _array_scalar_type(arguments)
+    if origin is np.ndarray or origin is NDArray:
+        _array_scalar_type(origin, arguments)
         return
     if (
         origin is Union
@@ -124,10 +133,12 @@ def _check_record(value: object, annotation: type[object], context: str) -> None
         require_fixture_type(entries[key], field_type, f"{context}.{key}")
 
 
-def _check_array(value: object, arguments: tuple[object, ...], context: str) -> None:
+def _check_array(
+    value: object, origin: object, arguments: tuple[object, ...], context: str
+) -> None:
     if not isinstance(value, np.ndarray):
         raise _mismatch(value, np.ndarray, context)
-    scalar_type = _array_scalar_type(arguments)
+    scalar_type = _array_scalar_type(origin, arguments)
     array = cast(NDArray[np.generic], value)
     if not issubclass(array.dtype.type, scalar_type):
         raise TypeError(f"{context} requires dtype {scalar_type!r}, got {array.dtype}")
@@ -194,8 +205,8 @@ def require_fixture_type(value: object, annotation: object, context: str) -> Non
             raise ValueError(f"unsupported record annotation in {context}")
         _check_record(value, annotation, context)
         return
-    if origin is np.ndarray:
-        _check_array(value, arguments, context)
+    if origin is np.ndarray or origin is NDArray:
+        _check_array(value, origin, arguments, context)
         return
     if _is_container_origin(origin):
         _check_container(value, origin, arguments, context)
