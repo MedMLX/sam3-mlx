@@ -36,12 +36,12 @@ PyTorch. See [setup details](https://github.com/MedMLX/sam3-mlx/blob/main/docs/u
 
 ## Quick start
 
-Install the package and optional extras:
+Install the released GitHub wheel and optional extras:
 
 ```bash
-uv pip install sam3-mlx            # or: uv add sam3-mlx
-uv pip install "sam3-mlx[viz]"     # optional: matplotlib plotting helpers
-uv pip install "sam3-mlx[video]"   # optional: OpenCV video decoding
+uv pip install "sam3-mlx @ https://github.com/MedMLX/sam3-mlx/releases/download/v0.1.3/sam3_mlx-0.1.3-py3-none-any.whl"
+# Optional plotting helpers and video decoding:
+uv pip install "sam3-mlx[viz,video] @ https://github.com/MedMLX/sam3-mlx/releases/download/v0.1.3/sam3_mlx-0.1.3-py3-none-any.whl"
 ```
 
 Build the image model and segment from a text prompt:
@@ -60,7 +60,11 @@ masks, boxes, scores = state["masks"], state["boxes"], state["scores"]
 ```
 
 `resolution` must be a multiple of 14; lower is faster but less detailed. `1008`,
-`672` and `504` are covered by the release parity checks.
+`672` and `504` are covered by the release parity checks. The contract compares
+native FP32 with a precision-adapted pinned official FP32 source, using unchanged
+mask, box and score thresholds. Default BF16 compatibility remains unqualified;
+its retained failure and precision scope are described in the
+[verification notes](https://github.com/MedMLX/sam3-mlx/blob/main/docs/verification.md#3-upstream-oracle).
 
 For video frames:
 

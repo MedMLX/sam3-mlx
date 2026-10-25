@@ -13,6 +13,7 @@ from hypothesis import given, settings, strategies as st
 from sam3_mlx.release_contract import (
     JsonObject,
     OracleBindings,
+    ORACLE_OUTPUT_DTYPES,
     build_oracle_bindings,
 )
 from scripts._oracle_runtime import (
@@ -48,7 +49,7 @@ def _metadata(bindings: OracleBindings, count: int = 1) -> JsonObject:
         "schema_version": bindings["schema_version"],
         "bindings": bindings,
         "cache_identity": CACHE_IDENTITY,
-        "cases": [{**SPEC, "detection_count": count}],
+        "cases": [{**SPEC, "detection_count": count, "tensor_dtypes": ORACLE_OUTPUT_DTYPES}],
     }
 
 

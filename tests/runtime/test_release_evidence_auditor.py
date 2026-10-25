@@ -9,6 +9,7 @@ from sam3_mlx.parity_evidence import load_evidence_bundle, write_evidence_bundle
 from sam3_mlx.release_contract import (
     JsonObject,
     build_oracle_bindings,
+    ORACLE_OUTPUT_DTYPES,
 )
 from scripts import audit_release_evidence as auditor
 from scripts.audit_release_evidence import (
@@ -42,6 +43,11 @@ def _valid_oracle_fixture() -> tuple[list[CaseSpec], JsonObject, JsonObject]:
         "case_spec": bindings["case_spec"],
         "confidence_threshold": bindings["confidence_threshold"],
         "precision": bindings["precision"],
+        "reference_profile": bindings["reference_profile"],
+        "native_precision": bindings["native_precision"],
+        "fp32_fused_adapter": bindings["fp32_fused_adapter"],
+        "autocast_enabled": False,
+        "parameter_dtypes": {"torch.float32": 1},
         "cpu_adapters": bindings["cpu_adapters"],
         "environment": {
             "machine": "arm64",
@@ -56,6 +62,7 @@ def _valid_oracle_fixture() -> tuple[list[CaseSpec], JsonObject, JsonObject]:
                 "prompt": "object",
                 "geometric_prompts": [],
                 "detection_count": 1,
+                "tensor_dtypes": ORACLE_OUTPUT_DTYPES,
                 "image_latency_s": 1.0,
                 "prompt_latency_s": 1.0,
             }

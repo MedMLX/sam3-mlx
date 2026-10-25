@@ -22,12 +22,12 @@ from scripts.run_interactive_checkpoint_parity import (
     cleanup_policy,
     cases,
     compare_prediction,
-    compile_cpu_fp32_fused_source,
     evidence_errors,
     expected_inventory,
     prompt_arguments,
     verify_source_snapshot,
 )
+from scripts._oracle_runtime import compile_cpu_fp32_fused_source
 from scripts.run_interactive_head_parity import Verdict, file_signature
 
 

@@ -16,8 +16,8 @@ JsonObject = dict[str, object]
 PACKAGE_VERSION = "0.1.3"
 # Converter release that produced the published MLX checkpoint lineage.
 CONVERTER_VERSION = "0.1.2"
-REPORT_SCHEMA_VERSION = 2
-ORACLE_SCHEMA_VERSION = 4
+REPORT_SCHEMA_VERSION = 3
+ORACLE_SCHEMA_VERSION = 5
 EVIDENCE_SCHEMA_VERSION = 1
 COMPARISON_ALGORITHM = "hungarian-max-mask-iou-v1"
 
@@ -36,6 +36,17 @@ class RepoRevision(TypedDict):
     revision: str
 
 
+class FusedAdapterBinding(TypedDict):
+    """The sole arithmetic precision adaptation of the pinned CPU reference."""
+
+    profile: str
+    official_file: str
+    adapter_source: str
+    rewrite: str
+    rewritten_cast_count: int
+    ast_omissions: list[str]
+
+
 class OracleBindings(TypedDict):
     """Identity under which a cached upstream oracle result may be reused."""
 
@@ -46,6 +57,9 @@ class OracleBindings(TypedDict):
     case_spec: str
     confidence_threshold: float
     precision: str
+    reference_profile: str
+    native_precision: str
+    fp32_fused_adapter: FusedAdapterBinding
     cpu_adapters: list[str]
 
 
@@ -175,15 +189,32 @@ EXPECTED_CASE_NAMES: dict[str, tuple[str, ...]] = {
     ),
 }
 
-# The upstream model targets CUDA; the CPU oracle runs it under BF16 autocast with
-# these recorded source adaptations, which are part of the cache identity.
-ORACLE_PRECISION = "torch.cpu.autocast.bfloat16"
+# Compare the public native FP32 policy with an explicitly precision-adapted
+# pinned source, rather than treating a BF16 forward as an FP32 reference.
+ORACLE_PRECISION = "torch.cpu.float32; autocast disabled"
+ORACLE_REFERENCE_PROFILE = "pinned-source-cpu-fp32-v1"
+ORACLE_NATIVE_PRECISION = "mlx.float32"
+ORACLE_FP32_FUSED_ADAPTER: FusedAdapterBinding = {
+    "profile": "addmm-act-three-cast-fp32-v1",
+    "official_file": "sam3/perflib/fused.py",
+    "adapter_source": "scripts/_oracle_runtime.py",
+    "rewrite": "exactly self/mat1/mat2.to(torch.bfloat16) -> .to(torch.float32)",
+    "rewritten_cast_count": 3,
+    "ast_omissions": [],
+}
+ORACLE_OUTPUT_DTYPES = {
+    "masks": "torch.bool",
+    "masks_logits": "torch.float32",
+    "boxes": "torch.float32",
+    "scores": "torch.float32",
+}
 ORACLE_CPU_ADAPTERS = (
     "sam3.model.edt replaced with fail-fast unused stub",
     "construction-time CUDA cache tensors redirected to CPU",
     "pin_memory disabled for CPU-only staging",
     "legacy tokenizer resource location via importlib.resources; exact pinned Git blob bytes",
     "explicit FP32 bilinear resize then uint8 rounding preserves TorchVision 0.24 inputs",
+    "exactly three fused addmm_act casts promoted from BF16 to FP32; autocast disabled",
     (
         "global-attention RoPE frequencies recomputed with the official "
         "formula for non-1008 processor grids"
@@ -215,6 +246,9 @@ def build_oracle_bindings(
         "case_spec": Path(case_spec).name,
         "confidence_threshold": float(confidence_threshold),
         "precision": ORACLE_PRECISION,
+        "reference_profile": ORACLE_REFERENCE_PROFILE,
+        "native_precision": ORACLE_NATIVE_PRECISION,
+        "fp32_fused_adapter": ORACLE_FP32_FUSED_ADAPTER.copy(),
         "cpu_adapters": list(ORACLE_CPU_ADAPTERS),
     }
 

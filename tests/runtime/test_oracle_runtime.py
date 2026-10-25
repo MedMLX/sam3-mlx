@@ -9,6 +9,7 @@ from typing import ContextManager
 
 import pytest
 
+from sam3_mlx.release_contract import FusedAdapterBinding, ORACLE_FP32_FUSED_ADAPTER
 from scripts._oracle_runtime import (
     install_cpu_oracle_adapters,
     open_official_image_oracle,
@@ -53,6 +54,11 @@ class _TorchRuntime:
     def _autocast(*args: object, **kwargs: object) -> ContextManager[None]:
         del args, kwargs
         return nullcontext()
+
+    @staticmethod
+    def is_autocast_enabled(device_type: str) -> bool:
+        del device_type
+        return False
 
 
 def test_cpu_oracle_adapters_redirect_only_cuda_construction_devices() -> None:
@@ -113,6 +119,8 @@ def test_oracle_case_validation_returns_precise_shape_and_rejects_bool_aliases()
         "builder_source",
         "processor_source",
         "build",
+        "fused_adapter",
+        "parameter_dtype",
         "body",
     ],
 )
@@ -130,13 +138,29 @@ def test_oracle_restores_torch_factories_on_every_failure(
     if failure == "processor_source":
         processor.__file__ = str(tmp_path.parent / "wrong_processor.py")
 
+    class Parameter:
+        dtype = "torch.bfloat16" if failure == "parameter_dtype" else "torch.float32"
+
+    class Model:
+        def parameters(self) -> tuple[Parameter, ...]:
+            return (Parameter(),)
+
+        def buffers(self) -> tuple[Parameter, ...]:
+            return ()
+
     def build_model(**kwargs: object) -> object:
         del kwargs
         assert torch.zeros is not originals[0]
         assert torch.arange is not originals[1]
         if failure == "build":
             raise ValueError("build failed")
-        return object()
+        return Model()
+
+    def adapt_fused(checkout: Path) -> FusedAdapterBinding:
+        assert checkout == tmp_path
+        if failure == "fused_adapter":
+            raise ValueError("fused adapter failed")
+        return ORACLE_FP32_FUSED_ADAPTER.copy()
 
     class Processor:
         pass
@@ -162,6 +186,7 @@ def test_oracle_restores_torch_factories_on_every_failure(
         return processor
 
     monkeypatch.setattr("scripts._oracle_runtime.import_module", import_oracle_module)
+    monkeypatch.setattr("scripts._oracle_runtime.install_cpu_fp32_fused_adapter", adapt_fused)
     with pytest.raises((ImportError, ValueError)):
         with open_official_image_oracle(
             official_checkout=tmp_path, checkpoint=tmp_path / "checkpoint.pt"

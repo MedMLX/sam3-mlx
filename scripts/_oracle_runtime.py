@@ -3,17 +3,20 @@
 from __future__ import annotations
 
 import os
+import ast
 import json
 import sys
 import types
-from collections.abc import Callable, Generator, Mapping, Sequence
+from types import CodeType
+from collections import Counter
+from collections.abc import Callable, Generator, Iterable, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from importlib import import_module
 from importlib.resources import files
 from pathlib import Path
 import time
-from typing import ContextManager, Never, Protocol, Self, TypedDict, cast
+from typing import ContextManager, Never, NotRequired, Protocol, Self, TypedDict, cast
 
 import numpy as np
 from numpy.lib.npyio import NpzFile
@@ -25,6 +28,9 @@ from sam3_mlx.parity_evidence import normalize_outputs
 from sam3_mlx.release_contract import (
     JsonObject,
     OracleBindings,
+    FusedAdapterBinding,
+    ORACLE_FP32_FUSED_ADAPTER,
+    ORACLE_OUTPUT_DTYPES,
     require_json_list,
     require_json_nonnegative_int,
     require_json_object,
@@ -38,6 +44,8 @@ type DynamicCall = Callable[..., object]
 
 
 class OracleTensor(Protocol):
+    dtype: object
+
     def detach(self) -> Self: ...
 
     def cpu(self) -> Self: ...
@@ -50,6 +58,7 @@ class OracleTensor(Protocol):
 
 
 class OracleState(TypedDict):
+    masks_logits: NotRequired[OracleTensor]
     masks: OracleTensor
     boxes: OracleTensor
     scores: OracleTensor
@@ -188,6 +197,11 @@ def load_official_oracle_archive(
                     raise ValueError(
                         f"Oracle case {spec['name']!r} {field} metadata drifted."
                     )
+            validate_exact_mapping(
+                require_json_object(case_metadata.get("tensor_dtypes"), field="Oracle tensor dtypes"),
+                ORACLE_OUTPUT_DTYPES,
+                label="oracle output precision",
+            )
             try:
                 raw = {
                     field: np.array(archive[f"case_{index}_{field}"], copy=True)
@@ -252,6 +266,8 @@ class TorchRuntime(Protocol):
     Tensor: TensorClass
     autocast: Callable[..., ContextManager[None]]
     bfloat16: object
+
+    def is_autocast_enabled(self, device_type: str) -> bool: ...
     __version__: object
 
 
@@ -295,6 +311,9 @@ class OfficialImageOracleSession:
     processor_factory: OracleProcessorFactory
     cold_load_s: float
     official_imports: Mapping[str, str]
+    fp32_fused_adapter: FusedAdapterBinding
+    parameter_dtypes: Mapping[str, int]
+    buffer_dtypes: Mapping[str, int]
 
 
 class _RopeAttention(Protocol):
@@ -325,6 +344,10 @@ class _Backbone(Protocol):
 
 class OracleModel(Protocol):
     backbone: _Backbone
+
+    def parameters(self) -> Iterable[OracleTensor]: ...
+
+    def buffers(self) -> Iterable[OracleTensor]: ...
 
 
 def validate_official_checkout(checkout: Path, *, expected_revision: str) -> str:
@@ -489,6 +512,52 @@ def configure_official_image_resize(
     transforms[1] = resize_pixels
 
 
+def compile_cpu_fp32_fused_source(source: str, filename: str) -> CodeType:
+    """Change exactly the three forced BF16 casts in the pinned fused operation."""
+    tree = ast.parse(source, filename=filename)
+    functions = [node for node in tree.body if isinstance(node, ast.FunctionDef)]
+    if len(functions) != 1 or functions[0].name != "addmm_act":
+        raise ValueError("Expected only the official addmm_act function.")
+    casts = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Attribute)
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "torch"
+        and node.attr == "bfloat16"
+    ]
+    expected = {
+        ast.dump(ast.parse(f"{name} = {name}.to(torch.bfloat16)").body[0])
+        for name in ("self", "mat1", "mat2")
+    }
+    actual = {
+        ast.dump(node)
+        for node in functions[0].body
+        if isinstance(node, ast.Assign)
+        and any(cast_node in ast.walk(node) for cast_node in casts)
+    }
+    if len(casts) != 3 or actual != expected:
+        raise ValueError("Official fused BF16 cast contract changed.")
+    for node in casts:
+        node.attr = "float32"
+    return compile(tree, filename, "exec")
+
+
+def install_cpu_fp32_fused_adapter(checkout: Path) -> FusedAdapterBinding:
+    fused = import_module("sam3.perflib.fused")
+    vitdet = import_module("sam3.model.vitdet")
+    path = Path(cast(str, fused.__file__)).resolve()
+    if path != checkout.resolve() / "sam3/perflib/fused.py":
+        raise RuntimeError("Fused adapter source lies outside pinned checkout.")
+    if vitdet.addmm_act is not fused.addmm_act:
+        raise RuntimeError("ViT fused operator binding differs from official source.")
+    namespace: dict[str, object] = {"__name__": "sam3_cpu_fp32_fused_oracle_adapter"}
+    exec(compile_cpu_fp32_fused_source(path.read_text(), str(path)), namespace)
+    setattr(fused, "addmm_act", namespace["addmm_act"])
+    setattr(vitdet, "addmm_act", namespace["addmm_act"])
+    return ORACLE_FP32_FUSED_ADAPTER.copy()
+
+
 @contextmanager
 def open_official_image_oracle(
     *,
@@ -548,11 +617,18 @@ def open_official_image_oracle(
                 )
             finally:
                 restore_construction_adapters(torch_runtime, originals)
+            fused_adapter = install_cpu_fp32_fused_adapter(official_checkout)
+            parameter_dtypes = dict(Counter(str(value.dtype) for value in model.parameters()))
+            if set(parameter_dtypes) != {"torch.float32"}:
+                raise ValueError(f"CPU FP32 oracle parameter dtypes changed: {parameter_dtypes}")
             session = OfficialImageOracleSession(
                 torch=torch_runtime,
                 model=model,
                 processor_factory=processor_factory,
                 cold_load_s=time.perf_counter() - load_started,
+                fp32_fused_adapter=fused_adapter,
+                parameter_dtypes=parameter_dtypes,
+                buffer_dtypes=dict(Counter(str(value.dtype) for value in model.buffers())),
                 official_imports={
                     "model_builder": model_builder_source,
                     "image_processor": processor_source,

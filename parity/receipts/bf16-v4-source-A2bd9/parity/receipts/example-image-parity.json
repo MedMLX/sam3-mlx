@@ -1,0 +1,603 @@
+{
+  "case_profile": "example",
+  "cases": [
+    {
+      "box_l_inf_max": 0.3516845703125,
+      "detection_count_match": true,
+      "geometric_prompts": [],
+      "mask_iou_mean": 0.9977396981584701,
+      "mask_iou_min": 0.9956236323851203,
+      "matches": [
+        {
+          "mask_iou": 0.9989247311827957,
+          "mlx_index": 0,
+          "official_index": 0
+        },
+        {
+          "mask_iou": 1.0,
+          "mlx_index": 1,
+          "official_index": 1
+        },
+        {
+          "mask_iou": 0.9956236323851203,
+          "mlx_index": 2,
+          "official_index": 2
+        },
+        {
+          "mask_iou": 0.996996996996997,
+          "mlx_index": 3,
+          "official_index": 3
+        },
+        {
+          "mask_iou": 0.9965753424657534,
+          "mlx_index": 4,
+          "official_index": 4
+        },
+        {
+          "mask_iou": 0.997867803837953,
+          "mlx_index": 5,
+          "official_index": 5
+        },
+        {
+          "mask_iou": 0.99830220713073,
+          "mlx_index": 6,
+          "official_index": 6
+        },
+        {
+          "mask_iou": 0.9976798143851509,
+          "mlx_index": 7,
+          "official_index": 7
+        },
+        {
+          "mask_iou": 0.9968354430379747,
+          "mlx_index": 8,
+          "official_index": 8
+        },
+        {
+          "mask_iou": 0.9965034965034965,
+          "mlx_index": 9,
+          "official_index": 9
+        },
+        {
+          "mask_iou": 0.9975669099756691,
+          "mlx_index": 10,
+          "official_index": 10
+        },
+        {
+          "mask_iou": 1.0,
+          "mlx_index": 11,
+          "official_index": 11
+        }
+      ],
+      "mlx_detection_count": 12,
+      "name": "text_shoe_1008",
+      "official_detection_count": 12,
+      "prompt": "shoe",
+      "resolution": 1008,
+      "score_abs_max": 0.007394075393676758,
+      "status": "passed"
+    },
+    {
+      "box_l_inf_max": null,
+      "detection_count_match": true,
+      "geometric_prompts": [],
+      "mask_iou_mean": null,
+      "mask_iou_min": null,
+      "matches": [],
+      "mlx_detection_count": 0,
+      "name": "text_nonsense_1008",
+      "official_detection_count": 0,
+      "prompt": "zzzz_not_a_real_class_qqq",
+      "resolution": 1008,
+      "score_abs_max": null,
+      "status": "passed"
+    },
+    {
+      "box_l_inf_max": 0.514404296875,
+      "detection_count_match": true,
+      "geometric_prompts": [
+        {
+          "box": [
+            0.41796875,
+            0.6527777777777778,
+            0.0859375,
+            0.5
+          ],
+          "label": true
+        }
+      ],
+      "mask_iou_mean": 0.9986457878055299,
+      "mask_iou_min": 0.997476923076923,
+      "matches": [
+        {
+          "mask_iou": 0.9981615715936548,
+          "mlx_index": 0,
+          "official_index": 0
+        },
+        {
+          "mask_iou": 0.9994205250043461,
+          "mlx_index": 1,
+          "official_index": 1
+        },
+        {
+          "mask_iou": 0.9990334868383649,
+          "mlx_index": 2,
+          "official_index": 2
+        },
+        {
+          "mask_iou": 0.9997480050398992,
+          "mlx_index": 3,
+          "official_index": 3
+        },
+        {
+          "mask_iou": 0.997476923076923,
+          "mlx_index": 5,
+          "official_index": 4
+        },
+        {
+          "mask_iou": 0.9980342152799915,
+          "mlx_index": 4,
+          "official_index": 5
+        }
+      ],
+      "mlx_detection_count": 6,
+      "name": "positive_box_1008",
+      "official_detection_count": 6,
+      "prompt": null,
+      "resolution": 1008,
+      "score_abs_max": 0.0073778629302978516,
+      "status": "passed"
+    },
+    {
+      "box_l_inf_max": 0.3275146484375,
+      "detection_count_match": true,
+      "geometric_prompts": [
+        {
+          "box": [
+            0.41796875,
+            0.6527777777777778,
+            0.0859375,
+            0.5
+          ],
+          "label": true
+        },
+        {
+          "box": [
+            0.333984375,
+            0.6493055555555556,
+            0.08984375,
+            0.5208333333333334
+          ],
+          "label": false
+        }
+      ],
+      "mask_iou_mean": 0.9986561310508012,
+      "mask_iou_min": 0.9979983143699958,
+      "matches": [
+        {
+          "mask_iou": 0.9979983143699958,
+          "mlx_index": 0,
+          "official_index": 0
+        },
+        {
+          "mask_iou": 0.9991916392401409,
+          "mlx_index": 1,
+          "official_index": 1
+        },
+        {
+          "mask_iou": 0.999205042303106,
+          "mlx_index": 2,
+          "official_index": 2
+        },
+        {
+          "mask_iou": 0.9985814728012828,
+          "mlx_index": 3,
+          "official_index": 3
+        },
+        {
+          "mask_iou": 0.9983041865394806,
+          "mlx_index": 4,
+          "official_index": 4
+        }
+      ],
+      "mlx_detection_count": 5,
+      "name": "positive_negative_box_1008",
+      "official_detection_count": 5,
+      "prompt": null,
+      "resolution": 1008,
+      "score_abs_max": 0.011393487453460693,
+      "status": "passed"
+    },
+    {
+      "box_l_inf_max": 0.506927490234375,
+      "detection_count_match": true,
+      "geometric_prompts": [],
+      "mask_iou_mean": 0.9965194828803587,
+      "mask_iou_min": 0.9886621315192744,
+      "matches": [
+        {
+          "mask_iou": 0.9914675767918089,
+          "mlx_index": 11,
+          "official_index": 0
+        },
+        {
+          "mask_iou": 0.9964994165694282,
+          "mlx_index": 0,
+          "official_index": 1
+        },
+        {
+          "mask_iou": 0.9992647058823529,
+          "mlx_index": 1,
+          "official_index": 2
+        },
+        {
+          "mask_iou": 1.0,
+          "mlx_index": 2,
+          "official_index": 3
+        },
+        {
+          "mask_iou": 0.9978655282817502,
+          "mlx_index": 3,
+          "official_index": 4
+        },
+        {
+          "mask_iou": 0.997887323943662,
+          "mlx_index": 4,
+          "official_index": 5
+        },
+        {
+          "mask_iou": 0.9954198473282443,
+          "mlx_index": 5,
+          "official_index": 6
+        },
+        {
+          "mask_iou": 0.9886621315192744,
+          "mlx_index": 6,
+          "official_index": 7
+        },
+        {
+          "mask_iou": 0.9971550497866287,
+          "mlx_index": 7,
+          "official_index": 8
+        },
+        {
+          "mask_iou": 0.9966666666666667,
+          "mlx_index": 8,
+          "official_index": 9
+        },
+        {
+          "mask_iou": 0.9938650306748467,
+          "mlx_index": 9,
+          "official_index": 10
+        },
+        {
+          "mask_iou": 1.0,
+          "mlx_index": 10,
+          "official_index": 11
+        },
+        {
+          "mask_iou": 1.0,
+          "mlx_index": 12,
+          "official_index": 12
+        }
+      ],
+      "mlx_detection_count": 13,
+      "name": "text_shoe_672",
+      "official_detection_count": 13,
+      "prompt": "shoe",
+      "resolution": 672,
+      "score_abs_max": 0.01648193597793579,
+      "status": "passed"
+    },
+    {
+      "box_l_inf_max": 1.0477294921875,
+      "detection_count_match": true,
+      "geometric_prompts": [],
+      "mask_iou_mean": 0.9860993841742174,
+      "mask_iou_min": 0.8716707021791767,
+      "matches": [
+        {
+          "mask_iou": 0.9919484702093397,
+          "mlx_index": 0,
+          "official_index": 0
+        },
+        {
+          "mask_iou": 0.9988193624557261,
+          "mlx_index": 1,
+          "official_index": 1
+        },
+        {
+          "mask_iou": 0.995768688293371,
+          "mlx_index": 2,
+          "official_index": 2
+        },
+        {
+          "mask_iou": 0.9969604863221885,
+          "mlx_index": 3,
+          "official_index": 3
+        },
+        {
+          "mask_iou": 0.9953757225433526,
+          "mlx_index": 4,
+          "official_index": 4
+        },
+        {
+          "mask_iou": 0.999,
+          "mlx_index": 5,
+          "official_index": 5
+        },
+        {
+          "mask_iou": 0.8716707021791767,
+          "mlx_index": 6,
+          "official_index": 6
+        },
+        {
+          "mask_iou": 0.9992810927390366,
+          "mlx_index": 7,
+          "official_index": 7
+        },
+        {
+          "mask_iou": 0.9922879177377892,
+          "mlx_index": 8,
+          "official_index": 8
+        },
+        {
+          "mask_iou": 0.9953216374269006,
+          "mlx_index": 9,
+          "official_index": 9
+        },
+        {
+          "mask_iou": 0.9983333333333333,
+          "mlx_index": 10,
+          "official_index": 10
+        },
+        {
+          "mask_iou": 0.9984251968503937,
+          "mlx_index": 11,
+          "official_index": 11
+        }
+      ],
+      "mlx_detection_count": 12,
+      "name": "text_shoe_504",
+      "official_detection_count": 12,
+      "prompt": "shoe",
+      "resolution": 504,
+      "score_abs_max": 0.014674782752990723,
+      "status": "failed"
+    }
+  ],
+  "comparison_algorithm": "hungarian-max-mask-iou-v1",
+  "confidence_threshold": 0.5,
+  "converted_checkpoint": {
+    "repo": "mlx-community/sam3-image",
+    "revision": "b72a14d8127e17e6f2a3d2e075bbbf4307ba146e"
+  },
+  "generated_at": "2026-10-24T23:45:47.815441+00:00",
+  "host": {
+    "machine": "arm64",
+    "mlx": "0.32.4",
+    "platform": "macOS-27.0.1-arm64-arm-64bit-Mach-O",
+    "python": "3.13.17"
+  },
+  "image": {
+    "path": "official-checkout/assets/images/test_image.jpg",
+    "size": [
+      1280,
+      720
+    ]
+  },
+  "official_checkpoint": {
+    "repo": "facebook/sam3",
+    "revision": "3c879f39826c281e95690f02c7821c4de09afae7"
+  },
+  "official_code": {
+    "repo": "https://github.com/facebookresearch/sam3",
+    "revision": "2814fa619404a722d03e9a012e083e4f293a4e53"
+  },
+  "oracle": {
+    "bindings": {
+      "case_spec": "cases.json",
+      "confidence_threshold": 0.5,
+      "cpu_adapters": [
+        "sam3.model.edt replaced with fail-fast unused stub",
+        "construction-time CUDA cache tensors redirected to CPU",
+        "pin_memory disabled for CPU-only staging",
+        "legacy tokenizer resource location via importlib.resources; exact pinned Git blob bytes",
+        "explicit FP32 bilinear resize then uint8 rounding preserves TorchVision 0.24 inputs",
+        "global-attention RoPE frequencies recomputed with the official formula for non-1008 processor grids"
+      ],
+      "image": "test_image.jpg",
+      "official_checkpoint": {
+        "repo": "facebook/sam3",
+        "revision": "3c879f39826c281e95690f02c7821c4de09afae7"
+      },
+      "official_code": {
+        "repo": "https://github.com/facebookresearch/sam3",
+        "revision": "2814fa619404a722d03e9a012e083e4f293a4e53"
+      },
+      "precision": "torch.cpu.autocast.bfloat16",
+      "schema_version": 4
+    },
+    "case_spec": "cases.json",
+    "cases": [
+      {
+        "detection_count": 12,
+        "geometric_prompts": [],
+        "image_latency_s": 155.00809966700035,
+        "name": "text_shoe_1008",
+        "prompt": "shoe",
+        "prompt_latency_s": 17.364379042002838,
+        "resolution": 1008
+      },
+      {
+        "detection_count": 0,
+        "geometric_prompts": [],
+        "image_latency_s": 0.0,
+        "name": "text_nonsense_1008",
+        "prompt": "zzzz_not_a_real_class_qqq",
+        "prompt_latency_s": 31.569777083997906,
+        "resolution": 1008
+      },
+      {
+        "detection_count": 6,
+        "geometric_prompts": [
+          {
+            "box": [
+              0.41796875,
+              0.6527777777777778,
+              0.0859375,
+              0.5
+            ],
+            "label": true
+          }
+        ],
+        "image_latency_s": 0.0,
+        "name": "positive_box_1008",
+        "prompt": null,
+        "prompt_latency_s": 22.83185870899979,
+        "resolution": 1008
+      },
+      {
+        "detection_count": 5,
+        "geometric_prompts": [
+          {
+            "box": [
+              0.41796875,
+              0.6527777777777778,
+              0.0859375,
+              0.5
+            ],
+            "label": true
+          },
+          {
+            "box": [
+              0.333984375,
+              0.6493055555555556,
+              0.08984375,
+              0.5208333333333334
+            ],
+            "label": false
+          }
+        ],
+        "image_latency_s": 0.0,
+        "name": "positive_negative_box_1008",
+        "prompt": null,
+        "prompt_latency_s": 34.249784584000736,
+        "resolution": 1008
+      },
+      {
+        "detection_count": 13,
+        "geometric_prompts": [],
+        "image_latency_s": 53.50825762500244,
+        "name": "text_shoe_672",
+        "prompt": "shoe",
+        "prompt_latency_s": 4.106213041002775,
+        "resolution": 672
+      },
+      {
+        "detection_count": 12,
+        "geometric_prompts": [],
+        "image_latency_s": 35.79468687499684,
+        "name": "text_shoe_504",
+        "prompt": "shoe",
+        "prompt_latency_s": 1.8030473340004392,
+        "resolution": 504
+      }
+    ],
+    "cold_load_s": 7.554623457999696,
+    "confidence_threshold": 0.5,
+    "cpu_adapters": [
+      "sam3.model.edt replaced with fail-fast unused stub",
+      "construction-time CUDA cache tensors redirected to CPU",
+      "pin_memory disabled for CPU-only staging",
+      "legacy tokenizer resource location via importlib.resources; exact pinned Git blob bytes",
+      "explicit FP32 bilinear resize then uint8 rounding preserves TorchVision 0.24 inputs",
+      "global-attention RoPE frequencies recomputed with the official formula for non-1008 processor grids"
+    ],
+    "environment": {
+      "machine": "arm64",
+      "platform": "macOS-27.0.1-arm64-arm-64bit-Mach-O",
+      "python": "3.13.17",
+      "torch": "2.13.0"
+    },
+    "generated_at": "2026-10-24T23:13:25.710852+00:00",
+    "image": "test_image.jpg",
+    "metadata_projection": {
+      "omitted_transport_fields": [
+        "cache_identity"
+      ],
+      "purpose": "public-report"
+    },
+    "official_checkpoint": {
+      "repo": "facebook/sam3",
+      "revision": "3c879f39826c281e95690f02c7821c4de09afae7"
+    },
+    "official_code": {
+      "repo": "https://github.com/facebookresearch/sam3",
+      "revision": "2814fa619404a722d03e9a012e083e4f293a4e53"
+    },
+    "official_imports": {
+      "image_processor": "sam3/model/sam3_image_processor.py",
+      "model_builder": "sam3/model_builder.py"
+    },
+    "precision": "torch.cpu.autocast.bfloat16",
+    "schema_version": 4
+  },
+  "performance": {
+    "cold_load_s": 0.6932101670026896,
+    "latency_by_resolution_s": {
+      "1008": {
+        "median": 1.034712541000772,
+        "p95": 1.043092208001326,
+        "samples": [
+          1.0179998750027153,
+          1.03897041700111,
+          1.043092208001326,
+          1.0317294160013262,
+          1.034712541000772
+        ]
+      },
+      "504": {
+        "median": 0.37147175000063726,
+        "p95": 0.4534430420026183,
+        "samples": [
+          0.44124004100012826,
+          0.35216575000231387,
+          0.37147175000063726,
+          0.4534430420026183,
+          0.3544265830023505
+        ]
+      },
+      "672": {
+        "median": 0.47722966600122163,
+        "p95": 0.5130116670006828,
+        "samples": [
+          0.4740613750000193,
+          0.47722966600122163,
+          0.4770023749988468,
+          0.48776920800082735,
+          0.5130116670006828
+        ]
+      }
+    },
+    "measurement_boundary": "MLX active allocator peak after model load; synchronized full set_image plus text-grounding latency",
+    "peak_active_memory_bytes": 8422370419,
+    "precision": "fp32",
+    "preprocessing": "parity",
+    "repetitions": 5,
+    "status": "passed",
+    "warmup_runs": 1
+  },
+  "raw_evidence": {
+    "path": "parity/evidence/example-image-parity.npz"
+  },
+  "schema_version": 2,
+  "source_commit": "2bd9b7a135f3f14b1f9e80b21f332851d90af337",
+  "status": "failed",
+  "thresholds": {
+    "box_l_inf_max": 2.0,
+    "mask_iou_mean_min": 0.99,
+    "mask_iou_min": 0.95,
+    "score_abs_max": 0.025
+  }
+}

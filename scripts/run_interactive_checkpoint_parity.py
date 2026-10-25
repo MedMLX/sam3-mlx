@@ -9,7 +9,6 @@ apply; raw-logit errors are diagnostic and do not establish logit equivalence.
 from __future__ import annotations
 
 import argparse
-import ast
 from dataclasses import asdict, dataclass
 from enum import StrEnum
 from importlib import import_module, metadata
@@ -20,7 +19,6 @@ import subprocess
 import sys
 from collections.abc import Callable, Mapping
 from typing import NotRequired, Protocol, TypedDict, Unpack, cast
-from types import CodeType
 import traceback
 import warnings
 
@@ -43,6 +41,7 @@ from scripts._oracle_runtime import (  # noqa: E402
     TorchRuntime,
     OracleTransformOwner,
     configure_official_image_resize,
+    install_cpu_fp32_fused_adapter,
     official_tokenizer_resources,
     install_cpu_oracle_adapters,
     restore_construction_adapters,
@@ -443,57 +442,6 @@ def _exercise(
         _record_prediction(arrays, f"batch_image_{index}", values)
 
 
-def compile_cpu_fp32_fused_source(source: str, filename: str) -> CodeType:
-    """Change exactly the three forced BF16 casts in the pinned fused operation."""
-    tree = ast.parse(source, filename=filename)
-    functions = [node for node in tree.body if isinstance(node, ast.FunctionDef)]
-    if len(functions) != 1 or functions[0].name != "addmm_act":
-        raise ValueError("Expected only the official addmm_act function.")
-    casts = [
-        node
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Attribute)
-        and isinstance(node.value, ast.Name)
-        and node.value.id == "torch"
-        and node.attr == "bfloat16"
-    ]
-    expected = {
-        ast.dump(ast.parse(f"{name} = {name}.to(torch.bfloat16)").body[0])
-        for name in ("self", "mat1", "mat2")
-    }
-    actual = {
-        ast.dump(node)
-        for node in functions[0].body
-        if isinstance(node, ast.Assign)
-        and any(cast_node in ast.walk(node) for cast_node in casts)
-    }
-    if len(casts) != 3 or actual != expected:
-        raise ValueError("Official fused BF16 cast contract changed.")
-    for node in casts:
-        node.attr = "float32"
-    return compile(tree, filename, "exec")
-
-
-def _install_cpu_fp32_fused_adapter(checkout: Path) -> dict[str, object]:
-    fused = import_module("sam3.perflib.fused")
-    vitdet = import_module("sam3.model.vitdet")
-    path = Path(cast(str, fused.__file__)).resolve()
-    if path != checkout.resolve() / "sam3/perflib/fused.py":
-        raise RuntimeError("Fused adapter source lies outside pinned checkout.")
-    if vitdet.addmm_act is not fused.addmm_act:
-        raise RuntimeError("ViT fused operator binding differs from official source.")
-    namespace: dict[str, object] = {"__name__": "sam3_cpu_fp32_fused_oracle_adapter"}
-    exec(compile_cpu_fp32_fused_source(path.read_text(), str(path)), namespace)
-    setattr(fused, "addmm_act", namespace["addmm_act"])
-    setattr(vitdet, "addmm_act", namespace["addmm_act"])
-    return {
-        "file": "sam3/perflib/fused.py",
-        "rewrite": "exactly self/mat1/mat2.to(torch.bfloat16) -> .to(torch.float32)",
-        "rewritten_cast_count": 3,
-        "ast_omissions": [],
-        "reason": "CPU FP32 oracle; upstream forced BF16 fused result otherwise mismatches FP32 fc2",
-    }
-
 
 def _load_torch(
     args: RunConfig,
@@ -521,7 +469,7 @@ def _load_torch(
                 enable_inst_interactivity=True,
                 compile=False,
             )
-            fused_adapter = _install_cpu_fp32_fused_adapter(args.official_checkout)
+            fused_adapter = install_cpu_fp32_fused_adapter(args.official_checkout)
     finally:
         restore_construction_adapters(torch_runtime, originals)
         torch_runtime.Tensor.pin_memory = originals.pin_memory

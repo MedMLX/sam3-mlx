@@ -29,6 +29,7 @@ from sam3_mlx.release_contract import (  # noqa: E402
     OFFICIAL_CODE_REVISION,
     ORACLE_CPU_ADAPTERS,
     ORACLE_PRECISION,
+    ORACLE_OUTPUT_DTYPES,
     CONVERTER_VERSION,
     PACKAGE_VERSION,
     JsonObject,
@@ -259,10 +260,24 @@ def _validate_oracle(
         "case_spec": expected_bindings["case_spec"],
         "confidence_threshold": expected_bindings["confidence_threshold"],
         "precision": ORACLE_PRECISION,
+        "reference_profile": expected_bindings["reference_profile"],
+        "native_precision": expected_bindings["native_precision"],
+        "fp32_fused_adapter": expected_bindings["fp32_fused_adapter"],
         "cpu_adapters": list(ORACLE_CPU_ADAPTERS),
     }
     for field, expected in duplicate_fields.items():
         _require_exact(oracle_object.get(field), expected, label=f"oracle {field}")
+    _require_exact(oracle_object.get("autocast_enabled"), False, label="oracle autocast")
+    parameter_dtypes = _require_object(
+        oracle_object.get("parameter_dtypes"), field="oracle parameter dtypes"
+    )
+    if set(parameter_dtypes) != {"torch.float32"}:
+        raise EvidenceAuditError("Oracle parameters must all use float32.")
+    count = require_json_nonnegative_int(
+        parameter_dtypes["torch.float32"], field="oracle float32 parameter count"
+    )
+    if count == 0:
+        raise EvidenceAuditError("Oracle parameter inventory must be nonempty.")
 
     oracle_cases = _require_list(oracle_object.get("cases"), field="oracle cases")
     if len(oracle_cases) != len(specs):
@@ -275,6 +290,11 @@ def _validate_oracle(
         oracle_cases, specs, report_cases, strict=True
     ):
         oracle_case_object = _require_object(oracle_case, field="oracle case")
+        _require_exact(
+            oracle_case_object.get("tensor_dtypes"),
+            ORACLE_OUTPUT_DTYPES,
+            label="oracle output precision",
+        )
         _require_exact(
             oracle_case_object.get("name"),
             spec["name"],

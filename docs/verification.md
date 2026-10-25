@@ -155,8 +155,9 @@ the image loader select the 149 image-head tensors while accounting for the
 160 video-only tensors. The CPU reference uses the same scoped tokenizer
 resource locator and explicit FP32-resize/uint8-round policy described below.
 This interactive lane runs FP32 with autocast disabled, including its existing
-three-cast CPU fused-operator adapter; the frozen text/box image lane separately
-uses CPU BF16 autocast. Their precision scopes must remain distinct.
+three-cast CPU fused-operator adapter. The versioned text/box image reference
+now shares that FP32 adaptation; neither lane qualifies default BF16 or CUDA
+execution.
 
 The Torch CPU and MLX Metal phases run in separate processes. Reports bind
 package and official source revisions, source file sizes and modification times,
@@ -339,16 +340,45 @@ inference and binds its cache to:
 - image name;
 - case-spec name;
 - confidence threshold;
-- CPU BF16 precision;
+- the `pinned-source-cpu-fp32-v1` reference profile and native FP32 policy;
+- the `addmm-act-three-cast-fp32-v1` adapter, its exact source owner and rewrite;
 - the explicitly allowed CPU adaptations;
 - actual import paths inside the pinned official checkout.
 
 The CPU reference locates the legacy tokenizer resource through
 `importlib.resources` and verifies its exact bytes against the pinned Git blob.
 It explicitly selects FP32 bilinear resize followed by uint8 rounding, preserving
-the TorchVision 0.24 input contract under patched TorchVision 0.28. Model weights
-remain FP32 while CPU autocast uses BF16 for forward operations. These adapters
-are recorded in the oracle bindings; older caches must be recomputed.
+the TorchVision 0.24 input contract under patched TorchVision 0.28. Floating model parameters
+remain FP32 and CPU autocast is disabled. The source-checked fused adapter changes
+exactly the three `self`, `mat1` and `mat2` casts in official `addmm_act` from
+BF16 to FP32; its matmul, GELU, arguments and weights remain unchanged. The adapter
+lives in `scripts/_oracle_runtime.py`, which is part of the cache file-stat
+identity and the report's committed source identity. Execution checks actual
+parameter and output dtypes before recording them. The checkpoint additionally
+retains 32 complex64 rotary buffers alongside its 1,368 float32 tensors.
+
+This is FP32 parity with a precision-adapted pinned official source, not
+compatibility with its default BF16 or CUDA execution. The former schema-4 BF16
+reference failed `text_shoe_504`: minimum mask IoU `0.8716707022` and mean
+`0.9860993842`, below the unchanged `0.95` / `0.99` gates. Ten of eleven cases
+passed. That failure remains unqualified; same-input diagnostics localized the
+discrepancy to BF16 forward arithmetic rather than preprocessing or final mask
+projection. The original schema-4 reports, raw arrays and lineage are retained
+byte-for-byte in [the BF16 snapshot](../parity/receipts/bf16-v4-source-A2bd9/).
+Paths inside that nested snapshot are relative to its own root, and its source
+identity remains `2bd9b7a135f3f14b1f9e80b21f332851d90af337`.
+
+The FP32 contract keeps the same two images, eleven cases, prompts, resolutions,
+checkpoint/source pins, exact detection-count requirement and numerical thresholds.
+It requires newly executed canonical evidence; private diagnostic comparisons are
+not relabelled as release proof.
+
+The current direct-source reference environment uses Python 3.13, Torch 2.13.0,
+TorchVision 0.28.0, NumPy 2.5.4, Pillow 13.0.0 and ftfy 6.3.1. This is an explicit
+metadata exception to the frozen upstream distribution constraints (`numpy<2`,
+`ftfy==6.1.1`). The pinned source, exact tokenizer bytes and mandated pixel
+preprocessing are checked independently; numerical evidence applies to this
+recorded environment.
 
 Public reports explicitly mark a `public-report` metadata projection. They omit
 only the cache lookup identity containing private absolute filesystem paths;
@@ -357,7 +387,7 @@ image, prompt, configuration and precision bindings remain unchanged, as do the
 actual outputs and numerical comparison data.
 
 A cache missing any binding is not release evidence. Both image parity runners
-require oracle cache schema 4; older caches must be recomputed with the hardened
+require oracle cache schema 5; older caches must be recomputed with the hardened
 official oracle.
 
 ### 4. Raw output parity
@@ -366,7 +396,7 @@ The hardened parity runner stores official and MLX masks, boxes, and scores for
 every case in compressed NPZ bundles. Object pairing uses deterministic Hungarian
 maximum-mask-IoU assignment.
 
-Schema-v2 reports reference the raw bundle by path. Summary metrics are
+Schema-v3 reports reference the raw bundle by path. Summary metrics are
 recomputed by the release auditor rather than trusted directly. Both the report
 and raw bundle record the exact `sam3_mlx` source commit that generated them.
 

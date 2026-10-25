@@ -12,6 +12,7 @@ from PIL import Image
 from sam3_mlx.release_contract import (
     OFFICIAL_CODE_REVISION,
     build_oracle_bindings,
+    ORACLE_OUTPUT_DTYPES,
 )
 from scripts._oracle_runtime import OracleCase, build_oracle_cache_identity, save_oracle_arrays
 from tests._paths import REPO_ROOT
@@ -158,7 +159,7 @@ def _write_candidate_cache(
                     checkpoint=official_checkpoint,
                     official_python=Path(sys.executable),
                 ),
-                "cases": [{**spec, "detection_count": 0} for spec in specs],
+                "cases": [{**spec, "detection_count": 0, "tensor_dtypes": ORACLE_OUTPUT_DTYPES} for spec in specs],
             }
         )
     )

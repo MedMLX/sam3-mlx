@@ -20,7 +20,9 @@ if str(REPO_ROOT) not in sys.path:
 
 from sam3_mlx.release_contract import (  # noqa: E402
     OFFICIAL_CODE_REVISION,
+    ORACLE_OUTPUT_DTYPES,
     build_oracle_bindings,
+    validate_exact_mapping,
 )
 from _oracle_runtime import (  # noqa: E402
     build_oracle_cache_identity,
@@ -105,6 +107,12 @@ def main() -> None:
         "case_spec": bindings["case_spec"],
         "confidence_threshold": confidence_threshold,
         "precision": bindings["precision"],
+        "reference_profile": bindings["reference_profile"],
+        "native_precision": bindings["native_precision"],
+        "fp32_fused_adapter": oracle.fp32_fused_adapter,
+        "parameter_dtypes": dict(oracle.parameter_dtypes),
+        "buffer_dtypes": dict(oracle.buffer_dtypes),
+        "autocast_enabled": False,
         "cpu_adapters": bindings["cpu_adapters"],
         "cold_load_s": oracle.cold_load_s,
         "environment": {
@@ -120,7 +128,10 @@ def main() -> None:
     states: dict[int, OracleState] = {}
     processors: dict[int, OracleProcessor] = {}
     try:
-        with torch_runtime.autocast("cpu", dtype=torch_runtime.bfloat16):
+        with torch_runtime.autocast("cpu", enabled=False):
+            metadata["autocast_enabled"] = torch_runtime.is_autocast_enabled("cpu")
+            if metadata["autocast_enabled"] is not False:
+                raise ValueError("CPU FP32 reference requires autocast disabled.")
             for index, spec in enumerate(specs):
                 resolution = spec["resolution"]
                 if resolution not in states:
@@ -142,6 +153,17 @@ def main() -> None:
                 started = time.perf_counter()
                 state = run_prompt(processor, states[resolution], spec)
                 prompt_latency_s = time.perf_counter() - started
+                if "masks_logits" not in state:
+                    raise ValueError("Pinned processor did not return mask probabilities.")
+                tensor_dtypes = {
+                    "masks": str(state["masks"].dtype),
+                    "masks_logits": str(state["masks_logits"].dtype),
+                    "boxes": str(state["boxes"].dtype),
+                    "scores": str(state["scores"].dtype),
+                }
+                validate_exact_mapping(
+                    tensor_dtypes, ORACLE_OUTPUT_DTYPES, label="oracle output precision"
+                )
                 prefix = f"case_{index}"
                 arrays[f"{prefix}_masks"] = (
                     state["masks"].detach().cpu().numpy().astype(np.bool_)
@@ -160,6 +182,7 @@ def main() -> None:
                         "prompt": spec["prompt"],
                         "geometric_prompts": spec["geometric_prompts"],
                         "detection_count": int(len(state["scores"])),
+                        "tensor_dtypes": tensor_dtypes,
                         "image_latency_s": image_latency_s,
                         "prompt_latency_s": prompt_latency_s,
                     }
