@@ -3531,7 +3531,7 @@ class Sam3MultiplexBase(Sam3VideoBase):
         """Plan one frame: new objects, removals, suppressions and reconditioning.
 
         Steps: associate detections with the tracker masks, update the hotstart records
-        (array form for multiplex trackers, cross-checked against the dict form), assign
+        (array form for multiplex trackers, dict form otherwise), assign
         ids to new detections within ``max_num_objects``, recondition tracks (every
         ``recondition_every_nth_frame`` frames or on box disagreement), suppress masks by
         recent occlusion and build the updated metadata. Removed objects get score
@@ -3546,7 +3546,6 @@ class Sam3MultiplexBase(Sam3VideoBase):
 
         Raises:
             UnsupportedMultiplexRuntimeError: Unless ``rank == 0`` and ``world_size == 1``.
-            ValueError: If the array and dict hotstart results diverge.
         """
         if self.rank != 0 or self.world_size != 1:
             raise_unsupported_multiplex_runtime(
@@ -3573,7 +3572,6 @@ class Sam3MultiplexBase(Sam3VideoBase):
             default_det_thresh=self.image_only_det_thresh if is_image_only else None,
         )
         hotstart_to_remove = None
-        hotstart_to_suppress = None
         hotstart_gpu_metadata_new = None
         warm_up_complete: object = getattr(self, "_warm_up_complete", None)
         hotstart_planning_enabled = not hasattr(self, "_warm_up_complete") or bool(
@@ -3582,7 +3580,7 @@ class Sam3MultiplexBase(Sam3VideoBase):
         if self.is_multiplex and hotstart_planning_enabled:
             (
                 hotstart_to_remove,
-                hotstart_to_suppress,
+                _,
                 hotstart_gpu_metadata_new,
             ) = self._process_hotstart_gpu(
                 frame_idx=frame_idx,
@@ -3608,7 +3606,16 @@ class Sam3MultiplexBase(Sam3VideoBase):
         new_det_obj_ids = _int_array(new_det_obj_ids_raw).reshape(-1)
         new_det_gpu_ids = _int_array(new_det_gpu_ids_raw).reshape(-1)
         obj_ids_newly_removed: set[int]
-        if hotstart_planning_enabled:
+        if hotstart_to_remove is not None:
+            # The official multiplex planner expires active trackers through the
+            # GPU plan without retroactively hiding their buffered output masks.
+            to_remove_np = _array_to_numpy(hotstart_to_remove, dtype=bool).reshape(-1)
+            obj_ids_newly_removed = {
+                int(obj_id)
+                for obj_id, remove in zip(tracker_obj_ids_prev.tolist(), to_remove_np)
+                if remove
+            }
+        elif hotstart_planning_enabled:
             obj_ids_newly_removed, rank0_metadata_new = self._process_hotstart(
                 frame_idx=frame_idx,
                 num_frames=num_frames,
@@ -3623,38 +3630,6 @@ class Sam3MultiplexBase(Sam3VideoBase):
         else:
             obj_ids_newly_removed = set()
         tracker_metadata_new["rank0_metadata"] = rank0_metadata_new
-        if hotstart_to_remove is not None:
-            to_remove_np = _array_to_numpy(hotstart_to_remove, dtype=bool).reshape(-1)
-            removed_by_gpu = {
-                int(obj_id)
-                for obj_id, remove in zip(tracker_obj_ids_prev.tolist(), to_remove_np)
-                if remove
-            }
-            if removed_by_gpu != {int(obj_id) for obj_id in obj_ids_newly_removed}:
-                raise ValueError(
-                    "hotstart gpu metadata removal diverged from object-id "
-                    f"metadata; got {removed_by_gpu} and {obj_ids_newly_removed}."
-                )
-        if hotstart_to_suppress is not None:
-            to_suppress_np = _array_to_numpy(hotstart_to_suppress, dtype=bool).reshape(
-                -1
-            )
-            suppressed_by_gpu = {
-                int(obj_id)
-                for obj_id, suppress in zip(
-                    tracker_obj_ids_prev.tolist(),
-                    to_suppress_np,
-                )
-                if suppress
-            }
-            suppressed_by_rank0 = set(
-                rank0_metadata_new.get("suppressed_obj_ids", {}).get(frame_idx, set())
-            )
-            if suppressed_by_gpu != {int(obj_id) for obj_id in suppressed_by_rank0}:
-                raise ValueError(
-                    "hotstart gpu metadata suppression diverged from object-id "
-                    f"metadata; got {suppressed_by_gpu} and {suppressed_by_rank0}."
-                )
         reconditioned_obj_ids: set[int] = set()
         should_recondition_periodic = (
             self.recondition_every_nth_frame > 0

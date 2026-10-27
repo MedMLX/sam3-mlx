@@ -1,0 +1,48 @@
+{
+  "scope": "SAM3.1 box-seeded propagation port regression; full temporal quality gate remains failed",
+  "official_revision": "2814fa619404a722d03e9a012e083e4f293a4e53",
+  "checkpoints": {
+    "official": "sam3.1_multiplex.pt",
+    "mlx": "sam3.1-mlx-raw/model.safetensors",
+    "official_final_missing_keys": 0,
+    "official_final_unexpected_keys": 0,
+    "tensor_count": 1623
+  },
+  "input": "Pinned upstream dancers frames 0-11; normalized xywh box [0.48, 0.35, 0.28, 0.65]",
+  "settings": {
+    "use_batched_grounding": false,
+    "use_fa3": false,
+    "use_rope_real": false,
+    "official_precision": "cuda-bf16",
+    "mlx_precision": "fp32"
+  },
+  "before": {
+    "returned_matched_frames": 0,
+    "first_suppressed_frame": 3,
+    "retirement_frame": 9
+  },
+  "after": {
+    "returned_matched_frames": 10,
+    "frame_range": [
+      0,
+      9
+    ],
+    "mask_and_presence_parity_frames": 12,
+    "iou_min_nonempty": 0.9967786082745552,
+    "dice_min_nonempty": 0.9983867056106793,
+    "boundary_f1_min_nonempty": 0.9842273999855929,
+    "identity_parity": "passed"
+  },
+  "qualification": {
+    "state": "failed",
+    "first_quality_failure": 10,
+    "reason": "Both predictors lose the expected object on frames 10 and 11."
+  },
+  "validation": {
+    "regression_before": "failed: empty out_obj_ids on frame 0",
+    "regression_after": "passed",
+    "affected_tests": "521 passed, 6 skipped",
+    "qa": "Ruff and strict Pyright passed"
+  },
+  "local_evidence": "benchmarks/results/sam31-propagation-20261026/"
+}

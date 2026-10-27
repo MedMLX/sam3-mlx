@@ -608,8 +608,9 @@ class _PointPromptTracker(_LowResDummyTracker):
         return obj_ids, []
 
 
-class _VideoStartupTracker(_LowResDummyTracker):
+class _VideoStartupTracker(_RemovingTracker):
     def __init__(self) -> None:
+        super().__init__()
         self.init_calls: list[dict[str, object]] = []
         self.mask_calls: list[MaskCall] = []
         self.preflight_calls: list[tuple[dict[str, object], bool]] = []
@@ -2107,6 +2108,38 @@ def test_multiplex_tracking_video_prompt_seeds_sam2_state_and_propagates() -> No
         require_postprocessed_output(outputs[0][1])["out_binary_masks"],
         np.ones((1, 4, 5), dtype=bool),
     )
+
+
+def test_box_seeded_propagation_retains_buffered_masks_when_track_expires() -> None:
+    detector = _FramewiseVideoDetector(
+        logits_by_frame=[mx.full((1, 1, 1), value) for value in (2, 2, -10, -10, -10, -10)],
+        masks_by_frame=[mx.ones((1, 1, 2, 2)) for _ in range(6)],
+    )
+    tracking = Sam3MultiplexTracking(
+        tracker=_VideoStartupTracker(),
+        detector=detector,
+        is_multiplex=True,
+        image_size=4,
+        hotstart_delay=6,
+        hotstart_unmatch_thresh=3,
+        suppress_unmatched_only_within_hotstart=False,
+    )
+    state = tracking.init_state("<load-dummy-video-6>")
+    _, prompt = tracking.add_prompt(
+        state, frame_idx=0, boxes_xywh=[[0.1, 0.1, 0.8, 0.8]], box_labels=[1]
+    )
+    np.testing.assert_array_equal(prompt["out_obj_ids"], [0])
+
+    outputs = list(tracking.propagate_in_video(state, start_frame_idx=0))
+
+    assert [frame for frame, _ in outputs] == list(range(6))
+    # The official multiplex predictor stops future tracking at expiry, while
+    # retaining the masks already produced in its delayed output buffer.
+    for frame, output in outputs:
+        result = require_postprocessed_output(output)
+        np.testing.assert_array_equal(result["out_obj_ids"], [0] if frame < 5 else [])
+        if frame < 5:
+            np.testing.assert_array_equal(result["out_binary_masks"], prompt["out_binary_masks"])
 
 
 def test_multiplex_tracking_video_detector_update_adds_later_frame_object() -> None:
