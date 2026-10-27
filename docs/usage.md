@@ -68,6 +68,12 @@ equivalence: the real-checkpoint case still exceeds `rtol=atol=1e-5` for several
 raw fields and the semantic map. Its 12 public instance masks match eager
 inference exactly. No speedup is claimed.
 
+A [six-case follow-up](../parity/receipts/compiled-output-impact-20261027.md) on
+three public scenes found all 11 nonempty instance masks pixel-identical and
+kept the empty negative control separate. Detection selections and diagnostic
+semantic zero-crossings were unchanged. Strict raw/semantic numerical checks
+still fail; these observations support only the measured cases.
+
 ## Selected-frame video and advanced options
 
 `build_sam3_predictor()` defaults to the selected-frame SAM 3 path. Request
