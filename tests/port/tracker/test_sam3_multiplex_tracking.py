@@ -2110,9 +2110,15 @@ def test_multiplex_tracking_video_prompt_seeds_sam2_state_and_propagates() -> No
     )
 
 
-def test_box_seeded_propagation_retains_buffered_masks_when_track_expires() -> None:
+@pytest.mark.parametrize("confirmation_enabled", [False, True])
+def test_box_seeded_propagation_retains_buffered_masks_when_track_expires(
+    confirmation_enabled: bool,
+) -> None:
     detector = _FramewiseVideoDetector(
-        logits_by_frame=[mx.full((1, 1, 1), value) for value in (2, 2, -10, -10, -10, -10)],
+        logits_by_frame=[
+            mx.full((1, 1, 1), value)
+            for value in (2, -10 if confirmation_enabled else 2, -10, -10, -10, -10)
+        ],
         masks_by_frame=[mx.ones((1, 1, 2, 2)) for _ in range(6)],
     )
     tracking = Sam3MultiplexTracking(
@@ -2121,8 +2127,10 @@ def test_box_seeded_propagation_retains_buffered_masks_when_track_expires() -> N
         is_multiplex=True,
         image_size=4,
         hotstart_delay=6,
-        hotstart_unmatch_thresh=3,
+        hotstart_unmatch_thresh=6 if confirmation_enabled else 3,
         suppress_unmatched_only_within_hotstart=False,
+        masklet_confirmation_enable=confirmation_enabled,
+        masklet_confirmation_consecutive_det_thresh=3,
     )
     state = tracking.init_state("<load-dummy-video-6>")
     _, prompt = tracking.add_prompt(
@@ -2137,10 +2145,10 @@ def test_box_seeded_propagation_retains_buffered_masks_when_track_expires() -> N
     # retaining the masks already produced in its delayed output buffer.
     for frame, output in outputs:
         result = require_postprocessed_output(output)
-        np.testing.assert_array_equal(result["out_obj_ids"], [0] if frame < 5 else [])
-        if frame < 5:
+        expected_present = frame < 5 and not confirmation_enabled
+        np.testing.assert_array_equal(result["out_obj_ids"], [0] if expected_present else [])
+        if expected_present:
             np.testing.assert_array_equal(result["out_binary_masks"], prompt["out_binary_masks"])
-
 
     metadata = state["tracker_metadata"]
     assert "obj_id_to_sam2_score_frame_wise" in metadata

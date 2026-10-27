@@ -1,0 +1,29 @@
+{
+  "scope": "Do not pre-confirm a newly box-seeded video track",
+  "official_revision": "2814fa619404a722d03e9a012e083e4f293a4e53",
+  "change": "Initialize confirmation with one detection; confirm only after the configured consecutive-detection threshold.",
+  "regression": {
+    "before": "A weak initial detection was returned from the delayed buffer despite never receiving confirmation. The parameterized propagation regression fails against the original startup function.",
+    "after": "The unconfirmed track stays hidden during propagation; the confirmed/confirmation-disabled case retains its buffered masks."
+  },
+  "real_weights": {
+    "checkpoints": [
+      "sam3.1_multiplex.pt",
+      "sam3.1-mlx-raw/model.safetensors"
+    ],
+    "reference": "official-unbounded",
+    "candidate": "mlx-confirmation",
+    "successful_comparisons": [
+      "All 12 frames of dancers-add-correct-12",
+      "All 12 frames of dancers-unprompted-reentry-12",
+      "All 12 frames of dancers-prompted-reentry-12",
+      "Bedroom frame 0 now agrees with the official empty propagated output"
+    ],
+    "limits": "Bedroom still fails expected presence on frames 0-17 in both implementations and diverges at the later correction. No full bedroom quality pass is claimed."
+  },
+  "validation": {
+    "tests": "524 passed, 6 skipped",
+    "qa": "Ruff and strict Pyright passed"
+  },
+  "local_evidence": "benchmarks/results/sam31-expanded-20261026"
+}

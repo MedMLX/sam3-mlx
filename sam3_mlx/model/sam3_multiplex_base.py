@@ -2495,7 +2495,7 @@ class Sam3MultiplexBase(Sam3VideoBase):
         The kept detections (see ``_image_only_detection_keep_indices``) get consecutive
         new ids after ``max_obj_id``. Their masks are hole-filled, resized bilinearly to
         ``orig_vid_height`` x ``orig_vid_width`` and thresholded at 0; with masklet
-        confirmation enabled they start confirmed.
+        confirmation enabled they start with one detection toward confirmation.
 
         Returns:
             ``(obj_id_to_mask, obj_id_to_score, tracker_metadata_new, frame_stats,
@@ -2577,12 +2577,16 @@ class Sam3MultiplexBase(Sam3VideoBase):
             )["masklet_confirmation"]
             confirmation["status"] = np.full(
                 new_obj_ids.shape,
-                MaskletConfirmationStatus.CONFIRMED.value,
+                (
+                    MaskletConfirmationStatus.CONFIRMED.value
+                    if self.masklet_confirmation_consecutive_det_thresh <= 1
+                    else MaskletConfirmationStatus.UNCONFIRMED.value
+                ),
                 dtype=np.int64,
             )
             confirmation["consecutive_det_num"] = np.full(
                 new_obj_ids.shape,
-                self.masklet_confirmation_consecutive_det_thresh,
+                1,
                 dtype=np.int64,
             )
 
