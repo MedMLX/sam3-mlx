@@ -20,10 +20,7 @@ Segment images from text and geometric prompts with an unofficial native MLX por
 uv venv --python 3.13
 source .venv/bin/activate
 
-repo="https://github.com/MedMLX/sam3-mlx"
-release="$repo/releases/download/v0.1.3"
-uv pip install \
-  "$release/sam3_mlx-0.1.3-py3-none-any.whl"
+uv pip install sam3-mlx
 ```
 
 Weights download automatically; Hugging Face access to the official checkpoint is required.

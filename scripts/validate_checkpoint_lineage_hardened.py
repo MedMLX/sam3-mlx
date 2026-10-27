@@ -21,7 +21,7 @@ from sam3_mlx.release_contract import (  # noqa: E402
     OFFICIAL_CHECKPOINT_REPO,
     OFFICIAL_CHECKPOINT_REVISION,
     CONVERTER_VERSION,
-    PACKAGE_VERSION,
+    REPRODUCTION_CONVERTER_VERSION,
     JsonObject,
     require_json_object,
 )
@@ -42,7 +42,7 @@ def _validate_reproduction_manifest(manifest: JsonObject) -> None:
         "source_revision": OFFICIAL_CHECKPOINT_REVISION,
         "mapped_count": CHECKPOINT_TENSOR_COUNT,
         "unmapped_keys": [],
-        "converter_version": PACKAGE_VERSION,
+        "converter_version": REPRODUCTION_CONVERTER_VERSION,
     }
     drift = {
         field: {"manifest": manifest.get(field), "expected": value}

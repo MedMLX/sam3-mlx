@@ -13,9 +13,11 @@ from typing import Mapping, TypedDict, cast
 
 JsonObject = dict[str, object]
 
-PACKAGE_VERSION = "0.1.3"
+PACKAGE_VERSION = "0.1.4"
 # Converter release that produced the published MLX checkpoint lineage.
 CONVERTER_VERSION = "0.1.2"
+# Converter release that reproduced that lineage.
+REPRODUCTION_CONVERTER_VERSION = "0.1.3"
 REPORT_SCHEMA_VERSION = 3
 ORACLE_SCHEMA_VERSION = 5
 EVIDENCE_SCHEMA_VERSION = 1

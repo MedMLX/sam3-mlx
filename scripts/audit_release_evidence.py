@@ -31,7 +31,7 @@ from sam3_mlx.release_contract import (  # noqa: E402
     ORACLE_PRECISION,
     ORACLE_OUTPUT_DTYPES,
     CONVERTER_VERSION,
-    PACKAGE_VERSION,
+    REPRODUCTION_CONVERTER_VERSION,
     JsonObject,
     RELEASE_CONFIDENCE_THRESHOLD,
     RELEASE_IMAGES,
@@ -577,7 +577,7 @@ def _validate_lineage(lineage_path: Path) -> JsonObject:
     )
     _require_exact(
         reproduction.get("converter_version"),
-        PACKAGE_VERSION,
+        REPRODUCTION_CONVERTER_VERSION,
         label="lineage converter version",
     )
     manifest = _require_object(reproduction.get("manifest"), field="lineage manifest")
@@ -587,7 +587,7 @@ def _validate_lineage(lineage_path: Path) -> JsonObject:
         "source_revision": OFFICIAL_CHECKPOINT_REVISION,
         "mapped_count": CHECKPOINT_TENSOR_COUNT,
         "unmapped_keys": [],
-        "converter_version": PACKAGE_VERSION,
+        "converter_version": REPRODUCTION_CONVERTER_VERSION,
     }
     for field, expected in required_manifest.items():
         _require_exact(manifest.get(field), expected, label=f"manifest {field}")

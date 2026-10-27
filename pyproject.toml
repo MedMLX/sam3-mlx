@@ -1,6 +1,6 @@
 [project]
 name = "sam3_mlx"
-version = "0.1.3"
+version = "0.1.4"
 description = "MLX port of Meta's Segment Anything 3 (SAM 3) for Apple Silicon."
 readme = "README.md"
 license = "LicenseRef-SAM AND MIT"
