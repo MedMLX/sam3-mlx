@@ -412,6 +412,28 @@ def test_scaled_dot_product_attention_fast_path_matches_manual_path() -> None:
     )
 
 
+def test_bf16_attention_accumulates_scaled_scores_and_bias_in_float32() -> None:
+    query = (np.arange(64, dtype=np.float32).reshape(1, 1, 2, 32) % 17 - 8) / 8
+    key = (np.arange(160, dtype=np.float32).reshape(1, 1, 5, 32) % 23 - 11) / 8
+    value = (np.arange(160, dtype=np.float32).reshape(1, 1, 5, 32) % 19 - 9) / 8
+    bias = np.array([0, -0.5, -2, -4, -8], dtype=np.float32).reshape(1, 1, 1, 5)
+    expected_scores = np.asarray(
+        query @ np.swapaxes(key, -1, -2) / np.float32(math.sqrt(32)) + bias,
+        dtype=np.float32,
+    )
+    expected = _softmax(expected_scores) @ value
+    expected = mx.array(expected).astype(mx.bfloat16).astype(mx.float32)
+
+    output, _ = scaled_dot_product_attention(
+        mx.array(query, dtype=mx.bfloat16), mx.array(key, dtype=mx.bfloat16),
+        mx.array(value, dtype=mx.bfloat16), mx.array(bias, dtype=mx.bfloat16),
+        need_weights=False,
+    )
+
+    assert output.dtype == mx.bfloat16
+    np.testing.assert_array_equal(to_numpy(output.astype(mx.float32)), to_numpy(expected))
+
+
 def test_multi_head_attention_forward_fast_path_matches_masked_reference() -> None:
     query = np.array(
         [

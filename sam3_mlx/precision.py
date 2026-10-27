@@ -3,10 +3,16 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
-from typing import Literal, TypeAlias, cast
+from typing import Literal, Protocol, TypeAlias, cast
 
 import mlx.core as mx
 from mlx import nn
+from mlx.utils import tree_unflatten
+
+from sam3_mlx.precision_layers import (
+    AutocastConv1d, AutocastConv2d, AutocastConvTranspose2d, AutocastLinear,
+    Float32GELU, Float32GroupNorm, Float32LayerNorm, copy_layer,
+)
 
 PrecisionPolicy: TypeAlias = Literal["fp32", "fp16", "bf16", "mixed"]
 CheckpointDType: TypeAlias = Literal["float32", "float16", "bfloat16"]
@@ -27,7 +33,7 @@ _POLICY_COMPUTE_DTYPE: dict[PrecisionPolicy, mx.Dtype] = {
 _POLICY_CHECKPOINT_DTYPE: dict[PrecisionPolicy, CheckpointDType] = {
     "fp32": "float32",
     "fp16": "float16",
-    "bf16": "bfloat16",
+    "bf16": "float32",
     "mixed": "float16",
 }
 _CHECKPOINT_MLX_DTYPE: dict[CheckpointDType, mx.Dtype] = {
@@ -67,10 +73,12 @@ def parse_checkpoint_dtype(value: object) -> CheckpointDType:
 
 
 def compute_dtype_for_policy(policy: PrecisionPolicy) -> mx.Dtype:
-    """Return the dtype of activations and weights after the policy is applied.
+    """Return the matrix/convolution compute dtype after applying the policy.
 
     ``"mixed"`` computes in float16; ``apply_precision_policy`` keeps LayerNorm in
-    float32.
+    float32. BF16 follows CUDA autocast for the backbone and detector, retaining
+    FP32 residual parameters, normalization, and decoder feed-forward layers.
+    The segmentation head stays FP32 to stabilize mask-logit zero crossings.
     """
     return _POLICY_COMPUTE_DTYPE[parse_precision(policy)]
 
@@ -135,12 +143,17 @@ def apply_precision_policy(
 
     Records ``precision`` and ``compute_dtype`` on the model and drops any compiled
     visual/grounding graphs so they are rebuilt at the new dtype. Under
-    ``"mixed"``, LayerNorm modules stay float32. Returns the normalized policy.
+    ``"mixed"``, LayerNorm modules stay float32. BF16 uses FP32 source weights
+    and casts at matrix/convolution boundaries. Returns the normalized policy.
     """
 
     policy = parse_precision(policy)
     compute_dtype = compute_dtype_for_policy(policy)
-    model.set_dtype(compute_dtype, predicate=is_castable_float_dtype)
+    model.set_dtype(
+        mx.float32 if policy == "bf16" else compute_dtype,
+        predicate=is_castable_float_dtype,
+    )
+    _configure_autocast_layers(model, bf16=policy == "bf16")
     if policy == "mixed":
         modules = cast(Iterable[object], model.modules())
         for module in modules:
@@ -154,3 +167,51 @@ def apply_precision_policy(
             if callable(clearer):
                 clearer()
     return policy
+
+
+class _TreeUnflatten(Protocol):
+    def __call__(self, tree: list[tuple[str, nn.Module]]) -> dict[str, object]: ...
+
+
+class _UpdateModules(Protocol):
+    def __call__(self, modules: dict[str, object]) -> nn.Module: ...
+
+
+def _configure_autocast_layers(model: nn.Module, *, bf16: bool) -> None:
+    from sam3_mlx.model.decoder import TransformerDecoderLayer
+    from sam3_mlx.model.maskformer_segmentation import SegmentationHead
+
+    modules = list(cast(Iterable[tuple[str, nn.Module]], model.named_modules()))
+    fp32_projections: set[int] = set()
+    for _, module in modules:
+        if bf16 and isinstance(module, TransformerDecoderLayer):
+            fp32_projections.update((id(module.linear1), id(module.linear2)))
+        if bf16 and isinstance(module, SegmentationHead):
+            fp32_projections.update(
+                id(child) for child in cast(Iterable[object], module.modules())
+            )
+    implementations: dict[type[nn.Module], type[nn.Module]] = {
+        nn.Linear: AutocastLinear,
+        nn.Conv1d: AutocastConv1d,
+        nn.Conv2d: AutocastConv2d,
+        nn.ConvTranspose2d: AutocastConvTranspose2d,
+        nn.LayerNorm: Float32LayerNorm,
+        nn.GroupNorm: Float32GroupNorm,
+        nn.GELU: Float32GELU,
+    }
+    if not bf16:
+        implementations = {value: key for key, value in implementations.items()}
+    replacements: list[tuple[str, nn.Module]] = []
+    for name, module in modules:
+        implementation = implementations.get(type(module))
+        replacement = copy_layer(module, implementation) if implementation else module
+        if (
+            bf16
+            and id(module) not in fp32_projections
+            and isinstance(replacement, (nn.Linear, nn.Conv1d, nn.Conv2d, nn.ConvTranspose2d))
+        ):
+            replacement.set_dtype(mx.bfloat16)
+        if replacement is not module:
+            replacements.append((name, replacement))
+    update_modules = cast(_UpdateModules, getattr(model, "update_modules"))
+    update_modules(cast(_TreeUnflatten, tree_unflatten)(replacements))

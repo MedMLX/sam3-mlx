@@ -12,6 +12,7 @@ from typing import Protocol, TypedDict, cast
 
 import mlx.core as mx
 from mlx import nn
+from sam3_mlx.precision_layers import MultiHeadAttention
 
 from sam3_mlx._unsupported import raise_unsupported
 from sam3_mlx.model.model_misc import LayerScale
@@ -88,7 +89,7 @@ class ResidualAttentionBlock(nn.Module):
         super().__init__()
         self.attn = cast(
             _AttentionModule,
-            nn.MultiHeadAttention(d_model, n_head, bias=True),
+            MultiHeadAttention(d_model, n_head, bias=True),
         )
 
         self.ln_1 = norm_layer(d_model)

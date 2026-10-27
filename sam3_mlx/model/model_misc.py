@@ -35,6 +35,7 @@ import mlx.utils as mlx_utils
 from mlx import nn
 
 from sam3_mlx._unsupported import raise_unsupported
+from sam3_mlx.precision_layers import attention, gelu
 
 
 _ModuleT = TypeVar("_ModuleT", bound=nn.Module)
@@ -100,7 +101,7 @@ class _LinearModule(Protocol):
 
 
 class _ActivationFn(Protocol):
-    def __call__(self, x: mx.array, axis: int = -1) -> mx.array: ...
+    def __call__(self, x: mx.array) -> mx.array: ...
 
 
 class _ActFactory(Protocol):
@@ -220,6 +221,10 @@ OLD_GPU, USE_FLASH_ATTN, MATH_KERNEL_ON = get_sdpa_settings()
 def _linear(
     input_array: mx.array, weight: mx.array, bias: mx.array | None = None
 ) -> mx.array:
+    if weight.dtype == mx.bfloat16:
+        input_array = input_array.astype(mx.bfloat16)
+        if bias is not None:
+            return mx.addmm(bias, input_array, weight.T)
     output = mx.matmul(input_array, mx.transpose(weight, axes=(1, 0)))
     if bias is not None:
         output = output + bias
@@ -367,7 +372,7 @@ def scaled_dot_product_attention(
     scale = query.shape[-1] ** -0.5
     if not need_weights:
         return (
-            mx.fast.scaled_dot_product_attention(
+            attention(
                 query,
                 key,
                 value,
@@ -1242,7 +1247,7 @@ def get_activation_fn(activation: str) -> _ActivationFn:
     if activation == "relu":
         return cast(_ActivationFn, getattr(nn, "relu"))
     if activation == "gelu":
-        return cast(_ActivationFn, getattr(nn, "gelu"))
+        return gelu
     if activation == "glu":
         return cast(_ActivationFn, getattr(nn, "glu"))
     raise RuntimeError(f"activation should be relu/gelu, not {activation}.")

@@ -78,7 +78,7 @@ def test_parse_precision_accepts_aliases_and_rejects_unknown() -> None:
 def test_checkpoint_dtype_follows_policy() -> None:
     assert checkpoint_dtype_for_policy("fp32") == "float32"
     assert checkpoint_dtype_for_policy("fp16") == "float16"
-    assert checkpoint_dtype_for_policy("bf16") == "bfloat16"
+    assert checkpoint_dtype_for_policy("bf16") == "float32"
     assert checkpoint_dtype_for_policy("mixed") == "float16"
     assert parse_checkpoint_dtype("float16") == "float16"
     with pytest.raises(ValueError, match="float32, float16, bfloat16"):
@@ -124,7 +124,7 @@ def test_apply_precision_policy_keeps_layernorm_fp32_in_mixed() -> None:
     assert model.norm.weight.dtype == mx.float32
 
 
-def test_apply_precision_policy_casts_full_fp16_and_bf16() -> None:
+def test_apply_precision_policy_uses_bf16_autocast_and_full_fp16() -> None:
     fp16_model = _TinyPrecisionModule()
     apply_precision_policy(fp16_model, "fp16")
     assert fp16_model.linear.weight.dtype == mx.float16
@@ -134,7 +134,16 @@ def test_apply_precision_policy_casts_full_fp16_and_bf16() -> None:
     apply_precision_policy(bf16_model, "bf16")
     assert compute_dtype_for_policy("bf16") == mx.bfloat16
     assert bf16_model.linear.weight.dtype == mx.bfloat16
-    assert bf16_model.norm.weight.dtype == mx.bfloat16
+    assert bf16_model.norm.weight.dtype == mx.float32
+    projected = bf16_model.linear(mx.array([[0.123, -0.456]], dtype=mx.float32))
+    assert projected.dtype == mx.bfloat16
+    assert bf16_model.norm(projected).dtype == mx.float32
+    apply_precision_policy(bf16_model, "bf16")
+    assert bf16_model.norm(projected).dtype == mx.float32
+    apply_precision_policy(bf16_model, "fp16")
+    projected = bf16_model.linear(projected.astype(mx.float16))
+    assert projected.dtype == mx.float16
+    assert bf16_model.norm(projected).dtype == mx.float16
 
 
 def test_transform_stays_fp32_and_visual_boundary_casts_once() -> None:
@@ -171,7 +180,7 @@ def test_builder_applies_precision_before_compile_flags() -> None:
     assert _BackboneCompileProbe.visual_compilation_enabled(model.backbone) is True
 
 
-@pytest.mark.parametrize("precision", ("fp16", "bf16", "mixed"))
+@pytest.mark.parametrize("precision", ("fp16", "mixed"))
 def test_reduced_precision_rejects_the_default_fp32_hub_artifact(
     precision: str,
 ) -> None:

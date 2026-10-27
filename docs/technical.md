@@ -96,11 +96,16 @@ explicit overrides require a full commit SHA. Conversion
 records source revision, source and output file names, key counts, ignored
 tracker keys, and dtype counts.
 
-The package default is the FP32 release artifact. FP16, BF16, and mixed policies
-must use a local conversion or a separately pinned Hub artifact. Reduced-
-precision Hub artifacts require a conversion manifest whose floating dtype
-inventory exactly matches the requested policy; loading the default FP32
-artifact and casting it after model mutation is rejected.
+The package default is the FP32 release artifact. BF16 also loads FP32 source
+weights, then applies explicit autocast boundaries to backbone and detector
+projections. Normalization, residual parameters, decoder feed-forward layers,
+and the segmentation head retain FP32 precision. BF16 attention accumulates in
+FP32; the ViT's first feed-forward projection rounds after its fused GELU,
+matching the official CUDA execution boundary.
+
+FP16 and mixed policies require a local conversion or a separately pinned Hub
+artifact with a conversion manifest whose floating dtype inventory matches the
+requested policy.
 
 `Sam3Processor(preprocessing="parity")` retains the TorchVision-matched release
 path. `preprocessing="fast"` uses MLX antialiased resize and records a distinct

@@ -15,9 +15,19 @@ validated in a temporary sibling directory, and makes the manifest visible
 last. PyTorch is intentionally not installed by a package extra; use a separate
 conversion environment.
 
-FP16, BF16, and mixed runtime policies are available but are not covered by the
-checked-in FP32 image parity reports. Reduced-precision Hub loads must use a
-separate immutable artifact whose manifest proves its dtype inventory:
+FP32 remains the default. BF16 uses FP32 source weights, casts backbone and
+detector projections to BF16, and keeps normalization, residual parameters,
+decoder feed-forward layers, and the segmentation head in FP32. Use
+`build_sam3_image_model(precision="bf16")` with the default artifact; a checkpoint
+already rounded entirely to BF16 cannot recover these FP32 parameters.
+
+Both FP32 and BF16 pass the 56-case image characterization against their
+corresponding official CUDA references; see the
+[precision receipt](../parity/receipts/image-bf16-20261027.json) for thresholds,
+oracle adaptations, and corpus limits.
+
+FP16 and mixed policies require a separate immutable artifact whose manifest
+proves its dtype inventory:
 
 ```python
 model = build_sam3_image_model(

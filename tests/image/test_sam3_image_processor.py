@@ -219,6 +219,19 @@ def test_filter_and_upsample_helpers_split_grounding_postprocess() -> None:
     assert to_numpy(upsampled[1]).min() > 0.5
 
 
+def test_bf16_scores_round_probabilities_before_thresholding() -> None:
+    outputs = {
+        "pred_logits": mx.array([[[0.003], [4.0]]], dtype=mx.bfloat16),
+        "presence_logit_dec": mx.array([[10.0]], dtype=mx.bfloat16),
+        "pred_boxes": mx.full((1, 2, 4), 0.5),
+        "pred_masks": mx.array([[[[0.003]], [[4.0]]]], dtype=mx.bfloat16),
+    }
+    scores, _, _ = filter_and_convert_single_image(
+        outputs, threshold=0.5, img_h=4, img_w=4
+    )
+    # CUDA's BF16 sigmoid rounds the weak positive to exactly 0.5.
+    np.testing.assert_array_equal(to_numpy(scores), [0.98046875])
+
 def test_single_image_keep_indices_does_not_export_full_keep_mask(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

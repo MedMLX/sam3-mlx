@@ -4,19 +4,54 @@ from typing import cast
 from sam3_mlx.checkpoint_mapping import flatten_model_parameters
 
 import mlx.core as mx
+from mlx import nn
 import numpy as np
+import pytest
 
 from sam3_mlx.mlx_runtime import to_numpy
 from sam3_mlx.model.data_misc import NestedTensor
 from sam3_mlx.model.vitdet import (
     Attention,
+    Mlp,
     ViT,
     get_abs_pos,
     window_partition,
     window_unpartition,
 )
+from sam3_mlx.precision import apply_precision_policy
 from tests._mlx_runtime import as_nested
 from sam3_mlx.mlx_runtime import evaluate_boundary
+
+
+@pytest.mark.parametrize("activation", (nn.GELU, nn.ReLU))
+@pytest.mark.parametrize("with_bias", (False, True))
+def test_bf16_vit_mlp_preserves_activation_and_fused_rounding(
+    activation: type[nn.Module], with_bias: bool,
+) -> None:
+    model = Mlp(4, hidden_features=4, act_layer=activation, bias=with_bias)
+    values = np.array([[-0.75, 0.25, 1.5, -0.5]], dtype=np.float32)
+    weight = np.arange(16, dtype=np.float32).reshape(4, 4) / 16 - 0.5
+    bias = (
+        np.array([0.125, -0.25, 0.5, -0.125], dtype=np.float32)
+        if with_bias else np.zeros((4,), dtype=np.float32)
+    )
+    model.fc1.weight = mx.array(weight)
+    model.fc2.weight = mx.eye(4)
+    if with_bias:
+        model.fc1.bias = mx.array(bias)
+        model.fc2.bias = mx.zeros((4,))
+    apply_precision_policy(model, "bf16")
+
+    projected = values @ weight.T + bias
+    if activation is nn.GELU:
+        expected = 0.5 * projected * (
+            1 + np.tanh(np.sqrt(2 / np.pi) * (projected + 0.044715 * projected ** 3))
+        )
+    else:
+        expected = np.maximum(projected, 0)
+    rounded = mx.array(expected, dtype=mx.float32).astype(mx.bfloat16).astype(mx.float32)
+    actual = model(mx.array(values))
+    np.testing.assert_array_equal(to_numpy(actual.astype(mx.float32)), to_numpy(rounded))
 
 
 def _attention_numpy_reference(

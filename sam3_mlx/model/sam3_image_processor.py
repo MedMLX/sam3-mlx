@@ -89,11 +89,14 @@ def single_image_keep_indices(out_probs: mx.array, threshold: float) -> mx.array
 
 
 def _presence_weighted_scores(outputs: Mapping[str, object]) -> mx.array:
-    out_logits = cast(mx.array, outputs["pred_logits"]).astype(mx.float32)
-    presence_logit = cast(mx.array, outputs["presence_logit_dec"]).astype(mx.float32)
-    out_probs = mx.sigmoid(out_logits)
-    presence_score = mx.sigmoid(presence_logit)[:, None]
-    return (out_probs * presence_score).squeeze(-1)
+    out_logits = cast(mx.array, outputs["pred_logits"])
+    presence_logit = cast(mx.array, outputs["presence_logit_dec"])
+    if out_logits.dtype != mx.bfloat16:
+        out_logits = out_logits.astype(mx.float32)
+        presence_logit = presence_logit.astype(mx.float32)
+    out_probs = mx.sigmoid(out_logits.astype(mx.float32)).astype(out_logits.dtype)
+    presence_score = mx.sigmoid(presence_logit.astype(mx.float32)).astype(presence_logit.dtype)
+    return (out_probs * presence_score[:, None]).squeeze(-1).astype(mx.float32)
 
 
 def _filter_single_image_detections(

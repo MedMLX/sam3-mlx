@@ -20,6 +20,7 @@ from mlx import nn
 
 from sam3_mlx._unsupported import raise_unsupported
 from sam3_mlx.resolutions import window_layout_is_exact
+from sam3_mlx.precision_layers import attention, gelu_tanh
 from sam3_mlx.model import data_misc as data_misc_module
 from sam3_mlx.model.bounded_cache import BoundedLRUCache
 from sam3_mlx.model.data_misc import NestedTensor
@@ -144,10 +145,25 @@ def _as_nested(feature: object) -> _NestedFeature:
 
 
 class Mlp(_Mlp):
-    """``model_misc.Mlp`` with a ``forward`` alias for ``__call__``."""
+    """ViT MLP with the CUDA BF16 fused linear/GELU rounding boundary."""
+
+    def __call__(self, x: mx.array) -> mx.array:
+        if (
+            self.fc1.weight.dtype != mx.bfloat16
+            or not isinstance(self.fc1, nn.Linear)
+            or not isinstance(self.act, nn.GELU)
+        ):
+            return super().__call__(x)
+        # cuBLASLt applies tanh GELU to the FP32 accumulator before BF16 storage.
+        x = x.astype(mx.bfloat16).astype(mx.float32) @ self.fc1.weight.astype(mx.float32).T
+        bias = self.fc1.bias if "bias" in self.fc1 else None
+        if bias is not None:
+            x = x + bias.astype(mx.float32)
+        x = gelu_tanh(x).astype(mx.bfloat16)
+        return self.drop2(self.fc2(self.norm(self.drop1(x))))
 
     def forward(self, x: mx.array) -> mx.array:
-        return super().__call__(x)
+        return self(x)
 
 
 def polar(a: mx.array, b: mx.array) -> mx.array:
@@ -748,7 +764,7 @@ class Attention(nn.Module):
             k = mx.reshape(k, (batch, self.num_heads, height * width, -1))
 
         scale = float(q.shape[-1]) ** -0.5
-        x = mx.fast.scaled_dot_product_attention(q, k, v, scale=scale)
+        x = attention(q, k, v, scale=scale)
 
         if ndim == 4:
             x = mx.reshape(

@@ -1,0 +1,123 @@
+{
+  "scope": "BF16 image precision repair and FP32 preservation; external-corpus characterization",
+  "official_revision": "2814fa619404a722d03e9a012e083e4f293a4e53",
+  "manifest": "parity/manifests/expanded-images-v1.json",
+  "checkpoints": {
+    "official": {
+      "name": "sam3.pt",
+      "bytes": 3450062241
+    },
+    "mlx": {
+      "name": "mlx-community/sam3-image/model.safetensors",
+      "bytes": 3402867661,
+      "source_dtype": "float32"
+    }
+  },
+  "baseline": {
+    "bf16_passed_cases": 43,
+    "fp32_passed_cases": 56,
+    "case_count": 56
+  },
+  "precision_boundaries": [
+    "Load FP32 source weights; keep FP32 residual parameters, embeddings, LayerNorm, GroupNorm and detector decoder feed-forward layers.",
+    "Cast matrix and convolution inputs and weights to BF16 except FP32 decoder feed-forward layers and the segmentation head.",
+    "Evaluate the ViT first linear projection and tanh-GELU epilogue from BF16 operands in FP32; round once after GELU.",
+    "Accumulate BF16 attention, including additive bias, in FP32 and round the output once.",
+    "Round BF16 detection probabilities before confidence filtering; keep public scores FP32 and mask interpolation FP32.",
+    "Retain the segmentation head in FP32 to stabilize mask-logit zero crossings; this is a deliberate precision island, not CUDA operation-for-operation identity."
+  ],
+  "diagnostics": {
+    "exact_official_cross_attention_inputs": {
+      "native_bf16_mean_absolute_error": 0.010453,
+      "fp32_accumulation_mean_absolute_error": 0.0002396
+    },
+    "last_failing_case": {
+      "image_id": "MCUCXR_0002_0",
+      "case": "box_1008",
+      "before_fp32_head_iou": 0.9863053463,
+      "after_fp32_head_iou": 0.992150974397051
+    },
+    "bf16_cases_before_fp32_head": 55
+  },
+  "regressions": [
+    {
+      "test": "test_apply_precision_policy_uses_bf16_autocast_and_full_fp16",
+      "before": "Original policy rounded LayerNorm parameters to BF16; assertion failed.",
+      "after": "passed"
+    },
+    {
+      "test": "test_bf16_attention_accumulates_scaled_scores_and_bias_in_float32",
+      "before": "32/64 values differed; maximum absolute error 0.00390625.",
+      "after": "passed"
+    },
+    {
+      "test": "test_bf16_scores_round_probabilities_before_thresholding",
+      "before": "Returned two detections instead of one at confidence 0.5.",
+      "after": "passed"
+    },
+    {
+      "test": "test_universal_segmentation_head_preserves_mask_logits_and_layout",
+      "before": "Both BF16 head variants failed FP32 logit equivalence.",
+      "after": "4 parameterized cases passed"
+    },
+    {
+      "test": "test_bf16_vit_mlp_preserves_activation_and_fused_rounding",
+      "before": "Candidate fused paths replaced custom ReLU with GELU and failed on bias-free linear layers; both regressions were reproduced.",
+      "after": "4 activation/bias cases passed"
+    }
+  ],
+  "real_weights": {
+    "bf16": {
+      "status": "passed",
+      "image_count": 18,
+      "case_count": 56,
+      "passed_cases": 56,
+      "nonempty_reference_cases": 30,
+      "reference": "official-cuda-bf16.npz",
+      "candidate": "final-bf16-56.npz",
+      "minimum_mask_iou": 0.992150974397051,
+      "maximum_box_l_inf_pixels": 1.37469482421875,
+      "maximum_score_absolute_error": 0.0078125
+    },
+    "fp32": {
+      "status": "passed",
+      "image_count": 18,
+      "case_count": 56,
+      "passed_cases": 56,
+      "nonempty_reference_cases": 30,
+      "reference": "official-cuda-fp32.npz",
+      "candidate": "final-fp32-56.npz",
+      "minimum_mask_iou": 0.9947788412850467,
+      "maximum_box_l_inf_pixels": 0.70458984375,
+      "maximum_score_absolute_error": 0.004501283168792725
+    }
+  },
+  "thresholds": {
+    "mask_iou_min": 0.95,
+    "mask_iou_mean_min": 0.99,
+    "box_l_inf_max": 2.0,
+    "score_abs_max": 0.025
+  },
+  "oracle_precision": {
+    "bf16": "Native official CUDA autocast; no fused-operation adapter.",
+    "fp32": "Established three-fused-casts-to-fp32 adapter; same reference as the passing FP32 baseline."
+  },
+  "validation": {
+    "tests": "901 passed; one expected warning from deliberate checkpoint-free model construction; final ViT owner recheck: 13 passed",
+    "test_command": ".venv/bin/python -m pytest tests/image tests/runtime tests/port/tracker tests/test_temporal_runtime.py tests/test_temporal_parity.py -q",
+    "qa": "make qa: Ruff passed; strict Pyright reported zero errors and warnings",
+    "graph": "Refreshed with gitnexus analyze --index-only; CLI context and upstream impact used the current workspace index.",
+    "post_review_real_weight_recheck": {
+      "case": "MCUCXR_0002_0/box_1008",
+      "status": "passed",
+      "candidate": "final-activation-1008.npz",
+      "comparison": "final-activation-1008-comparison.json"
+    }
+  },
+  "limits": [
+    "The 56 cases were used to diagnose and calibrate precision; they are not an independent holdout or clinical qualification.",
+    "BF16 retains selected FP32 operations and requires FP32 source weights for those parameters.",
+    "FP32 remains the default. No BF16 temporal qualification or performance improvement is claimed."
+  ],
+  "local_evidence": "benchmarks/results/sam3-bf16-20261026"
+}

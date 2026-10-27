@@ -791,10 +791,11 @@ def build_sam3_image_model(
             then needs those weights (``interactive_checkpoint_path``).
         compile: Compile the visual backbone and grounding graphs with MLX
             (opt-in; image model only).
-        precision: ``"fp32"``, ``"fp16"``, ``"bf16"`` or ``"mixed"``. The pinned
-            default artifact is FP32, so other policies need a precision-specific
-            Hub artifact (with a matching conversion manifest) or a local
-            conversion.
+        precision: ``"fp32"`` (default), ``"fp16"``, ``"bf16"`` or ``"mixed"``.
+            BF16 uses the default FP32 source artifact, autocast projections,
+            and an FP32 segmentation head. FP16 and mixed policies need a
+            precision-specific Hub artifact (with a matching conversion
+            manifest) or a local conversion.
         local_weights_dir: Download or conversion directory.
         interactive_checkpoint_path: Extra file with interactive-predictor
             weights; requires ``enable_inst_interactivity=True``.
@@ -832,7 +833,7 @@ def build_sam3_image_model(
         checkpoint_path is None
         and load_from_HF
         and not convert_from_pytorch
-        and policy != "fp32"
+        and policy in {"fp16", "mixed"}
         and hf_repo == sam3_convert.DEFAULT_MLX_CHECKPOINT.repo
         and hf_revision == sam3_convert.DEFAULT_MLX_CHECKPOINT.revision
     ):
