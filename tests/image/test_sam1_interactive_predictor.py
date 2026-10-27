@@ -3,6 +3,7 @@ import mlx.core as mx
 from PIL import Image
 
 from sam3_mlx.mlx_runtime import to_numpy
+from sam3_mlx.model.utils.sam1_utils import SAM2Transforms
 from sam3_mlx.model.sam3_tracker_base import BackboneFeatureOutput
 from sam3_mlx.model.sam1_task_predictor import (
     SAM3InteractiveImageModel,
@@ -142,3 +143,38 @@ def test_interactive_postprocess_removes_small_sprinkles_with_mlx_components() -
     )
 
     assert to_numpy(postprocessed)[0, 0, 1, 1] < predictor.mask_threshold
+
+
+def test_interactive_cleanup_uses_original_regions_for_both_area_filters() -> None:
+    transforms = SAM2Transforms(
+        resolution=5,
+        mask_threshold=0.0,
+        max_hole_area=1.0,
+        max_sprinkle_area=8.0,
+    )
+    masks = mx.array(
+        [
+            [-1.0, -1.0, -1.0, -1.0, -1.0],
+            [-1.0, 1.0, 1.0, 1.0, -1.0],
+            [-1.0, 1.0, -1.0, 1.0, -1.0],
+            [-1.0, 1.0, 1.0, 1.0, -1.0],
+            [-1.0, -1.0, -1.0, -1.0, -1.0],
+        ],
+        dtype=mx.float32,
+    )[None, None]
+
+    postprocessed = transforms.postprocess_masks(masks, (5, 5))
+
+    # Upstream measures both areas on the original mask: fill the one-pixel
+    # hole and remove the eight-pixel ring, even though filling makes it nine.
+    expected = np.array(
+        [
+            [-1.0, -1.0, -1.0, -1.0, -1.0],
+            [-1.0, -10.0, -10.0, -10.0, -1.0],
+            [-1.0, -10.0, 10.0, -10.0, -1.0],
+            [-1.0, -10.0, -10.0, -10.0, -1.0],
+            [-1.0, -1.0, -1.0, -1.0, -1.0],
+        ],
+        dtype=np.float32,
+    )[None, None]
+    np.testing.assert_array_equal(to_numpy(postprocessed), expected)
