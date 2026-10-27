@@ -297,7 +297,7 @@ class _InteractiveBackboneModel(Protocol):
 
     def _prepare_backbone_features(
         self, backbone_out: Mapping[str, object]
-    ) -> tuple[object, list[mx.array], object, object]: ...
+    ) -> tuple[object, list[mx.array], object, list[tuple[int, int]]]: ...
 
 
 class _PredictorFeatures(TypedDict):
@@ -308,9 +308,6 @@ class _PredictorFeatures(TypedDict):
 class _InteractivePredictor(Protocol):
     @property
     def model(self) -> _InteractiveBackboneModel: ...
-
-    @property
-    def _bb_feat_sizes(self) -> list[tuple[int, int]]: ...
 
     @property
     def _features(self) -> Mapping[str, object] | None: ...
@@ -1482,10 +1479,12 @@ class Sam3Image(nn.Module):
 
         The ``no_mem_embed`` is added to the lowest-resolution level (SAM runs here
         without memory), and each sequence-first ``(H*W, B, C)`` level is reshaped to
-        NCHW using the predictor's feature sizes.
+        NCHW using its validated spatial sizes.
 
         Raises:
-            ValueError: If ``inference_state`` has no ``backbone_out``.
+            ValueError: If ``inference_state`` has no ``backbone_out``, its features
+                do not match the configured interactive image geometry, or its
+                feature batch disagrees with ``batch_size``.
         """
         predictor = self._require_interactive_predictor()
         if "backbone_out" not in inference_state:
@@ -1507,20 +1506,22 @@ class Sam3Image(nn.Module):
         typed_backbone_out = cast(Mapping[str, object], backbone_out)
         prepare_backbone_features = cast(
             Callable[
-                [Mapping[str, object]], tuple[object, list[mx.array], object, object]
+                [Mapping[str, object]],
+                tuple[object, list[mx.array], object, list[tuple[int, int]]],
             ],
             getattr(predictor.model, "_prepare_backbone_features"),
         )
-        _, vision_feats, _, _ = prepare_backbone_features(typed_backbone_out)
+        _, vision_feats, _, feature_sizes = prepare_backbone_features(typed_backbone_out)
+        feature_batch_size = vision_feats[-1].shape[1]
+        if batch_size is not None and batch_size != feature_batch_size:
+            raise ValueError(
+                "Interactive image feature batch must match the original image sizes; "
+                f"got {feature_batch_size} feature rows and {batch_size} image sizes."
+            )
         vision_feats[-1] = vision_feats[-1] + predictor.model.no_mem_embed
-        if batch_size is None:
-            batch_size = vision_feats[-1].shape[1]
-        feature_sizes = cast(
-            list[tuple[int, int]], getattr(predictor, "_bb_feat_sizes")
-        )
         feats = [
             _array_transforms(_array_transforms(feat).transpose(1, 2, 0)).reshape(
-                batch_size, -1, *feat_size
+                feature_batch_size, feat.shape[-1], *feat_size
             )
             for feat, feat_size in zip(vision_feats[::-1], feature_sizes[::-1])
         ][::-1]
@@ -1572,8 +1573,9 @@ class Sam3Image(nn.Module):
         of masks, IoU predictions and low-resolution masks.
 
         Raises:
-            AssertionError: If the height/width lists or the feature batch disagree
-                in length.
+            AssertionError: If the height and width lists disagree in length.
+            ValueError: If the cached features have incompatible interactive image
+                geometry or a different batch size from the original image sizes.
         """
         orig_heights = inference_state["original_heights"]
         orig_widths = inference_state["original_widths"]
@@ -1586,12 +1588,6 @@ class Sam3Image(nn.Module):
             )
         predictor = self._require_interactive_predictor()
         features = self._inst_predictor_features_from_state(inference_state, batch_size)
-        if features["image_embed"].shape[0] != batch_size:
-            raise AssertionError(
-                "Batch size mismatch in predict_inst_batch. Got "
-                f"{features['image_embed'].shape[0]}, {len(typed_orig_heights)}, "
-                f"{len(typed_orig_widths)}"
-            )
         typed_heights = [
             cast(int, typed_orig_heights[index]) for index in range(batch_size)
         ]

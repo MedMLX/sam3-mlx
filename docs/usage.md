@@ -50,6 +50,12 @@ though it pads to the same `48×48` window topology as `672`.
 The runtime accepts other multiples of 14, but the frozen official-vs-MLX release
 matrix covers only `1008`, `672`, and `504`.
 
+SAM1-style interactive prediction through `model.predict_inst` or
+`model.predict_inst_batch` requires processor resolution to match the interactive
+model's configured image size (`1008` for `build_sam3_image_model`). Re-encode the
+image at that resolution before interactive prediction. Lower-resolution text
+and geometric grounding remain available with an interactive head attached.
+
 ## Selected-frame video and advanced options
 
 `build_sam3_predictor()` defaults to the selected-frame SAM 3 path. Request

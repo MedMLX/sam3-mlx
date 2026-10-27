@@ -196,8 +196,22 @@ class SAM3InteractiveImageModel(nn.Module):
         feature_maps = backbone_out["backbone_fpn"][-self.num_feature_levels :]
         vision_pos_embeds = backbone_out["vision_pos_enc"][-self.num_feature_levels :]
         feat_sizes: list[tuple[int, int]] = [
+            (x.shape[-2], x.shape[-1]) for x in feature_maps
+        ]
+        embedding_size = self.image_size // self.backbone_stride
+        expected_sizes = [
+            (embedding_size * scale, embedding_size * scale) for scale in (4, 2, 1)
+        ]
+        position_sizes = [
             (x.shape[-2], x.shape[-1]) for x in vision_pos_embeds
         ]
+        if feat_sizes != expected_sizes or position_sizes != expected_sizes:
+            raise ValueError(
+                "Interactive image features require processor resolution "
+                f"{self.image_size} with spatial sizes {expected_sizes}; "
+                f"got features {feat_sizes} and positional encodings {position_sizes}. "
+                "Re-encode the image at the interactive model's resolution."
+            )
         vision_feats: list[mx.array] = [
             mx.transpose(mx.reshape(x, (x.shape[0], x.shape[1], -1)), (2, 0, 1))
             for x in feature_maps
@@ -298,12 +312,15 @@ class SAM3InteractiveImagePredictor(nn.Module):
             ],
             getattr(self.model, "_prepare_backbone_features"),
         )
-        _, vision_feats, _, _ = prepare_backbone_features(backbone_out)
+        _, vision_feats, _, feat_sizes = prepare_backbone_features(backbone_out)
         vision_feats[-1] = vision_feats[-1] + self.model.no_mem_embed
         batch_size = vision_feats[-1].shape[1]
         feats = [
-            mx.reshape(mx.transpose(feat, (1, 2, 0)), (batch_size, -1, *feat_size))
-            for feat, feat_size in zip(vision_feats[::-1], self._bb_feat_sizes[::-1])
+            mx.reshape(
+                mx.transpose(feat, (1, 2, 0)),
+                (batch_size, feat.shape[-1], *feat_size),
+            )
+            for feat, feat_size in zip(vision_feats[::-1], feat_sizes[::-1])
         ][::-1]
         self._features = {"image_embed": feats[-1], "high_res_feats": feats[:-1]}
         self._is_image_set = True
