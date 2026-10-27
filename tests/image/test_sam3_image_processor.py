@@ -707,14 +707,20 @@ def test_set_image_batch_rejects_bare_path_string(tmp_path: Path) -> None:
     path = tmp_path / "image.png"
     _synthetic_rgb_image(4, 2).save(path)
     processor = Sam3Processor(FakeModel(), resolution=14)
+    state = processor.set_image(_synthetic_rgb_image(4, 2))
+    processor.set_text_prompt("shoe", state, run_grounding=False)
 
     with pytest.raises(
         ValueError,
         match="list of filesystem paths, PIL images, or NumPy arrays",
     ):
-        processor.set_image_batch(str(path))
+        processor.set_image_batch(str(path), state=state)
     with pytest.raises(ValueError, match="must not be empty"):
-        processor.set_image_batch([])
+        processor.set_image_batch([], state=state)
+
+    assert (state["original_height"], state["original_width"]) == (2, 4)
+    assert "geometric_prompt" in state
+    assert "language_features" in _state_mapping(state, "backbone_out")
 
 
 def test_add_geometric_prompt_without_image_names_the_required_operation() -> None:
@@ -902,6 +908,140 @@ def test_batch_geometry_broadcasts_prompt_and_preserves_negative_labels(
     find_input = processor._find_stage_for_state(state)  # pyright: ignore[reportPrivateUsage]
     np.testing.assert_array_equal(to_numpy(find_input.img_ids), [0, 1])
     np.testing.assert_array_equal(to_numpy(find_input.text_ids), [0, 0])
+
+
+def test_failed_set_image_preserves_previous_image_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model = FakeModel(
+        outputs={
+            "pred_boxes": mx.array([[[0.5, 0.5, 1.0, 1.0]]], dtype=mx.float32),
+            "pred_logits": mx.full((1, 1, 1), 10.0, dtype=mx.float32),
+            "pred_masks": mx.full((1, 1, 1, 1), 10.0, dtype=mx.float32),
+            "presence_logit_dec": mx.full((1, 1), 10.0, dtype=mx.float32),
+        }
+    )
+    processor = Sam3Processor(model, resolution=14)
+    state = processor.set_image(Image.new("RGB", (4, 2), color="red"))
+    processor.set_text_prompt("shoe", state)
+    original_image = model.backbone.forward_image_inputs[-1]
+    original_forward = model.backbone.forward_image
+    original_masks = to_numpy(state["masks"]).copy()
+    custom_value = object()
+    state["custom"] = custom_value
+
+    def fail_forward_image(image: mx.array) -> Mapping[str, object]:
+        raise RuntimeError("scripted encoder failure")
+
+    monkeypatch.setattr(model.backbone, "forward_image", fail_forward_image)
+    with pytest.raises(RuntimeError, match="scripted encoder failure"):
+        processor.set_image(Image.new("RGB", (6, 8), color="green"), state=state)
+
+    assert _state_mapping(state, "backbone_out")["image_batch"] is original_image
+    assert (state["original_height"], state["original_width"]) == (2, 4)
+    assert "geometric_prompt" in state
+    np.testing.assert_array_equal(to_numpy(state["masks"]), original_masks)
+    assert state["custom"] is custom_value
+    assert processor.set_text_prompt("shoe", state) is state
+    assert to_numpy(state["masks"]).shape == (1, 1, 2, 4)
+
+    monkeypatch.setattr(model.backbone, "forward_image", original_forward)
+    assert processor.set_image(Image.new("RGB", (6, 8), color="green"), state) is state
+    assert (state["original_height"], state["original_width"]) == (8, 6)
+    assert "geometric_prompt" not in state
+    assert "masks" not in state
+    assert state["custom"] is custom_value
+    assert processor.set_text_prompt("shoe", state) is state
+    assert to_numpy(state["masks"]).shape == (1, 1, 8, 6)
+
+
+def test_failed_preprocessed_evaluation_preserves_previous_batch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model = FakeModel()
+    processor = Sam3Processor(model, resolution=14)
+    state = processor.set_image_batch(
+        [Image.new("RGB", (4, 2), "red"), Image.new("RGB", (2, 4), "green")]
+    )
+    processor.set_text_prompt("shoe", state, run_grounding=False)
+    original_image = model.backbone.forward_image_inputs[-1]
+    tensor = np.zeros((3, 14, 14), dtype=np.float32)
+
+    def fail_evaluation(new_state: ProcessorState) -> None:
+        raise RuntimeError("scripted evaluation failure")
+
+    with monkeypatch.context() as patched:
+        patched.setattr(image_processor, "_evaluate_processor_state", fail_evaluation)
+        with pytest.raises(RuntimeError, match="scripted evaluation failure"):
+            processor.set_preprocessed_image(tensor, original_size=(8, 6), state=state)
+
+    assert _state_mapping(state, "backbone_out")["image_batch"] is original_image
+    assert state["original_heights"] == [2, 4]
+    assert state["original_widths"] == [4, 2]
+    assert "geometric_prompt" in state
+    assert "language_features" in _state_mapping(state, "backbone_out")
+
+    assert (
+        processor.set_preprocessed_image(tensor, original_size=(8, 6), state=state)
+        is state
+    )
+    assert (state["original_height"], state["original_width"]) == (8, 6)
+    assert "original_heights" not in state
+    assert "original_widths" not in state
+    assert "geometric_prompt" not in state
+
+
+def test_failed_batch_interactive_preparation_preserves_previous_image(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _FailingDecoder:
+        def conv_s0(self, value: mx.array) -> mx.array:
+            return value
+
+        def conv_s1(self, value: mx.array) -> mx.array:
+            raise RuntimeError("scripted interactive failure")
+
+    class _InteractiveModel:
+        sam_mask_decoder = _FailingDecoder()
+
+    class _InteractivePredictor:
+        model = _InteractiveModel()
+
+    model = FakeModel()
+    processor = Sam3Processor(model, resolution=14)
+    state = processor.set_image(Image.new("RGB", (4, 2), "red"))
+    processor.set_text_prompt("shoe", state, run_grounding=False)
+    original_image = model.backbone.forward_image_inputs[-1]
+    original_forward = model.backbone.forward_image
+    images = [Image.new("RGB", (6, 8), "green"), Image.new("RGB", (3, 5), "blue")]
+
+    def forward_with_interactive_features(image: mx.array) -> Mapping[str, object]:
+        return {
+            **original_forward(image),
+            "sam2_backbone_out": {"backbone_fpn": [mx.zeros((1,)), mx.zeros((1,))]},
+        }
+
+    with monkeypatch.context() as patched:
+        patched.setattr(model, "inst_interactive_predictor", _InteractivePredictor())
+        patched.setattr(
+            model.backbone, "forward_image", forward_with_interactive_features
+        )
+        with pytest.raises(RuntimeError, match="scripted interactive failure"):
+            processor.set_image_batch(images, state=state)
+
+    assert _state_mapping(state, "backbone_out")["image_batch"] is original_image
+    assert (state["original_height"], state["original_width"]) == (2, 4)
+    assert "original_heights" not in state
+    assert "original_widths" not in state
+    assert "geometric_prompt" in state
+    assert "language_features" in _state_mapping(state, "backbone_out")
+
+    assert processor.set_image_batch(images, state=state) is state
+    assert state["original_heights"] == [8, 5]
+    assert state["original_widths"] == [6, 3]
+    assert "original_height" not in state
+    assert "original_width" not in state
+    assert "geometric_prompt" not in state
 
 
 def test_set_image_after_batch_clears_batch_metadata() -> None:

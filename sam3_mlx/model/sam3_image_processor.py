@@ -931,7 +931,11 @@ class Sam3Processor:
     Usage: ``set_image`` (or ``set_image_batch``) returns a state dictionary; add a
     text prompt with ``set_text_prompt`` and/or geometric prompts with
     ``add_geometric_prompt`` / ``add_point_prompt``; each prompt call re-runs
-    grounding unless ``run_grounding=False``.
+    grounding unless ``run_grounding=False``. When replacing an image in a
+    previously returned state, the previous image, prompts, and results remain
+    available if preprocessing, encoding, evaluation, or interactive preparation
+    fails. A successful replacement updates the same dictionary and clears its
+    previous prompts and results.
 
     Result keys written into the state by ``predict``, for a single image: ``boxes``
     ``(K, 4)`` xyxy in original-image pixels, ``scores`` ``(K,)``, ``masks`` ``(K, 1,
@@ -1049,6 +1053,27 @@ class Sam3Processor:
         backbone_fpn[0] = predictor.model.sam_mask_decoder.conv_s0(backbone_fpn[0])
         backbone_fpn[1] = predictor.model.sam_mask_decoder.conv_s1(backbone_fpn[1])
 
+    def _replace_image_state(
+        self,
+        image_tensor: mx.array,
+        *,
+        new_state: ProcessorState,
+        state: ProcessorState | None,
+    ) -> ProcessorState:
+        backbone_out = _forward_backbone_image(
+            self.model.backbone,
+            image_tensor,
+            precision=model_precision(self.model),
+        )
+        new_state["backbone_out"] = backbone_out
+        _evaluate_processor_state(new_state)
+        self._patch_interactive_backbone_features(backbone_out)
+        if state is None:
+            return new_state
+        _clear_image_dependent_state(state)
+        state.update(new_state)
+        return state
+
     def _apply_visual_tensor(
         self,
         image_tensor: mx.array,
@@ -1057,21 +1082,14 @@ class Sam3Processor:
         original_width: int,
         state: ProcessorState | None,
     ) -> ProcessorState:
-        if state is None:
-            state = {}
-        else:
-            _clear_image_dependent_state(state)
-        state["original_height"] = original_height
-        state["original_width"] = original_width
-        backbone_out = _forward_backbone_image(
-            self.model.backbone,
+        return self._replace_image_state(
             image_tensor,
-            precision=model_precision(self.model),
+            new_state={
+                "original_height": original_height,
+                "original_width": original_width,
+            },
+            state=state,
         )
-        state["backbone_out"] = backbone_out
-        _evaluate_processor_state(state)
-        self._patch_interactive_backbone_features(backbone_out)
-        return state
 
     def set_image(
         self,
@@ -1135,10 +1153,7 @@ class Sam3Processor:
     ) -> ProcessorState:
         """Encode a batch of paths, PIL images, or NumPy arrays."""
 
-        if state is None:
-            state = {}
-        else:
-            _clear_image_dependent_state(state)
+        new_state: ProcessorState = {}
         if not isinstance(images, list):
             raise ValueError(
                 "Images must be a list of filesystem paths, PIL images, or NumPy arrays."
@@ -1151,25 +1166,21 @@ class Sam3Processor:
                 _transform_native_with_size(image, resolution=self.resolution)
                 for image in typed_images
             ]
-            state["original_heights"] = [height for _, height, _ in transformed]
-            state["original_widths"] = [width for _, _, width in transformed]
+            new_state["original_heights"] = [height for _, height, _ in transformed]
+            new_state["original_widths"] = [width for _, _, width in transformed]
             image_batch = mx.stack([tensor for tensor, _, _ in transformed], axis=0)
         else:
             pil_images = [_as_pil_rgb_image(image) for image in typed_images]
-            state["original_heights"] = [image.height for image in pil_images]
-            state["original_widths"] = [image.width for image in pil_images]
+            new_state["original_heights"] = [image.height for image in pil_images]
+            new_state["original_widths"] = [image.width for image in pil_images]
             image_batch = mx.stack(
                 [self.transform(image) for image in pil_images], axis=0
             )
-        backbone_out = _forward_backbone_image(
-            self.model.backbone,
+        return self._replace_image_state(
             image_batch,
-            precision=model_precision(self.model),
+            new_state=new_state,
+            state=state,
         )
-        state["backbone_out"] = backbone_out
-        _evaluate_processor_state(state)
-        self._patch_interactive_backbone_features(backbone_out)
-        return state
 
     def set_text_prompt(
         self,

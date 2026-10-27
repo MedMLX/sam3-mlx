@@ -187,6 +187,40 @@ def test_start_session_sweeps_expired_sessions() -> None:
     assert "fresh" in predictor._all_inference_states  # pyright: ignore[reportPrivateUsage]
 
 
+def test_expiration_sweep_disposes_all_sessions_after_provider_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = [100.0]
+    monkeypatch.setattr(
+        "sam3_mlx.model.sam3_base_predictor.time.monotonic", lambda: now[0]
+    )
+    failed_frames = _FailingFrames()
+    model = _ImmediateModel(frames=failed_frames)
+    predictor = _predictor(model)
+    predictor.session_expiration_sec = 60.0
+    predictor.start_session("resource", session_id="bad-close")
+    remaining_frames = _ClosableFrames()
+    model.frames = remaining_frames
+    predictor.start_session("resource", session_id="remaining")
+    expired = tuple(
+        predictor._all_inference_states.values()  # pyright: ignore[reportPrivateUsage]
+    )
+
+    now[0] += 60.0
+    with pytest.raises(RuntimeError) as exc:
+        predictor.start_session("resource", session_id="fresh")
+
+    assert isinstance(exc.value.__cause__, OSError)
+    assert str(exc.value.__cause__) == "decoder close failed"
+    assert failed_frames.closed is True
+    assert remaining_frames.closed is True
+    assert all(session["closed"] for session in expired)
+    assert all(session["cancel_event"].is_set() for session in expired)
+    assert all(session["state"] == {} for session in expired)
+    assert predictor._all_inference_states == {}  # pyright: ignore[reportPrivateUsage]
+    assert model.init_calls == 2
+
+
 def test_start_session_keeps_unexpired_sessions() -> None:
     model = _ImmediateModel()
     predictor = _predictor(model)

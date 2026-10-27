@@ -60,6 +60,37 @@ though it pads to the same `48×48` window topology as `672`.
 The runtime accepts other multiples of 14, but the frozen official-vs-MLX release
 matrix covers only `1008`, `672`, and `504`.
 
+SAM1-style interactive prediction through `model.predict_inst` or
+`model.predict_inst_batch` requires processor resolution to match the interactive
+model's configured image size (`1008` for `build_sam3_image_model`). Re-encode the
+image at that resolution before interactive prediction. Lower-resolution text
+and geometric grounding remain available with an interactive head attached.
+
+A [real-checkpoint qualification](../parity/receipts/interactive-geometry-checkpoint-20261027.md)
+checks the recent cached-geometry changes: six supported single/batch point and
+box results remain bitwise unchanged across the measured revisions, all 12 mask
+candidates are nonempty, and incompatible cached geometry or batch metadata is
+rejected without changing the predictor's previous state. This is scoped
+nonregression evidence; it does not establish official-model parity or accuracy.
+
+## Compiled image outputs
+
+`build_sam3_image_model(compile=True)` preserves the raw and public
+`semantic_seg` output when the segmentation head provides it. The
+[one-case FP32 qualification](../parity/receipts/compiled-output-contract-20261027.json)
+confirms that restoring this output leaves the five existing raw fields and
+public masks, boxes and scores bitwise unchanged from the previous compiled
+path. This is an output-contract check, not general compiled/eager numerical
+equivalence: the real-checkpoint case still exceeds `rtol=atol=1e-5` for several
+raw fields and the semantic map. Its 12 public instance masks match eager
+inference exactly. No speedup is claimed.
+
+A [six-case follow-up](../parity/receipts/compiled-output-impact-20261027.md) on
+three public scenes found all 11 nonempty instance masks pixel-identical and
+kept the empty negative control separate. Detection selections and diagnostic
+semantic zero-crossings were unchanged. Strict raw/semantic numerical checks
+still fail; these observations support only the measured cases.
+
 ## Selected-frame video and advanced options
 
 `build_sam3_predictor()` defaults to the selected-frame SAM 3 path. Request
@@ -184,8 +215,13 @@ With the tracker attached, a text or box prompt starts semantic detection and
 assigns persistent object IDs. Mask and point refinements can then target an
 existing ID. A fresh text or box prompt replaces the tracking session. Point
 refinement requires `obj_id`; points cannot include text or semantic boxes in
-the same call. Direct tracker refinement rejects `use_prev_mem_frame=True`.
-The SAM3.1 multiplex model does not expose the original SAM3 mask action.
+the same call. The SAM3.1 multiplex model does not expose the original SAM3 mask
+action.
+
+The direct tracker method `add_new_points_or_box` accepts
+`use_prev_mem_frame=True` to use stored conditioning and tracked memory on
+already tracked frames. The default is `False`; initial conditioning frames
+skip previous-frame memory attention.
 
 Manual seeds and refinements export confidence `1.0`; semantic detections retain
 their detector confidence. The tracker object probability resolves overlaps.

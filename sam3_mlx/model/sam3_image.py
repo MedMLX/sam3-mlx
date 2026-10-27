@@ -297,7 +297,7 @@ class _InteractiveBackboneModel(Protocol):
 
     def _prepare_backbone_features(
         self, backbone_out: Mapping[str, object]
-    ) -> tuple[object, list[mx.array], object, object]: ...
+    ) -> tuple[object, list[mx.array], object, list[tuple[int, int]]]: ...
 
 
 class _PredictorFeatures(TypedDict):
@@ -308,9 +308,6 @@ class _PredictorFeatures(TypedDict):
 class _InteractivePredictor(Protocol):
     @property
     def model(self) -> _InteractiveBackboneModel: ...
-
-    @property
-    def _bb_feat_sizes(self) -> list[tuple[int, int]]: ...
 
     @property
     def _features(self) -> Mapping[str, object] | None: ...
@@ -432,12 +429,10 @@ class RawPrediction(TypedDict):
 class _MlxCompile(Protocol):
     def __call__(
         self,
-        function: Callable[
-            ..., tuple[mx.array, mx.array, mx.array, mx.array, mx.array]
-        ],
+        function: Callable[..., RawPrediction],
         *,
         inputs: object,
-    ) -> Callable[..., tuple[mx.array, mx.array, mx.array, mx.array, mx.array]]: ...
+    ) -> Callable[..., RawPrediction]: ...
 
 
 _mlx_compile = cast(_MlxCompile, getattr(mx, "compile"))
@@ -665,7 +660,7 @@ class Sam3Image(nn.Module):
         self.compile_grounding = bool(compile_grounding)
         self._compiled_predict_raw: dict[
             tuple[object, ...],
-            Callable[..., tuple[mx.array, mx.array, mx.array, mx.array, mx.array]],
+            Callable[..., RawPrediction],
         ] = {}
 
     @property
@@ -1161,13 +1156,12 @@ class Sam3Image(nn.Module):
         img_ids: mx.array,
         fpn: Sequence[mx.array],
         vis_feat_sizes: Sequence[tuple[int, int]],
-    ) -> tuple[mx.array, mx.array, mx.array, mx.array, mx.array]:
-        """Array-in/array-out version of ``_run_encoded_core`` for a single feature level.
+    ) -> RawPrediction:
+        """Array-tree version of ``_run_encoded_core`` for a single feature level.
 
-        Takes and returns plain arrays so it can be wrapped by ``mx.compile``.
-        Returns ``(pred_logits, pred_boxes, pred_boxes_xyxy, pred_masks,
-        presence_logit_dec)``; ``pred_boxes_xyxy`` falls back to ``pred_boxes`` when
-        the output has no xyxy entry.
+        Returns the ``RawPrediction`` arrays, including optional head outputs, in a
+        dictionary supported by ``mx.compile``. ``pred_boxes_xyxy`` falls back to
+        ``pred_boxes`` when the output has no xyxy entry.
         """
         encoder_out = self._encode_image_memory(
             [img_feat],
@@ -1212,16 +1206,9 @@ class Sam3Image(nn.Module):
             prompt_mask=prompt_mask,
             hs=hs,
         )
-        boxes_xyxy = out.get("pred_boxes_xyxy")
-        if not isinstance(boxes_xyxy, mx.array):
-            boxes_xyxy = cast(mx.array, out["pred_boxes"])
-        return (
-            cast(mx.array, out["pred_logits"]),
-            cast(mx.array, out["pred_boxes"]),
-            boxes_xyxy,
-            cast(mx.array, out["pred_masks"]),
-            cast(mx.array, out["presence_logit_dec"]),
-        )
+        if not isinstance(out.get("pred_boxes_xyxy"), mx.array):
+            out["pred_boxes_xyxy"] = out["pred_boxes"]
+        return raw_prediction_from_output(out)
 
     def _compiled_or_eager_encoded_core(
         self,
@@ -1233,8 +1220,8 @@ class Sam3Image(nn.Module):
         """Run the encoded core compiled when ``compile_grounding`` allows, else eagerly.
 
         The compiled path needs exactly one feature level and holds one graph per
-        shape/dtype key (``grounding_compile_key``). Its output contains only the
-        five ``RawPrediction`` fields.
+        shape/dtype key (``grounding_compile_key``). Its output contains the
+        ``RawPrediction`` fields supported by the model's heads.
         """
         if not self.compile_grounding:
             return self._run_encoded_core(backbone_out, find_input, prompt, prompt_mask)
@@ -1267,7 +1254,7 @@ class Sam3Image(nn.Module):
                 prompt_mask_arr: mx.array,
                 img_ids: mx.array,
                 *fpn_arrs: mx.array,
-            ) -> tuple[mx.array, mx.array, mx.array, mx.array, mx.array]:
+            ) -> RawPrediction:
                 return self._encoded_core_arrays(
                     img_feat,
                     img_pos,
@@ -1280,22 +1267,15 @@ class Sam3Image(nn.Module):
 
             compiled = _mlx_compile(core, inputs=self.state)
             self._compiled_predict_raw[key] = compiled
-        logits, boxes, boxes_xyxy, masks, presence = compiled(
-            img_feats[0],
-            img_pos_embeds[0],
-            prompt,
-            prompt_mask,
-            self._segmentation_image_ids(backbone_out, find_input),
-            *fpn,
-        )
         return Output(
-            {
-                "pred_logits": logits,
-                "pred_boxes": boxes,
-                "pred_boxes_xyxy": boxes_xyxy,
-                "pred_masks": masks,
-                "presence_logit_dec": presence,
-            }
+            compiled(
+                img_feats[0],
+                img_pos_embeds[0],
+                prompt,
+                prompt_mask,
+                self._segmentation_image_ids(backbone_out, find_input),
+                *fpn,
+            )
         )
 
     def predict_raw(
@@ -1482,10 +1462,12 @@ class Sam3Image(nn.Module):
 
         The ``no_mem_embed`` is added to the lowest-resolution level (SAM runs here
         without memory), and each sequence-first ``(H*W, B, C)`` level is reshaped to
-        NCHW using the predictor's feature sizes.
+        NCHW using its validated spatial sizes.
 
         Raises:
-            ValueError: If ``inference_state`` has no ``backbone_out``.
+            ValueError: If ``inference_state`` has no ``backbone_out``, its features
+                do not match the configured interactive image geometry, or its
+                feature batch disagrees with ``batch_size``.
         """
         predictor = self._require_interactive_predictor()
         if "backbone_out" not in inference_state:
@@ -1507,20 +1489,22 @@ class Sam3Image(nn.Module):
         typed_backbone_out = cast(Mapping[str, object], backbone_out)
         prepare_backbone_features = cast(
             Callable[
-                [Mapping[str, object]], tuple[object, list[mx.array], object, object]
+                [Mapping[str, object]],
+                tuple[object, list[mx.array], object, list[tuple[int, int]]],
             ],
             getattr(predictor.model, "_prepare_backbone_features"),
         )
-        _, vision_feats, _, _ = prepare_backbone_features(typed_backbone_out)
+        _, vision_feats, _, feature_sizes = prepare_backbone_features(typed_backbone_out)
+        feature_batch_size = vision_feats[-1].shape[1]
+        if batch_size is not None and batch_size != feature_batch_size:
+            raise ValueError(
+                "Interactive image feature batch must match the original image sizes; "
+                f"got {feature_batch_size} feature rows and {batch_size} image sizes."
+            )
         vision_feats[-1] = vision_feats[-1] + predictor.model.no_mem_embed
-        if batch_size is None:
-            batch_size = vision_feats[-1].shape[1]
-        feature_sizes = cast(
-            list[tuple[int, int]], getattr(predictor, "_bb_feat_sizes")
-        )
         feats = [
             _array_transforms(_array_transforms(feat).transpose(1, 2, 0)).reshape(
-                batch_size, -1, *feat_size
+                feature_batch_size, feat.shape[-1], *feat_size
             )
             for feat, feat_size in zip(vision_feats[::-1], feature_sizes[::-1])
         ][::-1]
@@ -1572,8 +1556,9 @@ class Sam3Image(nn.Module):
         of masks, IoU predictions and low-resolution masks.
 
         Raises:
-            AssertionError: If the height/width lists or the feature batch disagree
-                in length.
+            AssertionError: If the height and width lists disagree in length.
+            ValueError: If the cached features have incompatible interactive image
+                geometry or a different batch size from the original image sizes.
         """
         orig_heights = inference_state["original_heights"]
         orig_widths = inference_state["original_widths"]
@@ -1586,12 +1571,6 @@ class Sam3Image(nn.Module):
             )
         predictor = self._require_interactive_predictor()
         features = self._inst_predictor_features_from_state(inference_state, batch_size)
-        if features["image_embed"].shape[0] != batch_size:
-            raise AssertionError(
-                "Batch size mismatch in predict_inst_batch. Got "
-                f"{features['image_embed'].shape[0]}, {len(typed_orig_heights)}, "
-                f"{len(typed_orig_widths)}"
-            )
         typed_heights = [
             cast(int, typed_orig_heights[index]) for index in range(batch_size)
         ]

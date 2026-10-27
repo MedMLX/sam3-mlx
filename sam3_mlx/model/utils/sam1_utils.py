@@ -146,6 +146,8 @@ class SAM2Transforms:
                 _ConnectedComponentsFn,
                 getattr(connected_components_module, "connected_components"),
             )
+            # Both filters classify the original regions, so filling holes does
+            # not change which foreground components qualify as sprinkles.
             mask_flat = mx.reshape(
                 masks_mx,
                 (-1, 1, masks_mx.shape[-2], masks_mx.shape[-1]),
@@ -161,10 +163,6 @@ class SAM2Transforms:
                     masks_mx,
                 )
             if self.max_sprinkle_area > 0:
-                mask_flat = mx.reshape(
-                    masks_mx,
-                    (-1, 1, masks_mx.shape[-2], masks_mx.shape[-1]),
-                )
                 labels, areas = connected_components_fn(
                     (mask_flat > self.mask_threshold).astype(mx.uint8)
                 )

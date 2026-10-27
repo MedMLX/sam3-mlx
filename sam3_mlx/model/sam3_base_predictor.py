@@ -949,8 +949,14 @@ class Sam3BasePredictor:
                         popped = self._all_inference_states.pop(session_id, None)
                         if popped is not None:
                             expired.append(popped)
+        errors: list[RuntimeError] = []
         for session in expired:
-            self._dispose_session(session)
+            try:
+                self._dispose_session(session)
+            except RuntimeError as exc:
+                errors.append(exc)
+        if errors:
+            raise errors[0]
 
     @staticmethod
     def _dispose_session(session: PredictorSession) -> None:

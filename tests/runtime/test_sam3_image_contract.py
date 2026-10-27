@@ -12,7 +12,12 @@ import pytest
 from sam3_mlx._unsupported import Sam3MlxUnsupportedError
 from sam3_mlx.model.data_misc import NestedTensor
 from sam3_mlx.model.geometry_encoders import Prompt
+from sam3_mlx.model.image_backbone_contract import BackboneFeatureOutput
 from sam3_mlx.model.model_misc import DotProductScoring, MLP
+from sam3_mlx.model.sam1_task_predictor import (
+    SAM3InteractiveImageModel,
+    SAM3InteractiveImagePredictor,
+)
 from sam3_mlx.model.sam3_image import Sam3Image
 
 
@@ -300,9 +305,9 @@ class _InteractiveModel:
 
     def _prepare_backbone_features(
         self, backbone_out: Mapping[str, object]
-    ) -> tuple[object, list[mx.array], object, object]:
+    ) -> tuple[object, list[mx.array], object, list[tuple[int, int]]]:
         del backbone_out
-        return None, [mx.zeros((1, 1, 1))], None, None
+        return None, [mx.zeros((1, 1, 1))], None, [(1, 1)]
 
 
 class _PredictorFeatures(TypedDict):
@@ -314,7 +319,6 @@ class _Predictor:
     def __init__(self) -> None:
         self.fail = True
         self.model = _InteractiveModel()
-        self._bb_feat_sizes = [(1, 1)]
         self._features: _PredictorFeatures = {
             "image_embed": mx.zeros((1, 1, 1)),
             "high_res_feats": [],
@@ -657,3 +661,135 @@ def test_predict_inst_restores_predictor_state_when_prediction_fails() -> None:
     assert getattr(predictor, "_is_image_set") is original[1]
     assert getattr(predictor, "_is_batch") is original[2]
     assert getattr(predictor, "_orig_hw") is original[3]
+
+
+def _interactive_backbone_features(
+    resolution: int, batch_size: int
+) -> BackboneFeatureOutput:
+    embedding_size = resolution // 14
+    sizes = [embedding_size * scale for scale in (4, 2, 1)]
+    return {
+        "backbone_fpn": [
+            mx.zeros((batch_size, channels, size, size))
+            for channels, size in zip((32, 64, 256), sizes, strict=True)
+        ],
+        "vision_pos_enc": [
+            mx.zeros((batch_size, 256, size, size)) for size in sizes
+        ],
+    }
+
+
+def _interactive_inference_state(
+    resolution: int, original_sizes: list[tuple[int, int]], *, batched: bool
+) -> dict[str, object]:
+    state: dict[str, object] = {
+        "backbone_out": {
+            "sam2_backbone_out": _interactive_backbone_features(
+                resolution, len(original_sizes)
+            )
+        }
+    }
+    if batched:
+        state["original_heights"] = [height for height, _ in original_sizes]
+        state["original_widths"] = [width for _, width in original_sizes]
+    else:
+        state["original_height"], state["original_width"] = original_sizes[0]
+    return state
+
+
+@pytest.mark.parametrize("resolution", [336, 504, 672])
+@pytest.mark.parametrize("batched", [False, True])
+def test_predict_inst_rejects_incompatible_cached_geometry_without_changing_state(
+    resolution: int, batched: bool
+) -> None:
+    predictor = SAM3InteractiveImagePredictor(
+        SAM3InteractiveImageModel(), max_hole_area=0.0
+    )
+    predictor._set_features_from_backbone(  # pyright: ignore[reportPrivateUsage]
+        _interactive_backbone_features(1008, 1)
+    )
+    setattr(predictor, "_orig_hw", [(19, 23)])
+    previous = tuple(
+        getattr(predictor, name)
+        for name in ("_features", "_is_image_set", "_is_batch", "_orig_hw")
+    )
+    model = _empty_model()
+    setattr(model, "inst_interactive_predictor", predictor)
+    sizes = [(12, 20), (15, 9)] if batched else [(12, 20)]
+    state = _interactive_inference_state(resolution, sizes, batched=batched)
+
+    with pytest.raises(ValueError, match="Interactive image features.*1008"):
+        if batched:
+            model.predict_inst_batch(state)
+        else:
+            model.predict_inst(state)
+
+    for name, value in zip(
+        ("_features", "_is_image_set", "_is_batch", "_orig_hw"), previous, strict=True
+    ):
+        assert getattr(predictor, name) is value
+
+
+@pytest.mark.parametrize("batched", [False, True])
+def test_predict_inst_runs_with_configured_model_geometry_and_restores_state(
+    batched: bool,
+) -> None:
+    mx.random.seed(731)
+    predictor = SAM3InteractiveImagePredictor(
+        SAM3InteractiveImageModel(image_size=56), max_hole_area=0.0
+    )
+    predictor.model.eval()
+    predictor._set_features_from_backbone(  # pyright: ignore[reportPrivateUsage]
+        _interactive_backbone_features(56, 1)
+    )
+    setattr(predictor, "_orig_hw", [(19, 23)])
+    previous_features = getattr(predictor, "_features")
+    previous_sizes = getattr(predictor, "_orig_hw")
+    model = _empty_model()
+    setattr(model, "inst_interactive_predictor", predictor)
+    sizes = [(12, 20), (15, 9)] if batched else [(12, 20)]
+    state = _interactive_inference_state(56, sizes, batched=batched)
+    points = [np.array([[width / 2, height / 2]]) for height, width in sizes]
+    labels = [np.array([1]) for _ in sizes]
+
+    if batched:
+        masks, scores, low_res = model.predict_inst_batch(
+            state,
+            point_coords_batch=points,
+            point_labels_batch=labels,
+            return_logits=True,
+        )
+    else:
+        mask, score, logits = model.predict_inst(
+            state,
+            point_coords=points[0],
+            point_labels=labels[0],
+            return_logits=True,
+        )
+        masks, scores, low_res = [mask], [score], [logits]
+
+    for mask, score, logits, (height, width) in zip(
+        masks, scores, low_res, sizes, strict=True
+    ):
+        assert mask.shape == (3, height, width)
+        assert score.shape == (3,)
+        assert logits.shape == (3, 16, 16)
+        assert all(np.isfinite(value).all() for value in (mask, score, logits))
+    assert getattr(predictor, "_features") is previous_features
+    assert getattr(predictor, "_orig_hw") is previous_sizes
+    assert getattr(predictor, "_is_image_set") is True
+    assert getattr(predictor, "_is_batch") is False
+
+
+def test_predict_inst_batch_rejects_cached_batch_that_disagrees_with_image_sizes() -> None:
+    predictor = SAM3InteractiveImagePredictor(
+        SAM3InteractiveImageModel(image_size=56), max_hole_area=0.0
+    )
+    model = _empty_model()
+    setattr(model, "inst_interactive_predictor", predictor)
+    state = _interactive_inference_state(56, [(12, 20), (15, 9)], batched=True)
+    state["original_heights"] = [12]
+    state["original_widths"] = [20]
+
+    with pytest.raises(ValueError, match="Interactive image feature batch"):
+        model.predict_inst_batch(state)

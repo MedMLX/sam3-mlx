@@ -1,0 +1,336 @@
+{
+  "schema_version": 1,
+  "scope": "One-case FP32 compiled-output contract repair and nonregression qualification",
+  "status": "repair_contract_passed; full_compiled_eager_strict_numerics_failed",
+  "source": {
+    "baseline_commit": "1224e9addca161a1f6e61d1abdd8d5d3d4bcd043",
+    "repair_commit": "2704a5dbd8e699d86977fdfa95dcd983b9a046d3",
+    "tracked_worktrees_clean_before_and_after": true,
+    "runtime_imports_verified_against_selected_worktree": true
+  },
+  "runtime": {
+    "default_device": "Device(gpu, 0)",
+    "metal_available": true,
+    "mlx_version": "0.32.4",
+    "platform": "macOS-27.0.1-arm64-arm-64bit-Mach-O",
+    "python": "3.13.5",
+    "chip": "Apple M1 Max",
+    "system_memory_bytes": 68719476736
+  },
+  "fixture": {
+    "checkpoint_repository": "mlx-community/sam3-image",
+    "checkpoint_revision": "b72a14d8127e17e6f2a3d2e075bbbf4307ba146e",
+    "checkpoint_file": "model.safetensors",
+    "checkpoint_tensor_count": 1400,
+    "checkpoint_tensor_dtypes": {
+      "F32": 1368,
+      "C64": 32
+    },
+    "image_repository": "facebookresearch/sam3",
+    "image_source_revision": "7f473cfd983d5eb43040ff608f66bff0d7bdcb53",
+    "image_path": "assets/images/test_image.jpg",
+    "image_dimensions": [
+      1280,
+      720
+    ],
+    "prompt": "shoe",
+    "resolution": 1008,
+    "preprocessing": "parity",
+    "precision": "fp32",
+    "seed": 0,
+    "confidence_threshold": 0.5,
+    "eval_mode": true,
+    "enable_segmentation": true,
+    "enable_inst_interactivity": false,
+    "strict_checkpoint_loading": true,
+    "load_from_HF": false,
+    "text_cache_size": 0
+  },
+  "procedure": [
+    "Reuse the completed repair-commit full-eager and full-compiled outputs from the same local checkpoint, image and runtime.",
+    "In a fresh baseline process, build with compile=True; encode image and text, evaluate all 200 raw queries, and call the public processor with its cached compiled graph.",
+    "Compare all five legacy raw arrays and public boxes, scores and masks bitwise against the repaired full-compiled outputs; compare each lane against the same saved eager reference.",
+    "In that baseline process, disable only compile_grounding and reuse compiled visual features for a diagnostic pass.",
+    "In a second fresh repair process, build with compile=False, encode image and text eagerly, enable only compile_grounding, and evaluate the real compiled grounding graph."
+  ],
+  "repair_acceptance": {
+    "declared_at_utc": "2026-10-27T05:14:30.782583+00:00",
+    "criteria": [
+      "All five legacy raw outputs bitwise identical before and after repair, across all 200 queries.",
+      "Public boxes, scores and masks bitwise identical; checkpoint audits and model parameter inventories equal.",
+      "Finite FP32 semantic output restored with the eager shape and compiled-cache reuse.",
+      "No increase in maximum error, RMS error or count outside rtol=atol=1e-5 against the same eager reference."
+    ],
+    "passed": true,
+    "gates": {
+      "audit_and_parameter_inventory": true,
+      "baseline_cache_reuse": true,
+      "bitwise_post_boxes": true,
+      "bitwise_post_masks": true,
+      "bitwise_post_scores": true,
+      "bitwise_raw_pred_boxes": true,
+      "bitwise_raw_pred_boxes_xyxy": true,
+      "bitwise_raw_pred_logits": true,
+      "bitwise_raw_pred_masks": true,
+      "bitwise_raw_presence_logit_dec": true,
+      "no_increase_post_boxes": true,
+      "no_increase_post_masks": true,
+      "no_increase_post_scores": true,
+      "no_increase_raw_pred_boxes": true,
+      "no_increase_raw_pred_boxes_xyxy": true,
+      "no_increase_raw_pred_logits": true,
+      "no_increase_raw_pred_masks": true,
+      "no_increase_raw_presence_logit_dec": true,
+      "restored_public_semantic": true,
+      "restored_raw_semantic": true,
+      "restored_schema_and_cache": true
+    },
+    "detected_query_count": 12,
+    "semantic_raw_shape": [
+      1,
+      1,
+      288,
+      288
+    ],
+    "semantic_public_shape_matches_eager": true
+  },
+  "unchanged_strict_comparison": {
+    "rtol": 1e-05,
+    "atol": 1e-05,
+    "passed": false,
+    "interpretation": "The shared-output values and all listed drift metrics are exactly unchanged by the repair. These are pre-existing compiled/eager differences on this fixture.",
+    "shared_metrics_identical_before_and_after": {
+      "post_boxes": {
+        "max_abs_error": 0.0001220703125,
+        "rmse": 2.3308185297423504e-05,
+        "violation_count": 0,
+        "passed_strict": true,
+        "bitwise_equal": false
+      },
+      "post_masks": {
+        "max_abs_error": 0.0,
+        "rmse": 0.0,
+        "violation_count": 0,
+        "passed_strict": true,
+        "bitwise_equal": true
+      },
+      "post_scores": {
+        "max_abs_error": 5.960464477539063e-08,
+        "rmse": 4.552379940903028e-08,
+        "violation_count": 0,
+        "passed_strict": true,
+        "bitwise_equal": false
+      },
+      "raw_pred_boxes": {
+        "max_abs_error": 1.704692840576172e-05,
+        "rmse": 1.3256974914241822e-06,
+        "violation_count": 1,
+        "passed_strict": false,
+        "bitwise_equal": false
+      },
+      "raw_pred_boxes_xyxy": {
+        "max_abs_error": 1.728534698486328e-05,
+        "rmse": 1.8043315836184104e-06,
+        "violation_count": 2,
+        "passed_strict": false,
+        "bitwise_equal": false
+      },
+      "raw_pred_logits": {
+        "max_abs_error": 0.000102996826171875,
+        "rmse": 9.134345206069185e-06,
+        "violation_count": 1,
+        "passed_strict": false,
+        "bitwise_equal": false
+      },
+      "raw_pred_masks": {
+        "max_abs_error": 0.01004791259765625,
+        "rmse": 0.0001000825188989338,
+        "violation_count": 629461,
+        "passed_strict": false,
+        "bitwise_equal": false
+      },
+      "raw_presence_logit_dec": {
+        "max_abs_error": 1.430511474609375e-06,
+        "rmse": 1.430511474609375e-06,
+        "violation_count": 0,
+        "passed_strict": true,
+        "bitwise_equal": false
+      }
+    },
+    "restored_raw_semantic": {
+      "max_abs_error": 0.000438690185546875,
+      "rmse": 1.6038951384340576e-05,
+      "bitwise_equal": false,
+      "passed_strict": false
+    },
+    "restored_public_semantic": {
+      "max_abs_error": 0.000392913818359375,
+      "rmse": 1.2890032198076333e-05,
+      "bitwise_equal": false,
+      "passed_strict": false
+    },
+    "public_instance_masks_vs_eager": {
+      "bitwise_equal": true,
+      "iou_min": 1.0,
+      "iou_mean": 1.0,
+      "nonempty_masks": 12
+    }
+  },
+  "split_diagnostics": {
+    "rtol": 1e-05,
+    "atol": 1e-05,
+    "compiled_visual_eager_grounding": {
+      "pred_boxes": {
+        "max_abs_error": 4.112720489501953e-05,
+        "rmse": 1.867505379980267e-06,
+        "violation_count": 1,
+        "passed_strict": false,
+        "bitwise_equal": false
+      },
+      "pred_boxes_xyxy": {
+        "max_abs_error": 4.26173210144043e-05,
+        "rmse": 2.6008354668641064e-06,
+        "violation_count": 2,
+        "passed_strict": false,
+        "bitwise_equal": false
+      },
+      "pred_logits": {
+        "max_abs_error": 2.7179718017578125e-05,
+        "rmse": 5.4434086651012906e-06,
+        "violation_count": 0,
+        "passed_strict": true,
+        "bitwise_equal": false
+      },
+      "pred_masks": {
+        "max_abs_error": 0.00737762451171875,
+        "rmse": 8.92438969051653e-05,
+        "violation_count": 779443,
+        "passed_strict": false,
+        "bitwise_equal": false
+      },
+      "presence_logit_dec": {
+        "max_abs_error": 4.76837158203125e-07,
+        "rmse": 4.76837158203125e-07,
+        "violation_count": 0,
+        "passed_strict": true,
+        "bitwise_equal": false
+      },
+      "semantic_seg": {
+        "max_abs_error": 0.000438690185546875,
+        "rmse": 1.6038951384340576e-05,
+        "violation_count": 30,
+        "passed_strict": false,
+        "bitwise_equal": false
+      }
+    },
+    "eager_visual_compiled_grounding": {
+      "pred_boxes": {
+        "max_abs_error": 7.212162017822266e-06,
+        "rmse": 5.958358006627094e-07,
+        "violation_count": 0,
+        "passed_strict": true,
+        "bitwise_equal": false
+      },
+      "pred_boxes_xyxy": {
+        "max_abs_error": 7.599592208862305e-06,
+        "rmse": 8.148696051995228e-07,
+        "violation_count": 0,
+        "passed_strict": true,
+        "bitwise_equal": false
+      },
+      "pred_logits": {
+        "max_abs_error": 4.8160552978515625e-05,
+        "rmse": 6.066704689509981e-06,
+        "violation_count": 0,
+        "passed_strict": true,
+        "bitwise_equal": false
+      },
+      "pred_masks": {
+        "max_abs_error": 0.0030364990234375,
+        "rmse": 4.252557070911619e-05,
+        "violation_count": 139856,
+        "passed_strict": false,
+        "bitwise_equal": false
+      },
+      "presence_logit_dec": {
+        "max_abs_error": 4.76837158203125e-07,
+        "rmse": 4.76837158203125e-07,
+        "violation_count": 0,
+        "passed_strict": true,
+        "bitwise_equal": false
+      },
+      "semantic_seg": {
+        "max_abs_error": 0.0,
+        "rmse": 0.0,
+        "violation_count": 0,
+        "passed_strict": true,
+        "bitwise_equal": true
+      }
+    },
+    "supplemental_semantic_comparison": {
+      "baseline_compiled_visual_eager_grounding_equals_repaired_full_compiled_bitwise": true,
+      "max_abs_error": 0.0,
+      "interpretation": "The semantic discrepancy follows the compiled visual path on this fixture; no offending operator was isolated."
+    }
+  },
+  "validation": {
+    "native_compile_regression_before": {
+      "failed": 2,
+      "passed_controls": 2
+    },
+    "native_compile_regression_scope": "Semantic and instance-only heads, batches 1 and 2, repeated same-shape calls with changed input; real mx.compile.",
+    "focused_tests_passed": 33,
+    "full_suite": {
+      "passed": 1531,
+      "skipped": 6,
+      "elapsed_seconds": 24.55,
+      "skip_reason": "Optional association-oracle input checkout/capture not configured"
+    },
+    "ruff": "passed",
+    "strict_pyright": "0 errors, 0 warnings",
+    "original_harness_audit_correction": "The first receipt compared dataclass tuples to saved JSON lists. Normalized audit reports match exactly; this did not affect the numerical comparisons. Original numerical failures remain unchanged."
+  },
+  "execution": {
+    "reference_window_utc": [
+      "2026-10-27T05:07:48.906905+00:00",
+      "2026-10-27T05:07:58.734490+00:00"
+    ],
+    "delta_window_utc": [
+      "2026-10-27T05:21:07.201740+00:00",
+      "2026-10-27T05:21:14.056023+00:00"
+    ],
+    "sequential_children": true,
+    "overall_timeout_seconds": 300,
+    "child_timeout_seconds": 120,
+    "rss_limit_bytes": 17179869184,
+    "configured_cache_limit_bytes": 536870912,
+    "children": [
+      {
+        "lane": "baseline",
+        "exit_code": 0,
+        "elapsed_seconds": 4.112880833003146,
+        "peak_rss_bytes": 4633509888,
+        "peak_mlx_active_bytes": 7617355266,
+        "max_observed_cache_bytes": 551160205
+      },
+      {
+        "lane": "grounding_only",
+        "exit_code": 0,
+        "elapsed_seconds": 2.5792926249996526,
+        "peak_rss_bytes": 4352131072,
+        "peak_mlx_active_bytes": 7562024915,
+        "max_observed_cache_bytes": 541561072
+      }
+    ],
+    "cache_note": "Configured cache limit is not an observed hard cap; measured cache values briefly exceeded it."
+  },
+  "limitations": [
+    "One public image/text case, one M1 Max, fixed FP32 runtime. This does not establish full compiled/eager numerical equivalence or broader model accuracy.",
+    "The six original raw/semantic numerical gate failures remain failures; no tolerance was relaxed.",
+    "Public instance masks match on this case; small raw differences could matter on other images or near decision thresholds.",
+    "Split diagnostics do not isolate the responsible MLX operator. Grounding-only raw masks also fail the unchanged strict tolerance.",
+    "No speedup or memory optimization claim. Timings are diagnostic single-run measurements, not a benchmark.",
+    "MLX active-memory and OS RSS measure different allocations; RSS sampling can miss transient peaks, so child high-water RSS is recorded separately.",
+    "Raw arrays and temporary harnesses remain local; this aggregate receipt is not a frozen release gate. No weights or image data are redistributed."
+  ]
+}
