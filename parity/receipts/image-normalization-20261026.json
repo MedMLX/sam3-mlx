@@ -13,6 +13,7 @@
     "checkpoint": "mlx-community/sam3-image/model.safetensors",
     "reference": "official-cuda-fp32.npz",
     "manifest": "parity/manifests/expanded-images-v1.json",
+    "manifest_availability": "The diagnostic manifest is retained locally and is not distributed in this repository.",
     "status": "passed",
     "passed_cases": 56,
     "case_count": 56,

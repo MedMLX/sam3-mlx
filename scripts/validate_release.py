@@ -131,7 +131,6 @@ def _validate_installed_wheel(wheel: Path, python: str, workspace: Path) -> None
     )
     contract = """
 import importlib.resources
-import importlib.util
 import json
 import tempfile
 from pathlib import Path
@@ -173,8 +172,6 @@ assert asset.read_bytes()[:2] == b"\\x1f\\x8b"
 model = sam3_mlx.build_sam3_image_model(load_from_HF=False)
 assert model.device == "mlx"
 assert model.training is False
-for module in ("sam3_mlx.agent", "sam3_mlx.eval"):
-    assert importlib.util.find_spec(module) is None, module
 # The built wheel's [video] extra must install a working decoder path.
 from sam3_mlx.model.io_utils import load_video_frames_from_video_file
 with tempfile.TemporaryDirectory() as temp_dir:

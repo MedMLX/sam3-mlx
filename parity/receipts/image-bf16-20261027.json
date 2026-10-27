@@ -2,6 +2,7 @@
   "scope": "BF16 image precision repair and FP32 preservation; external-corpus characterization",
   "official_revision": "2814fa619404a722d03e9a012e083e4f293a4e53",
   "manifest": "parity/manifests/expanded-images-v1.json",
+  "manifest_availability": "The diagnostic manifest is retained locally and is not distributed in this repository.",
   "checkpoints": {
     "official": {
       "name": "sam3.pt",
