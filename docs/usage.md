@@ -56,6 +56,18 @@ model's configured image size (`1008` for `build_sam3_image_model`). Re-encode t
 image at that resolution before interactive prediction. Lower-resolution text
 and geometric grounding remain available with an interactive head attached.
 
+## Compiled image outputs
+
+`build_sam3_image_model(compile=True)` preserves the raw and public
+`semantic_seg` output when the segmentation head provides it. The
+[one-case FP32 qualification](../parity/receipts/compiled-output-contract-20261027.json)
+confirms that restoring this output leaves the five existing raw fields and
+public masks, boxes and scores bitwise unchanged from the previous compiled
+path. This is an output-contract check, not general compiled/eager numerical
+equivalence: the real-checkpoint case still exceeds `rtol=atol=1e-5` for several
+raw fields and the semantic map. Its 12 public instance masks match eager
+inference exactly. No speedup is claimed.
+
 ## Selected-frame video and advanced options
 
 `build_sam3_predictor()` defaults to the selected-frame SAM 3 path. Request
