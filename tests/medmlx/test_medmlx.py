@@ -361,6 +361,59 @@ def test_existing_outputs_are_preserved_then_replaced_with_overwrite(
     assert not any(path.name.startswith(".sam3-mlx-") for path in output.iterdir())
 
 
+@pytest.mark.parametrize(
+    ("overwrite", "existing_names"),
+    [
+        (False, ()),
+        (True, ()),
+        (True, ("masks.npy",)),
+        (True, ("prediction.json",)),
+        (True, ("masks.npy", "prediction.json")),
+    ],
+)
+def test_failed_output_publication_restores_previous_files(
+    image_path: str,
+    output_dir: str,
+    monkeypatch: pytest.MonkeyPatch,
+    overwrite: bool,
+    existing_names: tuple[str, ...],
+) -> None:
+    _stub_image_model(monkeypatch)
+
+    def fake_segment(**_kwargs: object) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        return _fake_image_outputs()
+
+    monkeypatch.setattr(medmlx, "_segment_image", fake_segment)
+    output = Path(output_dir)
+    output.mkdir()
+    previous = {name: f"previous {name}".encode() for name in existing_names}
+    for name, contents in previous.items():
+        (output / name).write_bytes(contents)
+
+    publish = medmlx.os.replace if overwrite else medmlx.os.link
+
+    def fail_prediction(source: Path, destination: Path) -> None:
+        if destination == output / "prediction.json":
+            raise OSError("injected publication failure")
+        publish(source, destination)
+
+    monkeypatch.setattr(medmlx.os, "replace" if overwrite else "link", fail_prediction)
+    with pytest.raises(InvalidInputError, match="injected publication failure"):
+        medmlx.run(
+            image_path=image_path,
+            output_dir=output_dir,
+            text_prompt="lesion",
+            overwrite=overwrite,
+        )
+
+    actual = {
+        name: (output / name).read_bytes()
+        for name in ("masks.npy", "prediction.json")
+        if (output / name).exists()
+    }
+    assert actual == previous
+
+
 def _require_metal() -> None:
     probe = subprocess.run(
         [

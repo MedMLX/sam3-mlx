@@ -14,9 +14,11 @@ require human review.
 
 from __future__ import annotations
 
+import fcntl
 import json
 import math
 import os
+import shutil
 import tempfile
 from collections.abc import Sequence
 from pathlib import Path
@@ -178,26 +180,51 @@ def _write_outputs(
     *,
     overwrite: bool,
 ) -> None:
-    # Both files are written to a staging directory inside ``output`` first, so a
-    # failed write never leaves a half-written pair. Publishing then either
-    # replaces the destination (overwrite) or hard-links it, which fails if the
-    # destination already exists, so a race cannot clobber another run's output.
     try:
         output.mkdir(parents=True, exist_ok=True)
-        with tempfile.TemporaryDirectory(prefix=".sam3-mlx-", dir=output) as name:
-            staged_masks = Path(name) / paths["masks"].name
-            staged_prediction = Path(name) / paths["prediction"].name
-            np.save(staged_masks, masks, allow_pickle=False)
-            staged_prediction.write_text(
-                json.dumps(record, indent=2, sort_keys=True, allow_nan=False) + "\n",
-                encoding="utf-8",
-            )
-            for role, staged in (("masks", staged_masks), ("prediction", staged_prediction)):
-                destination = paths[role]
-                if overwrite:
-                    os.replace(staged, destination)
-                else:
-                    os.link(staged, destination)
+        # Keep the lock file: unlinking it lets concurrent writers lock different
+        # inodes. Recheck destinations under the lock before taking backups.
+        with (output / ".sam3-mlx.lock").open("a+b") as lock_file:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+            _output_paths(str(output), overwrite)
+            staging = Path(tempfile.mkdtemp(prefix=".sam3-mlx-", dir=output))
+            cleanup = True
+            try:
+                np.save(staging / MASKS_NAME, masks, allow_pickle=False)
+                (staging / PREDICTION_NAME).write_text(
+                    json.dumps(record, indent=2, sort_keys=True, allow_nan=False) + "\n",
+                    encoding="utf-8",
+                )
+                backups: dict[str, Path] = {}
+                for role, destination in paths.items():
+                    if overwrite and (destination.exists() or destination.is_symlink()):
+                        backup = staging / f"{destination.name}.previous"
+                        os.link(destination, backup, follow_symlinks=False)
+                        backups[role] = backup
+                published: list[str] = []
+                complete = False
+                try:
+                    for role, destination in paths.items():
+                        staged = staging / destination.name
+                        if overwrite:
+                            os.replace(staged, destination)
+                        else:
+                            os.link(staged, destination)
+                        published.append(role)
+                    complete = True
+                finally:
+                    if not complete:
+                        # Preserve recovery files if restoration itself fails.
+                        cleanup = False
+                        for role in reversed(published):
+                            if role in backups:
+                                os.replace(backups[role], paths[role])
+                            else:
+                                paths[role].unlink()
+                        cleanup = True
+            finally:
+                if cleanup:
+                    shutil.rmtree(staging)
     except OSError as error:
         raise InvalidInputError(f"Cannot write sam3-mlx outputs to {output}: {error}") from error
 
