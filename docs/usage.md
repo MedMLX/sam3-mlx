@@ -56,6 +56,13 @@ model's configured image size (`1008` for `build_sam3_image_model`). Re-encode t
 image at that resolution before interactive prediction. Lower-resolution text
 and geometric grounding remain available with an interactive head attached.
 
+A [real-checkpoint qualification](../parity/receipts/interactive-geometry-checkpoint-20261027.md)
+checks the recent cached-geometry changes: six supported single/batch point and
+box results remain bitwise unchanged across the measured revisions, all 12 mask
+candidates are nonempty, and incompatible cached geometry or batch metadata is
+rejected without changing the predictor's previous state. This is scoped
+nonregression evidence; it does not establish official-model parity or accuracy.
+
 ## Compiled image outputs
 
 `build_sam3_image_model(compile=True)` preserves the raw and public
