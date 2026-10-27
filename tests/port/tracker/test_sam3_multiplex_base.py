@@ -312,8 +312,9 @@ class _OutputCall(TypedDict):
     current_out: StageOutput
 
 
-class _MemoryUpdateTracker(DummyTracker):
+class _MemoryUpdateTracker(_ObjectRemovalTracker):
     def __init__(self, *, dynamic: bool = False) -> None:
+        super().__init__()
         self.is_multiplex_dynamic = dynamic
         self.object_score_logit_threshold = 0.0
         self.maskmem_backbone = SimpleNamespace(
@@ -3097,7 +3098,7 @@ def test_sam3_multiplex_base_suppresses_recent_overlap_and_updates_metadata() ->
     )
 
 
-def test_sam3_multiplex_base_execution_suppresses_recent_overlap_before_memory_update() -> (
+def test_sam3_multiplex_base_execution_encodes_planned_masks_after_track_retirement() -> (
     None
 ):
     tracker = _MemoryUpdateTracker()
@@ -3118,11 +3119,12 @@ def test_sam3_multiplex_base_execution_suppresses_recent_overlap_before_memory_u
         )
     ]
     tracker_metadata_new = MultiplexBaseProbe.initialize_metadata(base)
-    tracker_metadata_new["num_obj_per_gpu"][0] = 2
+    tracker_metadata_new["num_obj_per_gpu"][0] = 1
     cast(MultiplexTrackerMetadata, tracker_metadata_new)["num_buc_per_gpu"][0] = 1
-    tracker_metadata_new["obj_ids_per_gpu"][0] = np.array([10, 20], dtype=np.int64)
-    tracker_metadata_new["obj_ids_all_gpu"] = np.array([10, 20], dtype=np.int64)
-    tracker_metadata_new["obj_id_to_last_occluded"] = {10: 5, 20: 1}
+    tracker_metadata_new["obj_ids_per_gpu"][0] = np.array([10], dtype=np.int64)
+    tracker_metadata_new["obj_ids_all_gpu"] = np.array([10], dtype=np.int64)
+    tracker_metadata_new["obj_id_to_last_occluded"] = {10: 7}
+    tracker_metadata_new["gpu_metadata"] = {"last_occluded_tensor": mx.array([7])}
 
     base.run_tracker_update_execution_phase(
         frame_idx=7,
@@ -3131,10 +3133,10 @@ def test_sam3_multiplex_base_execution_suppresses_recent_overlap_before_memory_u
         det_out=_detection_output(mx.zeros((0, 2, 2), dtype=mx.float32)),
         tracker_states_local=require_mutable_tracker_states(tracker_states),
         tracker_update_plan=_tracker_update_plan(
-            obj_ids_newly_removed=set(),
+            obj_ids_newly_removed={20},
             tracker_low_res_masks_global=mx.array(
                 [
-                    [[3.0, 3.0], [-1.0, -1.0]],
+                    [[-10.0, -10.0], [-10.0, -10.0]],
                     [[3.0, 3.0], [-1.0, -1.0]],
                 ],
                 dtype=mx.float32,
@@ -3150,7 +3152,8 @@ def test_sam3_multiplex_base_execution_suppresses_recent_overlap_before_memory_u
         tracker.encoder_calls[0]["mask_sample"],
         np.array([-10.0, 3.0], dtype=np.float32),
     )
-    assert tracker_metadata_new["obj_id_to_last_occluded"] == {10: 7, 20: 1}
+    assert tracker_metadata_new["obj_id_to_last_occluded"] == {10: 7}
+    assert tracker_states[0]["obj_ids"] == [10]
 
 
 def test_sam3_multiplex_base_tracker_add_new_objects_uses_tightest_dynamic_state() -> (

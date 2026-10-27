@@ -4661,8 +4661,8 @@ class Sam3MultiplexBase(Sam3VideoBase):
     ) -> list[TrackerState]:
         """Apply an update plan to the tracker states for this frame.
 
-        In order: encode memories from the planned tracker masks (after recent-occlusion
-        suppression when enabled), add the new detections owned by this rank as objects,
+        In order: encode memories from the already-suppressed planned tracker masks,
+        add the new detections owned by this rank as objects,
         remove objects flagged by the hotstart rules, then refresh ``tracker_metadata_new``
         (object ids, bucket counts, hotstart arrays) from the resulting states. Returns the
         updated ``tracker_states_local``.
@@ -4712,43 +4712,6 @@ class Sam3MultiplexBase(Sam3VideoBase):
                             dtype=np.int64,
                         )
                     }
-                if (
-                    tracker_metadata_new is not None
-                    and self.suppress_overlapping_based_on_recent_occlusion_threshold
-                    > 0.0
-                ):
-                    memory_obj_ids = np.array(
-                        [
-                            obj_id
-                            for state in tracker_states_local
-                            for obj_id in _tracker_state_object_ids(state)
-                        ],
-                        dtype=np.int64,
-                    )
-                    memory_metadata_prev = cast(TrackerMetadata, {
-                        **memory_metadata,
-                        "obj_ids_all_gpu": memory_obj_ids,
-                        "obj_id_to_last_occluded": tracker_metadata_new.get(
-                            "obj_id_to_last_occluded",
-                            {},
-                        ),
-                    })
-                    remove_set = obj_ids_newly_removed
-                    to_remove_mask = mx.array(
-                        [
-                            int(obj_id) in remove_set
-                            for obj_id in memory_obj_ids.tolist()
-                        ],
-                        dtype=mx.bool_,
-                    )
-                    memory_masks = self._suppress_overlapping_based_on_recent_occlusion(
-                        frame_idx,
-                        memory_masks,
-                        memory_metadata_prev,
-                        tracker_metadata_new,
-                        to_remove_mask=to_remove_mask,
-                        reverse=reverse,
-                    )
                 self._tracker_update_memories(
                     tracker_states_local,
                     frame_idx,
@@ -5361,7 +5324,13 @@ class Sam3MultiplexBase(Sam3VideoBase):
             raise_unsupported_multiplex_runtime(
                 "Sam3MultiplexBase._det_track_one_frame(distributed)"
             )
-        if tracker_states_local:
+        # A session with expired trackers still owns scores for cached masks.
+        # Continue its planner instead of resetting metadata through startup.
+        if tracker_states_local or (
+            tracker_metadata_prev
+            and not is_image_only
+            and self._active_tracker_object_count(tracker_metadata_prev) == 0
+        ):
             if self._can_run_local_detector_update(input_batch):
                 return self._run_local_tracker_detector_frame(
                     frame_idx=frame_idx,

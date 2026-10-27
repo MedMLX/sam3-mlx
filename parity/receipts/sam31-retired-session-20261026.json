@@ -1,0 +1,42 @@
+{
+  "scope": "Preserve multiplex session metadata across tracker retirement and encode planned masks once",
+  "official_revision": "2814fa619404a722d03e9a012e083e4f293a4e53",
+  "checkpoints": {
+    "official": "sam3.1_multiplex.pt",
+    "mlx": "sam3.1-mlx-raw/model.safetensors"
+  },
+  "regressions": [
+    {
+      "trigger": "A cached object is revisited after its tracker expires and a second object is added",
+      "before": "Cached frame 0 scores disappear; adding purple at frame 4 clears the white-shirt mask",
+      "after": "Historical scores survive; all 12 dancers add/correct frames match the official predictor",
+      "frame_4_white_mask_iou": 0.9989947662285159
+    },
+    {
+      "trigger": "Memory encoding follows removal of one of two tracker objects",
+      "before": "ValueError: last_occluded_tensor must align with obj_ids; got 2 values for 1 object ids.",
+      "after": "Encode the already-suppressed plan before removing tracker state; the real 20-frame bedroom timeline completes",
+      "comparison_limit": "The bedroom initial box and later correction still diverge; this is not a full bedroom quality pass."
+    }
+  ],
+  "real_weight_comparison": {
+    "passed_sequences": [
+      "dancers-add-correct-12",
+      "dancers-unprompted-reentry-12",
+      "dancers-prompted-reentry-12"
+    ],
+    "reference": "official-unbounded",
+    "candidate": "mlx-after",
+    "settings": {
+      "use_batched_grounding": false,
+      "use_fa3": false,
+      "use_rope_real": false
+    }
+  },
+  "validation": {
+    "before": "Both targeted lifecycle regressions failed",
+    "after": "Targeted regressions passed; 524 affected tests passed, 6 skipped",
+    "qa": "Ruff and strict Pyright passed"
+  },
+  "local_evidence": "benchmarks/results/sam31-expanded-20261026"
+}

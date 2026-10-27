@@ -2142,6 +2142,12 @@ def test_box_seeded_propagation_retains_buffered_masks_when_track_expires() -> N
             np.testing.assert_array_equal(result["out_binary_masks"], prompt["out_binary_masks"])
 
 
+    metadata = state["tracker_metadata"]
+    assert "obj_id_to_sam2_score_frame_wise" in metadata
+    frame_scores = metadata["obj_id_to_sam2_score_frame_wise"]
+    assert float(frame_scores[0][0]) > 0.5
+
+
 def test_multiplex_tracking_video_detector_update_adds_later_frame_object() -> None:
     detector = _FramewiseVideoDetector(
         logits_by_frame=[
