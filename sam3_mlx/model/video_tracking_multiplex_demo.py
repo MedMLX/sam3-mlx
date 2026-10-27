@@ -1358,6 +1358,104 @@ class VideoTrackingMultiplexDemo(VideoTrackingDynamicMultiplex):
         _eval_tree(current_out, video_res_masks)
         return frame_idx, list(inference_state["obj_ids"]), None, video_res_masks
 
+    def propagate_in_video_preflight(
+        self, sam2_state: object, run_mem_encoder: bool = True,
+    ) -> None:
+        """Commit pending prompt masks and encode their joint tracking memory.
+
+        Unlike upstream's deferred prompt writer, this demo already maintains a
+        packed frame output. Merge its per-object edits before marking the frame
+        consolidated, otherwise propagation recomputes the prompted frame.
+        """
+        if not isinstance(sam2_state, dict):
+            raise TypeError("SAM2 state must be a dictionary.")
+        state = cast(MultiplexDemoState, sam2_state)
+        state["tracking_has_started"] = True
+        batch_size = self._get_obj_num(state)
+        outputs = state["output_dict"]
+        temporary = state["temp_output_dict_per_obj"]
+        consolidated = state["consolidated_frame_inds"]
+        for storage_key in ("non_cond_frame_outputs", "cond_frame_outputs"):
+            pending = {
+                frame_idx
+                for object_outputs in temporary.values()
+                for frame_idx in object_outputs[storage_key]
+            }
+            for frame_idx in sorted(pending):
+                output = outputs[storage_key][frame_idx]
+                masks = output.get("pred_masks")
+                if masks is None:
+                    raise RuntimeError("Pending prompt output must contain pred_masks.")
+                for obj_idx, object_outputs in temporary.items():
+                    object_output = object_outputs[storage_key].get(frame_idx)
+                    if object_output is None:
+                        existing = state["output_dict_per_obj"][obj_idx]
+                        object_output = existing["cond_frame_outputs"].get(frame_idx)
+                        if object_output is None:
+                            object_output = existing["non_cond_frame_outputs"].get(frame_idx)
+                    if object_output is None:
+                        continue
+                    video_mask = object_output.get("pred_masks_video_res")
+                    object_mask = (
+                        video_mask if video_mask is not None else object_output.get("pred_masks")
+                    )
+                    if object_mask is None:
+                        raise RuntimeError("Pending object output must contain mask logits.")
+                    if object_mask.shape[-2:] != masks.shape[-2:]:
+                        object_mask = interpolate(
+                            object_mask, size=(masks.shape[-2], masks.shape[-1]), mode="bilinear",
+                            align_corners=False, antialias=video_mask is not None,
+                        )
+                    masks = _replace_indices(masks, [obj_idx], object_mask)
+                output["pred_masks"] = masks
+                output.pop("pred_masks_video_res", None)
+                if run_mem_encoder:
+                    object_scores = output.get("object_score_logits")
+                    if object_scores is None:
+                        raise RuntimeError("Pending prompt output must contain object scores.")
+                    high_res_masks = interpolate(
+                        masks, size=(self.image_size, self.image_size),
+                        mode="bilinear", align_corners=False,
+                    )
+                    high_res_masks = self._apply_non_overlapping_constraints(high_res_masks)
+                    memory, positions, features, feature_positions = self._run_memory_encoder(
+                        inference_state=state, frame_idx=frame_idx, batch_size=batch_size,
+                        high_res_masks=high_res_masks,
+                        object_score_logits=object_scores,
+                        is_mask_from_pts=True,
+                        conditioning_objects=output["conditioning_objects"],
+                    )
+                    output["maskmem_features"] = memory
+                    output["maskmem_pos_enc"] = positions
+                    output["image_features"] = features
+                    output["image_pos_enc"] = feature_positions
+                _eval_tree(output)
+                self._add_output_per_object(state, frame_idx, output, storage_key)
+                consolidated[storage_key].add(frame_idx)
+                if self.clear_non_cond_mem_around_input and (
+                    self.clear_non_cond_mem_for_multi_obj or batch_size <= 1
+                ):
+                    self._clear_non_cond_mem_around_input(state, frame_idx)
+            for object_outputs in temporary.values():
+                object_outputs[storage_key].clear()
+
+        for frame_idx in outputs["cond_frame_outputs"]:
+            outputs["non_cond_frame_outputs"].pop(frame_idx, None)
+            consolidated["non_cond_frame_outputs"].discard(frame_idx)
+        for object_outputs in state["output_dict_per_obj"].values():
+            for frame_idx in object_outputs["cond_frame_outputs"]:
+                object_outputs["non_cond_frame_outputs"].pop(frame_idx, None)
+        input_frames = {
+            frame_idx
+            for inputs in (state["point_inputs_per_obj"], state["mask_inputs_per_obj"])
+            for frames in inputs.values()
+            for frame_idx in frames
+        }
+        if consolidated["cond_frame_outputs"] | consolidated["non_cond_frame_outputs"] != input_frames:
+            raise ValueError("Consolidated frames must match point and mask input frames.")
+        if state["first_ann_frame_idx"] not in outputs["cond_frame_outputs"]:
+            state["first_ann_frame_idx"] = min(outputs["cond_frame_outputs"], default=None)
+
     def propagate_in_video(
         self,
         inference_state: MultiplexDemoState,

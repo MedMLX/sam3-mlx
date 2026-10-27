@@ -300,6 +300,62 @@ def test_sam3_demo_propagate_accepts_multiplex_preflight_keyword() -> None:
     )
 
 
+@pytest.mark.parametrize("run_mem_encoder", [False, True])
+def test_demo_preflight_preserves_pending_prompts_and_encodes_joint_memory(
+    run_mem_encoder: bool,
+) -> None:
+    model = _demo_model(Sam3VideoTrackingMultiplexDemo)
+    state = _state(num_frames=1)
+    stage = _stage([7.0, 8.0])
+    stage["conditioning_objects"] = {0, 1}
+    stage["maskmem_features"] = None
+    state["output_dict"]["cond_frame_outputs"][0] = stage
+    for index, value in enumerate([2.0, 3.0]):
+        state["point_inputs_per_obj"][index][0] = {
+            "point_coords": mx.zeros((1, 1, 2)),
+            "point_labels": mx.ones((1, 1), dtype=mx.int32),
+        }
+        state["temp_output_dict_per_obj"][index]["cond_frame_outputs"][0] = {
+            "pred_masks_video_res": mx.full((1, 1, 4, 4), value),
+        }
+
+    encoded: list[mx.array] = []
+
+    def encode_memory(
+        inference_state: DemoState,
+        frame_idx: int,
+        batch_size: int,
+        high_res_masks: mx.array,
+        object_score_logits: mx.array,
+        is_mask_from_pts: bool,
+        conditioning_objects: set[int] | None = None,
+    ) -> tuple[mx.array, list[mx.array], mx.array, mx.array]:
+        del inference_state, frame_idx, batch_size, object_score_logits
+        assert is_mask_from_pts and conditioning_objects == {0, 1}
+        encoded.append(high_res_masks)
+        memory = mx.ones((1, 2, 2, 2))
+        return memory, [memory], memory, memory
+
+    setattr(model, "_run_memory_encoder", encode_memory)
+    outputs = list(model.propagate_in_video(
+        state, start_frame_idx=0, max_frame_num_to_track=0,
+        run_mem_encoder=run_mem_encoder, propagate_preflight=True,
+    ))
+    np.testing.assert_array_equal(
+        to_numpy(outputs[0][2][:, :, 0, 0]), np.array([[2.0], [3.0]])
+    )
+    assert state["consolidated_frame_inds"]["cond_frame_outputs"] == {0}
+    assert (stage["maskmem_features"] is not None) == run_mem_encoder
+    assert len(encoded) == int(run_mem_encoder)
+    if encoded:
+        np.testing.assert_array_equal(
+            to_numpy(encoded[0][:, :, 0, 0]), np.array([[-10.0], [3.0]])
+        )
+    # Repeating preflight reuses the committed memory rather than re-encoding.
+    model.propagate_in_video_preflight(state, run_mem_encoder=run_mem_encoder)
+    assert len(encoded) == int(run_mem_encoder)
+
+
 def test_sam3_demo_propagate_filters_object_scores() -> None:
     model = _demo_model(Sam3VideoTrackingMultiplexDemo)
     state = _state(num_frames=1)
