@@ -300,6 +300,14 @@ def _validate_sequence(value: object, *, repo_root: Path) -> dict[str, object]:
             )
         if event.get("propagation") not in {"forward", "backward", "both", "none"}:
             raise ValueError(f"Event {event_id} must pin propagation direction.")
+        if "propagation_end_frame" in event:
+            end_frame = _require_frame_index(
+                event["propagation_end_frame"],
+                field=f"event {event_id} propagation_end_frame",
+                frame_count=frame_count,
+            )
+            if end_frame < frame_index or event["propagation"] not in {"forward", "both"}:
+                raise ValueError(f"Event {event_id} propagation_end_frame requires a forward range.")
         event_by_id[event_id] = event
     if not events:
         raise ValueError(f"Sequence {sequence_id} must define prompt events.")

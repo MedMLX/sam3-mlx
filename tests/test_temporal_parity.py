@@ -92,8 +92,9 @@ def _sequence() -> dict[str, object]:
     }
 
 
+@pytest.mark.parametrize("invalid_field", ["parent_event_id", "propagation_end_frame"])
 def test_load_temporal_manifest_validates_asset_and_prompt_lineage(
-    tmp_path: Path,
+    tmp_path: Path, invalid_field: str,
 ) -> None:
     asset = tmp_path / "assets" / "crossing.npz"
     asset.parent.mkdir()
@@ -101,7 +102,9 @@ def test_load_temporal_manifest_validates_asset_and_prompt_lineage(
     sequence = _sequence()
     events = require_list(sequence["prompt_events"], "prompt events")
     second_event = dict(require_mapping(events[1], "second prompt event"))
-    second_event["parent_event_id"] = "red-initial"
+    second_event[invalid_field] = (
+        "red-initial" if invalid_field == "parent_event_id" else 0
+    )
     events[1] = second_event
     manifest = {
         "schema_version": 1,
@@ -112,7 +115,8 @@ def test_load_temporal_manifest_validates_asset_and_prompt_lineage(
     path = tmp_path / "manifest.json"
     path.write_text(json.dumps(manifest))
 
-    with pytest.raises(ValueError, match="same semantic object"):
+    message = "same semantic object" if invalid_field == "parent_event_id" else "forward range"
+    with pytest.raises(ValueError, match=message):
         load_temporal_manifest(path, repo_root=tmp_path)
 
 

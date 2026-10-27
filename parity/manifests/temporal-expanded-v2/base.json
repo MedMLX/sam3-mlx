@@ -1,0 +1,365 @@
+{
+  "schema_version": 1,
+  "corpus_id": "sam31-expanded-diagnostic-v2",
+  "asset_policy": "Pinned upstream example videos and explicitly derived visibility stress; calibration only. Presence denotes required output after prompting, not annotation accuracy.",
+  "sequences": [
+    {
+      "sequence_id": "dancers-add-correct-12",
+      "asset": "dancers.npz",
+      "source": "https://github.com/facebookresearch/sam3/tree/2814fa619404a722d03e9a012e083e4f293a4e53/assets/videos/0001",
+      "frame_count": 12,
+      "frame_range": [
+        0,
+        11
+      ],
+      "coordinate_convention": "normalized_xy",
+      "decode": {
+        "format": "numpy-npz",
+        "array": "frames",
+        "color": "RGB"
+      },
+      "split": "calibration",
+      "scenario_tags": [
+        "box-seeded",
+        "later-object",
+        "positive-negative-correction"
+      ],
+      "objects": [
+        {
+          "semantic_id": "white-shirt",
+          "presence_intervals": [
+            [
+              0,
+              11
+            ]
+          ]
+        },
+        {
+          "semantic_id": "purple-shirt",
+          "presence_intervals": [
+            [
+              4,
+              11
+            ]
+          ]
+        }
+      ],
+      "prompt_events": [
+        {
+          "event_id": "white-box",
+          "frame_index": 0,
+          "operation": "initial_box",
+          "semantic_id": "white-shirt",
+          "coordinates": [
+            0.48,
+            0.35,
+            0.28,
+            0.65
+          ],
+          "labels": [
+            1
+          ],
+          "propagation": "forward",
+          "propagation_end_frame": 11
+        },
+        {
+          "event_id": "purple-add",
+          "frame_index": 4,
+          "operation": "add_object_point",
+          "semantic_id": "purple-shirt",
+          "coordinates": [
+            [
+              0.9,
+              0.35
+            ]
+          ],
+          "labels": [
+            1
+          ],
+          "propagation": "forward",
+          "propagation_end_frame": 11
+        },
+        {
+          "event_id": "white-correct",
+          "frame_index": 8,
+          "operation": "positive_negative_correction",
+          "semantic_id": "white-shirt",
+          "coordinates": [
+            [
+              0.6,
+              0.68
+            ],
+            [
+              0.9,
+              0.35
+            ]
+          ],
+          "labels": [
+            1,
+            0
+          ],
+          "parent_event_id": "white-box",
+          "propagation": "forward",
+          "propagation_end_frame": 11
+        }
+      ]
+    },
+    {
+      "sequence_id": "bedroom-add-correct-20",
+      "asset": "bedroom-20.npz",
+      "source": "https://github.com/facebookresearch/sam3/blob/2814fa619404a722d03e9a012e083e4f293a4e53/assets/videos/bedroom.mp4",
+      "source_frame_indices": [
+        0,
+        10,
+        20,
+        30,
+        40,
+        50,
+        60,
+        70,
+        80,
+        90,
+        100,
+        110,
+        120,
+        130,
+        140,
+        150,
+        160,
+        170,
+        180,
+        190
+      ],
+      "frame_count": 20,
+      "frame_range": [
+        0,
+        19
+      ],
+      "coordinate_convention": "normalized_xy",
+      "decode": {
+        "format": "numpy-npz",
+        "array": "frames",
+        "color": "RGB"
+      },
+      "split": "calibration",
+      "scenario_tags": [
+        "box-seeded",
+        "later-object",
+        "positive-negative-correction",
+        "camera-motion",
+        "partial-occlusion"
+      ],
+      "objects": [
+        {
+          "semantic_id": "blue-dress",
+          "presence_intervals": [
+            [
+              0,
+              19
+            ]
+          ]
+        },
+        {
+          "semantic_id": "black-sleeves",
+          "presence_intervals": [
+            [
+              13,
+              19
+            ]
+          ]
+        }
+      ],
+      "prompt_events": [
+        {
+          "event_id": "girl-box",
+          "frame_index": 0,
+          "operation": "initial_box",
+          "semantic_id": "blue-dress",
+          "coordinates": [
+            0.3,
+            0.02,
+            0.28,
+            0.86
+          ],
+          "labels": [
+            1
+          ],
+          "propagation": "forward",
+          "propagation_end_frame": 19
+        },
+        {
+          "event_id": "boy-add",
+          "frame_index": 13,
+          "operation": "add_object_point",
+          "semantic_id": "black-sleeves",
+          "coordinates": [
+            [
+              0.07,
+              0.67
+            ]
+          ],
+          "labels": [
+            1
+          ],
+          "propagation": "forward",
+          "propagation_end_frame": 19
+        },
+        {
+          "event_id": "girl-correct",
+          "frame_index": 18,
+          "operation": "positive_negative_correction",
+          "semantic_id": "blue-dress",
+          "coordinates": [
+            [
+              0.43,
+              0.43
+            ],
+            [
+              0.13,
+              0.4
+            ]
+          ],
+          "labels": [
+            1,
+            0
+          ],
+          "parent_event_id": "girl-box",
+          "propagation": "forward",
+          "propagation_end_frame": 19
+        }
+      ]
+    },
+    {
+      "sequence_id": "dancers-unprompted-reentry-12",
+      "asset": "dancers-interruption.npz",
+      "source": "https://github.com/facebookresearch/sam3/tree/2814fa619404a722d03e9a012e083e4f293a4e53/assets/videos/0001",
+      "frame_count": 12,
+      "frame_range": [
+        0,
+        11
+      ],
+      "coordinate_convention": "normalized_xy",
+      "decode": {
+        "format": "numpy-npz",
+        "array": "frames",
+        "color": "RGB"
+      },
+      "split": "calibration",
+      "scenario_tags": [
+        "box-seeded",
+        "controlled-exit",
+        "unprompted-re-entry"
+      ],
+      "objects": [
+        {
+          "semantic_id": "white-shirt",
+          "presence_intervals": [
+            [
+              0,
+              5
+            ],
+            [
+              9,
+              11
+            ]
+          ]
+        }
+      ],
+      "prompt_events": [
+        {
+          "event_id": "white-box",
+          "frame_index": 0,
+          "operation": "initial_box",
+          "semantic_id": "white-shirt",
+          "coordinates": [
+            0.48,
+            0.35,
+            0.28,
+            0.65
+          ],
+          "labels": [
+            1
+          ],
+          "propagation": "forward",
+          "propagation_end_frame": 11
+        }
+      ],
+      "derivation": "Frames 6-8 replaced with black RGB to force target absence; controlled visibility stress, not a natural exit."
+    },
+    {
+      "sequence_id": "dancers-prompted-reentry-12",
+      "asset": "dancers-interruption.npz",
+      "source": "https://github.com/facebookresearch/sam3/tree/2814fa619404a722d03e9a012e083e4f293a4e53/assets/videos/0001",
+      "frame_count": 12,
+      "frame_range": [
+        0,
+        11
+      ],
+      "coordinate_convention": "normalized_xy",
+      "decode": {
+        "format": "numpy-npz",
+        "array": "frames",
+        "color": "RGB"
+      },
+      "split": "calibration",
+      "scenario_tags": [
+        "box-seeded",
+        "controlled-exit",
+        "prompted-re-entry"
+      ],
+      "objects": [
+        {
+          "semantic_id": "white-shirt",
+          "presence_intervals": [
+            [
+              0,
+              5
+            ],
+            [
+              9,
+              11
+            ]
+          ]
+        }
+      ],
+      "prompt_events": [
+        {
+          "event_id": "white-box",
+          "frame_index": 0,
+          "operation": "initial_box",
+          "semantic_id": "white-shirt",
+          "coordinates": [
+            0.48,
+            0.35,
+            0.28,
+            0.65
+          ],
+          "labels": [
+            1
+          ],
+          "propagation": "forward",
+          "propagation_end_frame": 11
+        },
+        {
+          "event_id": "white-reentry",
+          "frame_index": 9,
+          "operation": "point_refinement",
+          "semantic_id": "white-shirt",
+          "coordinates": [
+            [
+              0.6,
+              0.68
+            ]
+          ],
+          "labels": [
+            1
+          ],
+          "parent_event_id": "white-box",
+          "propagation": "forward",
+          "propagation_end_frame": 11
+        }
+      ],
+      "derivation": "Frames 6-8 replaced with black RGB to force target absence; controlled visibility stress, not a natural exit."
+    }
+  ]
+}

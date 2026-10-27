@@ -48,7 +48,7 @@ class _FakeTemporalModel:
         self,
         *,
         start_frame_idx: int,
-        max_frame_num_to_track: int,
+        max_frame_num_to_track: int | None,
         reverse: bool,
         **kwargs: object,
     ) -> Iterator[tuple[int, dict[str, object]]]:
@@ -60,9 +60,13 @@ class _FakeTemporalModel:
             "count": max_frame_num_to_track,
         }
         direction = -1 if reverse else 1
+        frame_count = state["frame_count"]
+        assert isinstance(frame_count, int)
+        distance = frame_count if max_frame_num_to_track is None else max_frame_num_to_track
         return (
             self._output(start_frame_idx + direction * offset)
-            for offset in range(max_frame_num_to_track + 1)
+            for offset in range(distance + 1)
+            if 0 <= start_frame_idx + direction * offset < frame_count
         )
 
     def remove_object(
@@ -75,7 +79,10 @@ class _FakeTemporalModel:
         self.object_ids.clear()
 
 
-def test_runtime_adapter_applies_later_object_prompt_without_id_rematching() -> None:
+@pytest.mark.parametrize("full_pass", [False, True])
+def test_runtime_adapter_applies_later_object_prompt_without_id_rematching(
+    full_pass: bool,
+) -> None:
     sequence = {
         "frame_count": 4,
         "objects": [
@@ -91,6 +98,7 @@ def test_runtime_adapter_applies_later_object_prompt_without_id_rematching() -> 
                 "coordinates": [[0.25, 0.25]],
                 "labels": [1],
                 "propagation": "forward",
+                **({"propagation_end_frame": 3} if full_pass else {}),
             },
             {
                 "event_id": "blue-add",
@@ -105,14 +113,19 @@ def test_runtime_adapter_applies_later_object_prompt_without_id_rematching() -> 
     }
     frames = [Image.new("RGB", (4, 4)) for _ in range(4)]
 
+    observations: list[temporal_runtime.TemporalPropagationObservation] = []
     run = run_temporal_model(
         _FakeTemporalModel(),
         sequence,
         frames,
         offload_video_to_cpu=False,
+        propagation_observer=observations.append,
     )
 
     assert run.state == "passed"
+    assert observations[0].completed_frame_indices == (
+        (0, 1, 2, 3) if full_pass else (0, 1)
+    )
     assert tuple(frame.frame_index for frame in run.frames) == (0, 1, 2, 3)
     assert tuple(run.frames[0].tracks) == ("red",)
     assert tuple(run.frames[2].tracks) == ("red", "blue")

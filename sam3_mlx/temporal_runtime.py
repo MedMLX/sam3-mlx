@@ -59,7 +59,7 @@ class TemporalModel[StateT: Mapping[str, object]](Protocol):
         *,
         inference_state: StateT,
         start_frame_idx: int,
-        max_frame_num_to_track: int,
+        max_frame_num_to_track: int | None,
         reverse: bool,
         is_last_batch: bool,
     ) -> Iterable[object]: ...
@@ -288,6 +288,7 @@ def _propagate[StateT: Mapping[str, object]](
     *,
     start_frame: int,
     end_frame: int,
+    num_frames: int,
     reverse: bool,
     synchronize: Callable[[], None] | None,
     frame_observer: Callable[[TemporalFrameOutput], None] | None,
@@ -305,7 +306,12 @@ def _propagate[StateT: Mapping[str, object]](
         model.propagate_in_video(
             inference_state=inference_state,
             start_frame_idx=start_frame,
-            max_frame_num_to_track=distance,
+            # Upstream's bounded detector treats the count as exclusive while
+            # its tracker treats it as inclusive. An unbounded full pass uses
+            # the correct terminal frame's features in both implementations.
+            max_frame_num_to_track=(
+                None if end_frame == (0 if reverse else num_frames - 1) else distance
+            ),
             reverse=reverse,
             is_last_batch=True,
         )
@@ -358,6 +364,9 @@ def run_temporal_model[StateT: Mapping[str, object]](
     semantic ID, which is mapped to each backend's runtime object ID, so results
     from different backends can be compared by identity. ``synchronize`` is
     called before and after timed sections (use it to drain device work).
+    Forward propagation normally ends before the next event. An event may pin
+    ``propagation_end_frame`` to finish an initial pass before applying later
+    corrections, which require the official predictor's cached frame outputs.
 
     A ``RuntimeError`` from the model yields a ``TemporalRun`` with
     ``state="failed"`` and the frames recorded so far, unless ``raise_on_error``;
@@ -509,6 +518,7 @@ def run_temporal_model[StateT: Mapping[str, object]](
                     semantic_to_runtime,
                     start_frame=frame_index,
                     end_frame=0,
+                    num_frames=len(frames),
                     reverse=True,
                     synchronize=synchronize,
                     frame_observer=frame_observer,
@@ -519,6 +529,13 @@ def run_temporal_model[StateT: Mapping[str, object]](
                 if event_index + 1 < len(events)
                 else len(frames)
             )
+            end_frame = event.get("propagation_end_frame", next_frame - 1)
+            if not isinstance(end_frame, int) or isinstance(end_frame, bool):
+                raise ValueError("propagation_end_frame must be an integer.")
+            if "propagation_end_frame" in event and not (
+                frame_index <= end_frame < len(frames)
+            ):
+                raise ValueError("propagation_end_frame must be within the forward frame range.")
             if operation == "reset":
                 for empty_frame_index in range(frame_index, next_frame):
                     records[empty_frame_index] = _empty_frame(
@@ -529,14 +546,15 @@ def run_temporal_model[StateT: Mapping[str, object]](
                     )
                     if frame_observer is not None:
                         frame_observer(records[empty_frame_index])
-            if propagation in {"forward", "both"} and next_frame > frame_index:
+            if propagation in {"forward", "both"} and end_frame >= frame_index:
                 _propagate(
                     model,
                     inference_state,
                     records,
                     semantic_to_runtime,
                     start_frame=frame_index,
-                    end_frame=next_frame - 1,
+                    end_frame=end_frame,
+                    num_frames=len(frames),
                     reverse=False,
                     synchronize=synchronize,
                     frame_observer=frame_observer,

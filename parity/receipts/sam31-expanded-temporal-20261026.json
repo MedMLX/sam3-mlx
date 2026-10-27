@@ -1,0 +1,323 @@
+{
+  "scope": "Expanded SAM3.1 temporal characterization, including retained shared and port-specific failures",
+  "official_revision": "2814fa619404a722d03e9a012e083e4f293a4e53",
+  "manifest_directory": "parity/manifests/temporal-expanded-v2",
+  "checkpoints": [
+    "sam3.1_multiplex.pt",
+    "sam3.1-mlx-raw/model.safetensors"
+  ],
+  "settings": {
+    "use_batched_grounding": false,
+    "use_fa3": false,
+    "use_rope_real": false,
+    "official_precision": "cuda-bf16",
+    "mlx_precision": "fp32"
+  },
+  "coverage": {
+    "source_videos": 2,
+    "sequences": 7,
+    "frames": 98,
+    "quality_passed_sequences": 3,
+    "identity_parity_passed_sequences": 7,
+    "scenarios": [
+      "box and point seeds",
+      "later object additions",
+      "positive and negative corrections",
+      "controlled disappearance",
+      "natural exit",
+      "prompted and unprompted re-entry"
+    ]
+  },
+  "harness_regressions": {
+    "before": "The first pass stopped before the later edit, leaving official cached frames unavailable. A bounded full pass also reused the previous frame features at the terminal frame.",
+    "after": "Optional propagation_end_frame finishes a pass before later edits. Full-video ranges use an unbounded predictor call. Dancers additions/corrections and both controlled re-entry comparisons pass.",
+    "unit_test": "The full-pass prompt-timeline regression failed before and passed after."
+  },
+  "validation": {
+    "tests": "524 passed, 6 skipped",
+    "qa": "Ruff and strict Pyright passed"
+  },
+  "limits": [
+    "The corpus uses upstream examples for calibration; it is not an independent holdout or clinical qualification.",
+    "The bedroom target is lost in both predictors before correction; masks still diverge at the later correction.",
+    "The sampled natural exit sequence loses the target early in both predictors. Both miss unprompted re-entry; a re-entry point recovers it.",
+    "Controlled black frames are labeled explicitly and are separate from the natural exit footage."
+  ],
+  "sequences": [
+    {
+      "sequence_id": "dancers-add-correct-12",
+      "frame_count": 12,
+      "quality_gate": "passed",
+      "mask_or_presence_divergences": [],
+      "quality_failure_frames": [],
+      "min_nonempty_iou": 0.9967786082745552,
+      "identity_parity": "passed",
+      "official_identity": {
+        "lifecycle": {},
+        "violations": {},
+        "violation_count": 0,
+        "first_violation_frame": null
+      },
+      "mlx_identity": {
+        "lifecycle": {},
+        "violations": {},
+        "violation_count": 0,
+        "first_violation_frame": null
+      }
+    },
+    {
+      "sequence_id": "bedroom-add-correct-20",
+      "frame_count": 20,
+      "quality_gate": "failed",
+      "mask_or_presence_divergences": [
+        {
+          "frame": 18,
+          "object": "blue-dress",
+          "iou": 0.36033282390898286,
+          "official_pixels": 29445,
+          "mlx_pixels": 10610
+        },
+        {
+          "frame": 19,
+          "object": "blue-dress",
+          "iou": 0.30687181061274604,
+          "official_pixels": 26063,
+          "mlx_pixels": 7998
+        }
+      ],
+      "quality_failure_frames": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12,
+        13,
+        14,
+        15,
+        16,
+        17,
+        18,
+        19
+      ],
+      "min_nonempty_iou": 0.30687181061274604,
+      "identity_parity": "passed",
+      "official_identity": {
+        "lifecycle": {},
+        "violations": {},
+        "violation_count": 0,
+        "first_violation_frame": null
+      },
+      "mlx_identity": {
+        "lifecycle": {},
+        "violations": {},
+        "violation_count": 0,
+        "first_violation_frame": null
+      }
+    },
+    {
+      "sequence_id": "dancers-unprompted-reentry-12",
+      "frame_count": 12,
+      "quality_gate": "passed",
+      "mask_or_presence_divergences": [],
+      "quality_failure_frames": [],
+      "min_nonempty_iou": 0.9967786082745552,
+      "identity_parity": "passed",
+      "official_identity": {
+        "lifecycle": {
+          "expected_exit_events": 1,
+          "successful_exit_events": 1,
+          "expected_reacquisition_events": 1,
+          "successful_reacquisition_events": 1
+        },
+        "violations": {},
+        "violation_count": 0,
+        "first_violation_frame": null
+      },
+      "mlx_identity": {
+        "lifecycle": {
+          "expected_exit_events": 1,
+          "successful_exit_events": 1,
+          "expected_reacquisition_events": 1,
+          "successful_reacquisition_events": 1
+        },
+        "violations": {},
+        "violation_count": 0,
+        "first_violation_frame": null
+      }
+    },
+    {
+      "sequence_id": "dancers-prompted-reentry-12",
+      "frame_count": 12,
+      "quality_gate": "passed",
+      "mask_or_presence_divergences": [],
+      "quality_failure_frames": [],
+      "min_nonempty_iou": 0.9953436273420722,
+      "identity_parity": "passed",
+      "official_identity": {
+        "lifecycle": {
+          "expected_exit_events": 1,
+          "successful_exit_events": 1,
+          "expected_reacquisition_events": 1,
+          "successful_reacquisition_events": 1
+        },
+        "violations": {},
+        "violation_count": 0,
+        "first_violation_frame": null
+      },
+      "mlx_identity": {
+        "lifecycle": {
+          "expected_exit_events": 1,
+          "successful_exit_events": 1,
+          "expected_reacquisition_events": 1,
+          "successful_reacquisition_events": 1
+        },
+        "violations": {},
+        "violation_count": 0,
+        "first_violation_frame": null
+      }
+    },
+    {
+      "sequence_id": "bedroom-point-add-correct-20",
+      "frame_count": 20,
+      "quality_gate": "failed",
+      "mask_or_presence_divergences": [
+        {
+          "frame": 18,
+          "object": "blue-dress",
+          "iou": 0.36033282390898286,
+          "official_pixels": 29445,
+          "mlx_pixels": 10610
+        }
+      ],
+      "quality_failure_frames": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12,
+        13,
+        14,
+        15,
+        16,
+        17,
+        18
+      ],
+      "min_nonempty_iou": 0.36033282390898286,
+      "identity_parity": "passed",
+      "official_identity": {
+        "lifecycle": {},
+        "violations": {
+          "fragmentations": 1,
+          "lost_track_events": 1
+        },
+        "violation_count": 2,
+        "first_violation_frame": 1
+      },
+      "mlx_identity": {
+        "lifecycle": {},
+        "violations": {
+          "fragmentations": 1,
+          "lost_track_events": 1
+        },
+        "violation_count": 2,
+        "first_violation_frame": 1
+      }
+    },
+    {
+      "sequence_id": "dancers-natural-unprompted-reentry-11",
+      "frame_count": 11,
+      "quality_gate": "failed",
+      "mask_or_presence_divergences": [],
+      "quality_failure_frames": [
+        1,
+        2,
+        7,
+        8,
+        9,
+        10
+      ],
+      "min_nonempty_iou": 0.9978280891308232,
+      "identity_parity": "passed",
+      "official_identity": {
+        "lifecycle": {
+          "expected_exit_events": 1,
+          "successful_exit_events": 1,
+          "expected_reacquisition_events": 1
+        },
+        "violations": {
+          "lost_track_events": 1,
+          "missed_reacquisition_events": 1
+        },
+        "violation_count": 2,
+        "first_violation_frame": 1
+      },
+      "mlx_identity": {
+        "lifecycle": {
+          "expected_exit_events": 1,
+          "successful_exit_events": 1,
+          "expected_reacquisition_events": 1
+        },
+        "violations": {
+          "lost_track_events": 1,
+          "missed_reacquisition_events": 1
+        },
+        "violation_count": 2,
+        "first_violation_frame": 1
+      }
+    },
+    {
+      "sequence_id": "dancers-natural-prompted-reentry-11",
+      "frame_count": 11,
+      "quality_gate": "failed",
+      "mask_or_presence_divergences": [],
+      "quality_failure_frames": [
+        1,
+        2
+      ],
+      "min_nonempty_iou": 0.9978280891308232,
+      "identity_parity": "passed",
+      "official_identity": {
+        "lifecycle": {
+          "expected_exit_events": 1,
+          "successful_exit_events": 1,
+          "expected_reacquisition_events": 1,
+          "successful_reacquisition_events": 1
+        },
+        "violations": {
+          "lost_track_events": 1
+        },
+        "violation_count": 1,
+        "first_violation_frame": 1
+      },
+      "mlx_identity": {
+        "lifecycle": {
+          "expected_exit_events": 1,
+          "successful_exit_events": 1,
+          "expected_reacquisition_events": 1,
+          "successful_reacquisition_events": 1
+        },
+        "violations": {
+          "lost_track_events": 1
+        },
+        "violation_count": 1,
+        "first_violation_frame": 1
+      }
+    }
+  ],
+  "local_evidence": "benchmarks/results/sam31-expanded-20261026"
+}

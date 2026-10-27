@@ -1,0 +1,163 @@
+{
+  "schema_version": 1,
+  "corpus_id": "sam31-expanded-diagnostic-v2",
+  "asset_policy": "Pinned upstream example videos and explicitly derived visibility stress; calibration only. Presence denotes required output after prompting, not annotation accuracy.",
+  "sequences": [
+    {
+      "sequence_id": "dancers-natural-unprompted-reentry-11",
+      "asset": "dancers-natural-reentry.npz",
+      "source": "https://github.com/facebookresearch/sam3/tree/2814fa619404a722d03e9a012e083e4f293a4e53/assets/videos/0001",
+      "frame_count": 11,
+      "frame_range": [
+        0,
+        10
+      ],
+      "coordinate_convention": "normalized_xy",
+      "decode": {
+        "format": "numpy-npz",
+        "array": "frames",
+        "color": "RGB"
+      },
+      "split": "calibration",
+      "scenario_tags": [
+        "point-seeded",
+        "natural-exit",
+        "unprompted-re-entry"
+      ],
+      "objects": [
+        {
+          "semantic_id": "purple-shirt",
+          "presence_intervals": [
+            [
+              0,
+              2
+            ],
+            [
+              7,
+              10
+            ]
+          ]
+        }
+      ],
+      "prompt_events": [
+        {
+          "event_id": "purple-point",
+          "frame_index": 0,
+          "operation": "initial_point",
+          "semantic_id": "purple-shirt",
+          "coordinates": [
+            [
+              0.9,
+              0.35
+            ]
+          ],
+          "labels": [
+            1
+          ],
+          "propagation": "forward",
+          "propagation_end_frame": 10
+        }
+      ],
+      "source_frame_indices": [
+        0,
+        10,
+        20,
+        40,
+        80,
+        120,
+        160,
+        200,
+        210,
+        220,
+        230
+      ]
+    },
+    {
+      "sequence_id": "dancers-natural-prompted-reentry-11",
+      "asset": "dancers-natural-reentry.npz",
+      "source": "https://github.com/facebookresearch/sam3/tree/2814fa619404a722d03e9a012e083e4f293a4e53/assets/videos/0001",
+      "frame_count": 11,
+      "frame_range": [
+        0,
+        10
+      ],
+      "coordinate_convention": "normalized_xy",
+      "decode": {
+        "format": "numpy-npz",
+        "array": "frames",
+        "color": "RGB"
+      },
+      "split": "calibration",
+      "scenario_tags": [
+        "point-seeded",
+        "natural-exit",
+        "prompted-re-entry"
+      ],
+      "objects": [
+        {
+          "semantic_id": "purple-shirt",
+          "presence_intervals": [
+            [
+              0,
+              2
+            ],
+            [
+              7,
+              10
+            ]
+          ]
+        }
+      ],
+      "prompt_events": [
+        {
+          "event_id": "purple-point",
+          "frame_index": 0,
+          "operation": "initial_point",
+          "semantic_id": "purple-shirt",
+          "coordinates": [
+            [
+              0.9,
+              0.35
+            ]
+          ],
+          "labels": [
+            1
+          ],
+          "propagation": "forward",
+          "propagation_end_frame": 10
+        },
+        {
+          "event_id": "purple-reentry",
+          "frame_index": 7,
+          "operation": "point_refinement",
+          "semantic_id": "purple-shirt",
+          "coordinates": [
+            [
+              0.9,
+              0.4
+            ]
+          ],
+          "labels": [
+            1
+          ],
+          "parent_event_id": "purple-point",
+          "propagation": "forward",
+          "propagation_end_frame": 10
+        }
+      ],
+      "source_frame_indices": [
+        0,
+        10,
+        20,
+        40,
+        80,
+        120,
+        160,
+        200,
+        210,
+        220,
+        230
+      ]
+    }
+  ]
+}
