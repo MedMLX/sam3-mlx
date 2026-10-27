@@ -1,10 +1,12 @@
 from sam3_mlx.mlx_runtime import to_numpy
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
 import mlx.core as mx
 from mlx import nn
+from numpy.typing import NDArray
 from hypothesis import given, strategies as st
 
 from sam3_mlx.checkpoint_loading import (
@@ -23,6 +25,7 @@ from sam3_mlx.checkpoint_mapping import (
     normalize_sam31_multiplex_weights,
     normalize_tracker_checkpoint_weights,
 )
+from sam3_mlx.model.sam3_image import Sam3Image
 from tests.checkpoint._factories import WeightLeaf
 
 
@@ -35,6 +38,26 @@ class _TinyCheckpointModel(nn.Module):
         self.head = nn.Linear(3, 2)
         self.scale = mx.ones((1,))
         self.checkpoint_load_report = None
+
+
+def _tiny_image_checkpoint_model(*, enable_segmentation: bool) -> Sam3Image:
+    return Sam3Image(
+        backbone=WeightLeaf((2,)),
+        transformer=SimpleNamespace(d_model=2),
+        input_geometry_encoder=nn.Module(),
+        segmentation_head=WeightLeaf((1,)) if enable_segmentation else None,
+        use_dot_prod_scoring=False,
+    )
+
+
+@pytest.fixture
+def image_checkpoint_values() -> dict[str, NDArray[np.float32]]:
+    return {
+        "backbone.weight": np.array([2.0, 3.0], dtype=np.float32),
+        "class_embed.weight": np.array([[4.0, 5.0]], dtype=np.float32),
+        "class_embed.bias": np.array([6.0], dtype=np.float32),
+        "segmentation_head.weight": np.array([7.0], dtype=np.float32),
+    }
 
 
 class _Sam2ConvStage(nn.Module):
@@ -173,7 +196,10 @@ def test_load_checkpoint_allows_explicit_development_partial_load(
     )
 
 
-def test_load_checkpoint_rejects_unreviewed_source_weight(tmp_path: Path) -> None:
+@pytest.mark.parametrize("extra_key", ["unexpected.weight", "segmentation_head.weight"])
+def test_load_checkpoint_rejects_unreviewed_source_weight(
+    tmp_path: Path, extra_key: str,
+) -> None:
     model = _TinyCheckpointModel()
     checkpoint_path = tmp_path / "unexpected.safetensors"
     save_safetensors(
@@ -182,12 +208,83 @@ def test_load_checkpoint_rejects_unreviewed_source_weight(tmp_path: Path) -> Non
             "head.weight": mx.ones((2, 3)),
             "head.bias": mx.ones((2,)),
             "scale": mx.ones((1,)),
-            "unexpected.weight": mx.ones((1,)),
+            extra_key: mx.ones((1,)),
         },
     )
 
     with pytest.raises(ValueError, match="without a reviewed model mapping"):
         _load_checkpoint(model, checkpoint_path)
+
+
+@pytest.mark.parametrize("enable_segmentation", [False, True])
+def test_load_checkpoint_handles_optional_segmentation_head(
+    tmp_path: Path,
+    image_checkpoint_values: dict[str, NDArray[np.float32]],
+    enable_segmentation: bool,
+) -> None:
+    model = _tiny_image_checkpoint_model(enable_segmentation=enable_segmentation)
+    checkpoint_path = tmp_path / "image.safetensors"
+    save_safetensors(
+        checkpoint_path,
+        {key: mx.array(value) for key, value in image_checkpoint_values.items()},
+    )
+
+    report = _load_checkpoint(model, checkpoint_path)
+
+    assert report.extra == (() if enable_segmentation else ("segmentation_head.weight",))
+    assert report.missing == ()
+    assert report.shape_mismatched == ()
+    assert (model.segmentation_head is not None) == enable_segmentation
+    parameters = flatten_model_parameters(model)
+    for key, expected in image_checkpoint_values.items():
+        if key == "segmentation_head.weight" and not enable_segmentation:
+            continue
+        np.testing.assert_array_equal(to_numpy(parameters[key]), expected)
+
+
+@pytest.mark.parametrize(
+    ("enable_segmentation", "extra_key", "missing_key", "error"),
+    [
+        (False, "unexpected.weight", None, r"First unexpected key: unexpected\.weight"),
+        (
+            True,
+            "segmentation_head.unreviewed",
+            None,
+            r"First unexpected key: segmentation_head\.unreviewed",
+        ),
+        (True, None, "segmentation_head.weight", r"First missing key: segmentation_head\.weight"),
+        (False, None, "backbone.weight", r"First missing key: backbone\.weight"),
+    ],
+)
+def test_optional_segmentation_head_keeps_checkpoint_coverage_strict(
+    tmp_path: Path,
+    image_checkpoint_values: dict[str, NDArray[np.float32]],
+    enable_segmentation: bool,
+    extra_key: str | None,
+    missing_key: str | None,
+    error: str,
+) -> None:
+    model = _tiny_image_checkpoint_model(enable_segmentation=enable_segmentation)
+    original = {
+        key: to_numpy(value).copy()
+        for key, value in flatten_model_parameters(model).items()
+    }
+    if missing_key is not None:
+        del image_checkpoint_values[missing_key]
+    if extra_key is not None:
+        image_checkpoint_values[extra_key] = np.array([8.0], dtype=np.float32)
+    checkpoint_path = tmp_path / "invalid-image.safetensors"
+    save_safetensors(
+        checkpoint_path,
+        {key: mx.array(value) for key, value in image_checkpoint_values.items()},
+    )
+
+    with pytest.raises(ValueError, match=error):
+        _load_checkpoint(model, checkpoint_path)
+
+    parameters = flatten_model_parameters(model)
+    for key, expected in original.items():
+        np.testing.assert_array_equal(to_numpy(parameters[key]), expected)
 
 
 def test_load_checkpoint_rejects_shape_mismatch_without_partial_load(

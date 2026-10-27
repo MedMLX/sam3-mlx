@@ -176,13 +176,16 @@ def _validate_image_coverage(
     report: Sam3CheckpointLoadReport,
     checkpoint_path: CheckpointLabel,
 ) -> None:
-    # The image checkpoint also carries the tracker feature pyramid
-    # (``sam2_convs``), which is only built when the model is created with
-    # ``add_sam2_neck=True``. It is the one tolerated source-only group.
+    # Standard image checkpoints include the optional tracker feature pyramid
+    # (``sam2_convs``) and segmentation head even when those modules are omitted.
+    segmentation_disabled = (
+        isinstance(model, Sam3Image) and model.segmentation_head is None
+    )
     unexpected_source = tuple(
         key
         for key in report.extra
         if not key.startswith("backbone.vision_backbone.sam2_convs.")
+        and not (segmentation_disabled and key.startswith("segmentation_head."))
     )
     if unexpected_source:
         example = unexpected_source[0]
@@ -492,7 +495,9 @@ def load_image_checkpoint(
 
     Weights are normalized to the runtime key names and layouts, audited against
     the model, and loaded. With ``strict`` (default) every non-generated model
-    parameter must be covered and no unmapped source tensor may remain.
+    parameter must be covered and unmapped source tensors are rejected. Known
+    SAM2-neck tensors and, when an image model explicitly disables segmentation,
+    mask-head tensors may remain reported as extras.
     ``interactive_checkpoint_path`` adds the SAM1-style interactive-predictor
     weights from a second file and requires a model built with
     ``enable_inst_interactivity=True``. The audit is stored on
