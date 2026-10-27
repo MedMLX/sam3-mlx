@@ -26,6 +26,9 @@ uv pip install \
   "$release/sam3_mlx-0.1.3-py3-none-any.whl"
 ```
 
+The command above installs the tagged `v0.1.3` wheel. Fixes merged later to
+`main` are available from the source checkout.
+
 Weights download automatically; Hugging Face access to the official checkpoint is required.
 
 ```python

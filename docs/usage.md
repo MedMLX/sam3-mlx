@@ -180,8 +180,13 @@ With the tracker attached, a text or box prompt starts semantic detection and
 assigns persistent object IDs. Mask and point refinements can then target an
 existing ID. A fresh text or box prompt replaces the tracking session. Point
 refinement requires `obj_id`; points cannot include text or semantic boxes in
-the same call. Direct tracker refinement rejects `use_prev_mem_frame=True`.
-The SAM3.1 multiplex model does not expose the original SAM3 mask action.
+the same call. The SAM3.1 multiplex model does not expose the original SAM3 mask
+action.
+
+The direct tracker method `add_new_points_or_box` accepts
+`use_prev_mem_frame=True` to use stored conditioning and tracked memory on
+already tracked frames. The default is `False`; initial conditioning frames
+skip previous-frame memory attention.
 
 Manual seeds and refinements export confidence `1.0`; semantic detections retain
 their detector confidence. The tracker object probability resolves overlaps.
