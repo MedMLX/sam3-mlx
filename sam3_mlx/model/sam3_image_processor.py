@@ -433,7 +433,8 @@ def transform(
         img_np,
         (resolution, resolution),
     )
-    img_mx = mx.array(img_np, dtype=mx.float32) / 255.0  # [H, W, C]
+    # ToDtype scales by the FP32 reciprocal; division changes BF16 rounding at 127.
+    img_mx = mx.array(img_np, dtype=mx.float32) * (1.0 / 255.0)  # [H, W, C]
     img_mx = (img_mx - 0.5) / 0.5
     return mx.transpose(img_mx, (2, 0, 1))  # [H, W, C] -> [C, H, W]
 

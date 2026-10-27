@@ -1,0 +1,29 @@
+{
+  "scope": "TorchVision normalization rounding regression; BF16 model parity remains under investigation",
+  "official_revision": "2814fa619404a722d03e9a012e083e4f293a4e53",
+  "change": "Multiply by the FP32 reciprocal of 255, matching ToDtype; preserve FP32 as the runtime default.",
+  "regression": {
+    "pixel": 127,
+    "before_bf16": -0.003936767578125,
+    "official_and_after_bf16": -0.00390625,
+    "before": "failed: all 5292 values differed",
+    "after": "68 image processor tests passed"
+  },
+  "real_weights": {
+    "checkpoint": "mlx-community/sam3-image/model.safetensors",
+    "reference": "official-cuda-fp32.npz",
+    "manifest": "parity/manifests/expanded-images-v1.json",
+    "status": "passed",
+    "passed_cases": 56,
+    "case_count": 56,
+    "nonempty_reference_cases": 30,
+    "thresholds": {
+      "mask_iou_min": 0.95,
+      "mask_iou_mean_min": 0.99,
+      "box_l_inf_max": 2.0,
+      "score_abs_max": 0.025
+    }
+  },
+  "qa": "Ruff and strict Pyright passed",
+  "local_evidence": "benchmarks/results/sam3-bf16-20261026"
+}

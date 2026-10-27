@@ -413,6 +413,7 @@ def test_transform_matches_torchvision_on_synthetic_aspect_ratios_when_available
 
     rng = np.random.default_rng(20260820)
     for image in (
+        Image.fromarray(np.full((resolution, resolution, 3), 127, dtype=np.uint8)),
         _synthetic_rgb_image(7, 5),
         _synthetic_rgb_image(64, 21),
         _synthetic_rgb_image(21, 64),
@@ -435,9 +436,17 @@ def test_transform_matches_torchvision_on_synthetic_aspect_ratios_when_available
             _call_method(transformed_tensor, "numpy"),
             dtype=np.float32,
         )
-        local = to_numpy(transform(image, resolution=resolution))
+        local_tensor = transform(image, resolution=resolution)
+        local = to_numpy(local_tensor)
 
         np.testing.assert_allclose(local, official, rtol=0.0, atol=1e-6)
+        official_bf16 = _call_method(
+            transformed_tensor, "to", _attribute(torch_module, "bfloat16")
+        )
+        np.testing.assert_array_equal(
+            to_numpy(local_tensor.astype(mx.bfloat16).astype(mx.float32)),
+            to_numpy(_call_method(_call_method(official_bf16, "float"), "numpy")),
+        )
 
 
 @pytest.mark.parametrize(
