@@ -2,7 +2,7 @@
 
 Segment images from text and geometric prompts with an unofficial native MLX port of SAM 3.
 
-[Docs](docs/usage.md) · [MedMLX](https://github.com/MedMLX)
+[Docs](https://github.com/MedMLX/sam3-mlx/blob/main/docs/usage.md) · [MedMLX](https://github.com/MedMLX)
 
 ![Text prompts “person” and “helmet” → masks on a real photograph.](https://raw.githubusercontent.com/MedMLX/sam3-mlx/main/docs/showcase.png)
 
@@ -26,9 +26,6 @@ uv pip install \
   "$release/sam3_mlx-0.1.3-py3-none-any.whl"
 ```
 
-The command above installs the tagged `v0.1.3` wheel. Fixes merged later to
-`main` are available from the source checkout.
-
 Weights download automatically; Hugging Face access to the official checkpoint is required.
 
 ```python
@@ -48,6 +45,6 @@ Use a resolution divisible by 14. Selected-frame video runs each frame independe
 
 ## License
 
-SAM License; see [LICENSE](LICENSE) and [third-party notices](THIRD_PARTY_NOTICES.md). Unofficial port; not affiliated with Meta. Official checkpoints have separate access terms.
+SAM License; see [LICENSE](https://github.com/MedMLX/sam3-mlx/blob/main/LICENSE) and [third-party notices](https://github.com/MedMLX/sam3-mlx/blob/main/THIRD_PARTY_NOTICES.md). Unofficial port; not affiliated with Meta. Official checkpoints have separate access terms.
 
 For research and education. Outputs require human review.
