@@ -644,8 +644,8 @@ wheels = [
 
 [[package]]
 name = "medmlx-core"
-version = "0.2.3"
-source = { git = "https://github.com/MedMLX/medmlx.git?subdirectory=packages%2Fcore&rev=e765f0a94aa31e8dfcdc599e4a4206eaca84f8b0#e765f0a94aa31e8dfcdc599e4a4206eaca84f8b0" }
+version = "0.2.4"
+source = { git = "https://github.com/MedMLX/medmlx.git?subdirectory=packages%2Fcore&rev=f98e0924f50228e2b9509474947b9672054b3217#f98e0924f50228e2b9509474947b9672054b3217" }
 dependencies = [
     { name = "mlx", marker = "platform_machine == 'arm64' and sys_platform == 'darwin'" },
     { name = "numpy" },
@@ -1241,7 +1241,7 @@ wheels = [
 
 [[package]]
 name = "sam3-mlx"
-version = "0.1.4"
+version = "0.1.5"
 source = { editable = "." }
 dependencies = [
     { name = "ftfy" },
@@ -1278,7 +1278,7 @@ requires-dist = [
     { name = "ftfy", specifier = ">=6.3.1" },
     { name = "huggingface-hub", specifier = ">=1.1.6" },
     { name = "matplotlib", marker = "extra == 'viz'", specifier = ">=3.10.8" },
-    { name = "medmlx-core", git = "https://github.com/MedMLX/medmlx.git?subdirectory=packages%2Fcore&rev=e765f0a94aa31e8dfcdc599e4a4206eaca84f8b0" },
+    { name = "medmlx-core", git = "https://github.com/MedMLX/medmlx.git?subdirectory=packages%2Fcore&rev=f98e0924f50228e2b9509474947b9672054b3217" },
     { name = "mlx", specifier = ">=0.32.4,<0.33" },
     { name = "numpy", specifier = ">=2.3.5" },
     { name = "opencv-python-headless", marker = "extra == 'video'", specifier = ">=4.10.0" },

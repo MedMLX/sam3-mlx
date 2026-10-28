@@ -1,6 +1,6 @@
 [project]
 name = "sam3_mlx"
-version = "0.1.4"
+version = "0.1.5"
 description = "MLX port of Meta's Segment Anything 3 (SAM 3) for Apple Silicon."
 readme = "README.md"
 license = "LicenseRef-SAM AND MIT"
@@ -31,7 +31,7 @@ classifiers = [
 dependencies = [
     "ftfy>=6.3.1",
     "huggingface-hub>=1.1.6",
-    "medmlx-core==0.2.3",
+    "medmlx-core==0.2.4",
     "mlx>=0.32.4,<0.33",
     "numpy>=2.3.5",
     "pillow>=13,<14",
@@ -123,4 +123,4 @@ oracle = [
 constraint-dependencies = ["setuptools>=84.1.0", "filelock>=4.2.1", ]
 
 [tool.uv.sources]
-medmlx-core = { git = "https://github.com/MedMLX/medmlx.git", rev = "e765f0a94aa31e8dfcdc599e4a4206eaca84f8b0", subdirectory = "packages/core" }
+medmlx-core = { git = "https://github.com/MedMLX/medmlx.git", rev = "f98e0924f50228e2b9509474947b9672054b3217", subdirectory = "packages/core" }
