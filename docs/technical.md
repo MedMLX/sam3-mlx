@@ -127,8 +127,9 @@ tracker memory. `out_obj_ids` are frame-local. Cross-frame object removal is
 rejected.
 
 Image folders use a bounded on-demand RGB cache. Video files use a bounded
-OpenCV cache. Encoded frame features and text features are bounded per session.
-Full-resolution output history is not retained.
+OpenCV cache and decode consecutive cache misses without repeated seeks; jumps
+still use indexed seeking. Encoded frame features and text features are bounded
+per session. Full-resolution output history is not retained.
 
 The legacy asynchronous folder loader eagerly retains every decoded frame. The
 hardened public predictor rejects that configuration rather than violating the
@@ -214,9 +215,13 @@ An explicit checkpoint path bypasses acquisition; an invalid cached bundle raise
 without being replaced. Initial conversion requires PyTorch.
 
 Synthetic checkpoint tests cover acquisition routing, tensor transport, strict
-loading, and cache rejection. They do not qualify real-checkpoint outputs. The
-runtime still lacks sequence-level official-vs-MLX evidence, identity-transition
-parity, long-video memory characterization, and complete multi-object validation.
+loading, and cache rejection. A later
+[real-checkpoint characterization](../parity/receipts/sam31-expanded-temporal-20261026.json)
+compared seven sequences on official CUDA BF16 and MLX FP32: three passed the
+quality gate, and identity behavior matched in all seven, including shared
+tracking failures. The bedroom masks diverged after correction. This diagnostic
+corpus does not establish general temporal equivalence, independent multi-object
+validation, or long-video memory behavior.
 Public multiplex builders default to `use_rope_real=False`; the unsupported
 real-arithmetic RoPE path stays fail-fast.
 
@@ -340,23 +345,27 @@ action and is not implied by the checked-in evidence.
 
 ## Remaining product risks
 
-- Two pinned images prove implementation parity, not broad segmentation quality.
+- The two pinned images in the frozen gate do not establish broad segmentation
+  quality.
 - No external task-diverse validation corpus is part of the release gate.
 - Selected-frame inference can be mistaken for tracking if documentation drifts.
 - Random-access OpenCV seeking may be slow on long videos.
-- True SAM 3.1 temporal behavior is unvalidated.
+- SAM 3.1 temporal behavior is characterized on a small corpus but not qualified.
 - `model_builder.py` is a large maintainability hotspot.
-- Reduced-precision and fast-preprocessing output parity is not yet attested.
-- Performance evidence represents one Apple Silicon host.
+- Independent reduced-precision and fast-preprocessing output parity is not yet
+  attested.
+- The performance baseline checked into this repository represents one Apple
+  Silicon host.
 
 ## Highest-leverage next work
 
-1. Add a broader external image corpus without weakening the frozen holdout.
-2. Run output-level parity and multi-host benchmarks for fast preprocessing.
-3. Add a sequential video decode path for forward propagation.
+1. Add an independent, representative image corpus without weakening the frozen
+   holdout.
+2. Investigate the SAM 3.1 bedroom correction mismatch and qualify temporal
+   tracking on independent sequences, including identity and longer videos.
+3. Run output-level parity and multi-host benchmarks for fast preprocessing.
 4. Split checkpoint normalization and component factories out of
    `model_builder.py` without changing the stable release contract.
-5. Treat temporal tracking as a separate 0.2 assurance program.
 
 ## Development checks
 

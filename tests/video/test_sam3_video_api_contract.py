@@ -171,6 +171,7 @@ def _install_indexed_fake_cv2(
     *,
     declared_size: tuple[int, int] = (3, 4),
     reject_seek_at: int | None = None,
+    fail_read_once_at: int | None = None,
 ) -> list[object]:
     captures: list[object] = []
 
@@ -179,6 +180,8 @@ def _install_indexed_fake_cv2(
             self.path = path
             self.position = 0
             self.released = False
+            self.seeks: list[int] = []
+            self.failed_read = False
             captures.append(self)
 
         def isOpened(self) -> bool:
@@ -195,12 +198,17 @@ def _install_indexed_fake_cv2(
 
         def set(self, field: int, value: float) -> bool:
             assert field == 4
+            self.seeks.append(int(value))
             if int(value) == reject_seek_at:
                 return False
             self.position = int(value)
             return True
 
-        def read(self) -> tuple[bool, NDArray[np.uint8]]:
+        def read(self) -> tuple[bool, NDArray[np.uint8] | None]:
+            if self.position == fail_read_once_at and not self.failed_read:
+                self.failed_read = True
+                self.position += 1
+                return False, None
             frame = decoded[self.position]
             self.position += 1
             return True, frame
@@ -252,6 +260,130 @@ def test_selected_frame_video_file_uses_bounded_indexed_decoder(
     frames.close()
     with pytest.raises(RuntimeError, match="closed"):
         frames[0]
+
+
+def test_indexed_video_continues_forward_and_seeks_after_jumps(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from sam3_mlx.model.io_utils import LazyVideoFileFrames
+
+    decoded = [
+        np.full((3, 4, 3), fill_value=index, dtype=np.uint8) for index in range(12)
+    ]
+    captures = _install_indexed_fake_cv2(monkeypatch, decoded)
+    frames = LazyVideoFileFrames(tmp_path / "video.mp4", cache_size=2)
+    try:
+        for index in (0, 1, 2, 3, 2, 4, 9, 10, 2, 3, 4):
+            assert to_numpy(frames[index])[0, 0, 0] == index
+        # Cache hits must not move the decoder, and a jump must reset its position.
+        assert getattr(captures[0], "seeks") == [0, 9, 2]
+        cache, maximum = _bounded_cache_state(frames)
+        assert len(cache) <= maximum == 2
+    finally:
+        frames.close()
+
+
+def test_indexed_video_reseeks_after_a_failed_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from sam3_mlx.model.io_utils import LazyVideoFileFrames
+
+    decoded = [
+        np.full((3, 4, 3), fill_value=index, dtype=np.uint8) for index in range(3)
+    ]
+    captures = _install_indexed_fake_cv2(monkeypatch, decoded, fail_read_once_at=1)
+    frames = LazyVideoFileFrames(tmp_path / "video.mp4")
+    try:
+        with pytest.raises(RuntimeError, match="Could not decode frame 1"):
+            frames[1]
+        assert to_numpy(frames[1])[0, 0, 0] == 1
+        assert to_numpy(frames[2])[0, 0, 0] == 2
+        assert getattr(captures[0], "seeks") == [0, 1]
+    finally:
+        frames.close()
+
+
+def test_selected_frame_predictor_decodes_forward_without_repeated_seeks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import sam3_mlx
+    from tests.api._stubs import FakeImageProcessor
+
+    seen: list[int] = []
+
+    class RecordingProcessor(FakeImageProcessor):
+        def set_image(self, image: object) -> dict[str, object]:
+            assert isinstance(image, Image.Image)
+            seen.append(int(np.asarray(image)[0, 0, 0]))
+            return super().set_image(image)
+
+    decoded = [
+        np.full((3, 4, 3), fill_value=index, dtype=np.uint8) for index in range(6)
+    ]
+    captures = _install_indexed_fake_cv2(monkeypatch, decoded)
+    predictor = sam3_mlx.build_sam3_video_predictor(
+        model=object(),
+        load_from_HF=False,
+        resolution=14,
+        processor_factory=RecordingProcessor,
+    )
+    session_id = predictor.start_session(tmp_path / "video.mp4")["session_id"]
+    try:
+        predictor.add_prompt(session_id, frame_idx=0, text="object")
+        output = list(
+            predictor.propagate_in_video(session_id, propagation_direction="forward")
+        )
+        assert [frame["frame_index"] for frame in output] == list(range(6))
+        assert seen == list(range(6))
+        assert getattr(captures[0], "seeks") == [0]
+    finally:
+        predictor.close_session(session_id, run_gc_collect=False)
+    assert getattr(captures[0], "released") is True
+
+
+def test_indexed_video_matches_sequential_compressed_video_oracle(
+    tmp_path: Path,
+) -> None:
+    cv2 = pytest.importorskip("cv2")
+    from sam3_mlx.model.io_utils import LazyVideoFileFrames
+
+    path = tmp_path / "forward.mp4"
+    writer = cv2.VideoWriter(str(path), cv2.VideoWriter_fourcc(*"mp4v"), 10.0, (64, 48))
+    if not writer.isOpened():
+        pytest.skip("OpenCV build has no MPEG-4 video writer")
+    try:
+        for index in range(24):
+            pixels = np.zeros((48, 64, 3), dtype=np.uint8)
+            pixels[:, :, 0] = (np.arange(64, dtype=np.uint16) + index * 7) % 256
+            pixels[:, :, 1] = (
+                np.arange(48, dtype=np.uint16)[:, None] + index * 11
+            ) % 256
+            pixels[:, :, 2] = index * 9
+            writer.write(pixels)
+    finally:
+        writer.release()
+
+    capture = cv2.VideoCapture(str(path))
+    expected: list[NDArray[np.uint8]] = []
+    try:
+        while True:
+            success, bgr = capture.read()
+            if not success:
+                break
+            expected.append(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB))
+    finally:
+        capture.release()
+    assert len(expected) == 24
+
+    frames = LazyVideoFileFrames(path, cache_size=3)
+    try:
+        for index in (*range(24), 0, 12, 13, 23, 3, 4):
+            np.testing.assert_array_equal(np.asarray(frames[index]), expected[index])
+    finally:
+        frames.close()
 
 
 @pytest.mark.parametrize("failure", ["seek", "dimensions"])

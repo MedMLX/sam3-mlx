@@ -9,6 +9,12 @@ A prior broader synthetic image corpus exposed mask-IoU failures at the frozen
 thresholds. Those exploratory artifacts were removed; broader representative-
 image validation remains deferred in `../docs/verification.md`.
 
+Later diagnostic characterizations are recorded in
+[`image-bf16-20261027.json`](receipts/image-bf16-20261027.json) and
+[`sam31-expanded-temporal-20261026.json`](receipts/sam31-expanded-temporal-20261026.json).
+They do not replace release evidence; their referenced raw diagnostic files may
+not be present in a checkout.
+
 | Surface | State | Evidence |
 | --- | --- | --- |
 | Hardened 11-case precision-adapted pinned-source FP32 image gate | source-bound; inspect recorded verdicts | `receipts/example-image-parity.json`, `receipts/holdout-image-parity.json`, and matching NPZ files under `evidence/` |

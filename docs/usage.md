@@ -112,6 +112,9 @@ each frame:
 - image folders and video files use bounded host caches;
 - encoded frame and text features are bounded per session.
 
+For OpenCV video files, consecutive uncached frames continue decoding without a
+seek. Other uncached requests seek to the requested frame.
+
 Asynchronous image-folder preloading is rejected in selected-frame mode because
 the legacy loader retains every decoded frame and would violate the bounded
 memory contract.

@@ -413,10 +413,11 @@ class LazyImageFolderFrames:
 class LazyVideoFileFrames:
     """Indexed OpenCV video reader with a bounded host RGB frame cache.
 
-    ``len`` is the container-declared frame count. Each cache miss seeks to the frame
-    with ``CAP_PROP_POS_FRAMES`` and decodes it, so random access can be slow and
-    seeking accuracy depends on the codec. Frame 0 is decoded at construction to
-    validate the file (the constructor closes the reader and re-raises on failure).
+    ``len`` is the container-declared frame count. A cache miss reads directly when
+    the capture is already positioned at the requested frame; other misses seek with
+    ``CAP_PROP_POS_FRAMES``, whose accuracy depends on the codec. Frame 0 is decoded
+    at construction to validate the file (the constructor closes the reader and
+    re-raises on failure).
     """
 
     def __init__(
@@ -447,6 +448,7 @@ class LazyVideoFileFrames:
         self._cache = BoundedLRUCache[int, Image.Image](cache_size)
         self._lock = Lock()
         self._closed = False
+        self._next_decode_index: int | None = None
         self.images = None
         try:
             self[0]
@@ -473,10 +475,14 @@ class LazyVideoFileFrames:
             cached = self._cache.get(index)
             if cached is not None:
                 return cached
-            if not self._capture.set(self._cv2.CAP_PROP_POS_FRAMES, index):
-                raise RuntimeError(
-                    f"Could not seek to frame {index} in video: {self.path}"
-                )
+            if self._next_decode_index != index:
+                self._next_decode_index = None
+                if not self._capture.set(self._cv2.CAP_PROP_POS_FRAMES, index):
+                    raise RuntimeError(
+                        f"Could not seek to frame {index} in video: {self.path}"
+                    )
+            # A failed read or conversion may leave the capture at an unknown position.
+            self._next_decode_index = None
             decoded = self._capture.read()
             if not decoded[0]:
                 raise RuntimeError(
@@ -495,6 +501,7 @@ class LazyVideoFileFrames:
                     f"expected {self.orig_width}x{self.orig_height}: {self.path}"
                 )
             self._cache[index] = frame
+            self._next_decode_index = index + 1
             return frame
 
     @property

@@ -16,10 +16,13 @@ It does not claim:
 - unmeasured processor resolutions;
 - broad task-level segmentation quality.
 
-The repository does include an experimental SAM 3.1 temporal/multiplex runtime,
-a versioned comparison harness, and long-sequence characterization tooling. The
-current Apple-silicon receipt is `not-run` for official-vs-MLX temporal parity
-because the pinned official predictor requires CUDA BF16 execution.
+The repository includes an experimental SAM 3.1 temporal/multiplex runtime,
+a versioned comparison harness, and long-sequence characterization tooling.
+An earlier Apple-only receipt did not run the official CUDA predictor. A later
+[characterization](../parity/receipts/sam31-expanded-temporal-20261026.json)
+compared official CUDA BF16 with MLX FP32 over seven sequences: three passed the
+quality gate, and the bedroom masks diverged after correction. The diagnostic
+corpus is not an independent holdout or a temporal release qualification.
 
 ## Inference API target
 
@@ -47,10 +50,11 @@ variadic positional arguments. Backend default adaptations are explicit value
 pairs. A signature match does not establish working options, output-schema
 parity, numerical equivalence, or complete repository feature coverage.
 
-The recorded local declaration report at `benchmarks/results/inference-api-current.json`
-covers 40 surfaces: 31 signature matches, four recorded backend differences,
-and five API gaps. `--check` exits nonzero while those gaps remain. This inventory
-is separate from the runtime qualification results below.
+A historical declaration report at `benchmarks/results/inference-api-current.json`
+covered 40 surfaces: 31 signature matches, four recorded backend differences,
+and five API gaps. That local report may not be present in a checkout; rerun the
+audit to determine the current gaps. This inventory is separate from the runtime
+qualification results below.
 
 The current implementation preserves these deliberate differences:
 
@@ -474,10 +478,16 @@ wheel and source distribution.
 
 ## Precision and preprocessing candidates
 
-The checked-in image reports use FP32 with parity preprocessing. Candidate
-FP16/BF16 artifacts and the fast preprocessing path use the legacy comparison
-entrypoint only for local qualification; they do not alter the frozen image
-reports.
+The frozen image reports use FP32 with parity preprocessing. A later
+[image characterization](../parity/receipts/image-bf16-20261027.json) passed 56
+cases each for FP32 and BF16 against their official CUDA references. The FP32
+reference uses a recorded precision adapter, and the cases were used to calibrate
+the implementation rather than as an independent holdout. This characterization
+does not replace the frozen reports or establish temporal parity.
+
+Candidate FP16 artifacts and the fast preprocessing path use the legacy
+comparison entrypoint only for local qualification; they do not alter the frozen
+image reports.
 The runner requires the candidate artifact's immutable identity and validates
 its dtype manifest before loading:
 
@@ -571,9 +581,9 @@ baseline rather than bypassing the like-for-like check.
 
 ## Intentionally deferred or blocked
 
-- official SAM 3.1 temporal parity on representative validation sequences and a
-  compatible CUDA BF16 host;
-- temporal identity and numerical qualification after both backends execute;
+- investigate the observed SAM 3.1 bedroom correction mismatch and qualify
+  temporal identity and numerical behavior on independent representative
+  sequences using a compatible CUDA BF16 host and MLX;
 - broader representative-image validation without changing the frozen
   thresholds;
 - long-sequence runs above 300 frames under a separately reviewed execution cap;
