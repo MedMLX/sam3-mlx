@@ -65,11 +65,11 @@ def test_compare_case_requires_count_and_numeric_contract() -> None:
         "prompt": "object",
         "geometric_prompts": [],
     }
-    exact = _parity._compare_case(spec, _outputs(), _outputs())
+    exact = _parity.compare_release_case(spec, _outputs(), _outputs())
     assert exact["status"] == "passed"
     assert exact["mask_iou_min"] == 1.0
 
-    count_mismatch = _parity._compare_case(spec, _outputs(), _outputs(mask_count=0))
+    count_mismatch = _parity.compare_release_case(spec, _outputs(), _outputs(mask_count=0))
     assert count_mismatch["status"] == "failed"
     assert count_mismatch["detection_count_match"] is False
 
@@ -77,7 +77,7 @@ def test_compare_case_requires_count_and_numeric_contract() -> None:
 def test_evidence_path_uses_checkout_relative_identity() -> None:
     checkout = Path("/tmp/official")
     assert (
-        _parity._evidence_path(
+        _parity.evidence_path(
             checkout / "assets/images/test.jpg",
             official_checkout=checkout,
         )
@@ -110,7 +110,7 @@ def test_official_checkout_requires_exact_clean_commit(tmp_path: Path) -> None:
     ).stdout.strip()
 
     assert (
-        _parity._validate_official_checkout(
+        _parity.validate_official_checkout(
             tmp_path,
             expected_revision=revision,
         )
@@ -119,7 +119,7 @@ def test_official_checkout_requires_exact_clean_commit(tmp_path: Path) -> None:
 
     tracked.write_text("dirty\n")
     with pytest.raises(ValueError, match="must be clean"):
-        _parity._validate_official_checkout(
+        _parity.validate_official_checkout(
             tmp_path,
             expected_revision=revision,
         )

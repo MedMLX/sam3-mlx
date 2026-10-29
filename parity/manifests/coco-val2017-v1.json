@@ -1,0 +1,1245 @@
+{
+  "schema_version": 1,
+  "name": "coco-val2017-v1",
+  "source": {
+    "dataset": "COCO 2017 validation",
+    "annotations": "annotations_trainval2017.zip:annotations/instances_val2017.json",
+    "annotations_sha256": "e8c7f7908f1d7278341fae127d0da654f102f11bd7b21d8aeefa635b8c810b6f"
+  },
+  "selection": {
+    "seed": 20261028,
+    "count": 24,
+    "aspect_buckets": {
+      "landscape": "width/height >= 1.2",
+      "portrait": "width/height <= 0.85",
+      "near_square": "otherwise"
+    },
+    "eligibility": "at least one non-crowd instance covering >= 1% of the image"
+  },
+  "images": [
+    {
+      "id": 7991,
+      "file_name": "000000007991.jpg",
+      "url": "https://s3.amazonaws.com/images.cocodataset.org/val2017/000000007991.jpg",
+      "sha256": "63c6fae2e3defd4bc1c6f346806aef03eb11ccbd7c6bda3e479d1fbafd486db1",
+      "size": [
+        640,
+        359
+      ],
+      "aspect_bucket": "landscape",
+      "license": {
+        "name": "Attribution License",
+        "url": "http://creativecommons.org/licenses/by/2.0/"
+      },
+      "cases": [
+        {
+          "name": "text_carrot_1008",
+          "resolution": 1008,
+          "prompt": "carrot",
+          "geometric_prompts": []
+        },
+        {
+          "name": "text_knife_1008",
+          "resolution": 1008,
+          "prompt": "knife",
+          "geometric_prompts": []
+        },
+        {
+          "name": "positive_box_1008",
+          "resolution": 1008,
+          "prompt": null,
+          "geometric_prompts": [
+            {
+              "box": [
+                0.5088046875,
+                0.5705849582172702,
+                0.48439062499999996,
+                0.7505849582172701
+              ],
+              "label": true
+            }
+          ]
+        },
+        {
+          "name": "text_carrot_672",
+          "resolution": 672,
+          "prompt": "carrot",
+          "geometric_prompts": []
+        },
+        {
+          "name": "text_nonsense_1008",
+          "resolution": 1008,
+          "prompt": "zzzz_not_a_real_class_qqq",
+          "geometric_prompts": []
+        }
+      ]
+    },
+    {
+      "id": 11122,
+      "file_name": "000000011122.jpg",
+      "url": "https://s3.amazonaws.com/images.cocodataset.org/val2017/000000011122.jpg",
+      "sha256": "74e9d13ddccbc52d2fd9da5984279a6218b250668e1ae1c6450be9d1ca2bc41a",
+      "size": [
+        640,
+        480
+      ],
+      "aspect_bucket": "landscape",
+      "license": {
+        "name": "Attribution-NonCommercial-NoDerivs License",
+        "url": "http://creativecommons.org/licenses/by-nc-nd/2.0/"
+      },
+      "cases": [
+        {
+          "name": "text_stop_sign_1008",
+          "resolution": 1008,
+          "prompt": "stop sign",
+          "geometric_prompts": []
+        },
+        {
+          "name": "positive_box_1008",
+          "resolution": 1008,
+          "prompt": null,
+          "geometric_prompts": [
+            {
+              "box": [
+                0.45339062499999994,
+                0.42396875,
+                0.1243125,
+                0.17072916666666668
+              ],
+              "label": true
+            }
+          ]
+        },
+        {
+          "name": "text_stop_sign_504",
+          "resolution": 504,
+          "prompt": "stop sign",
+          "geometric_prompts": []
+        }
+      ]
+    },
+    {
+      "id": 62353,
+      "file_name": "000000062353.jpg",
+      "url": "https://s3.amazonaws.com/images.cocodataset.org/val2017/000000062353.jpg",
+      "sha256": "088b152a4e5c411aacc4898820b7f1ff45cecf29e7f43f369692e33559a0ecff",
+      "size": [
+        640,
+        480
+      ],
+      "aspect_bucket": "landscape",
+      "license": {
+        "name": "Attribution-NonCommercial-ShareAlike License",
+        "url": "http://creativecommons.org/licenses/by-nc-sa/2.0/"
+      },
+      "cases": [
+        {
+          "name": "text_giraffe_1008",
+          "resolution": 1008,
+          "prompt": "giraffe",
+          "geometric_prompts": []
+        },
+        {
+          "name": "text_person_1008",
+          "resolution": 1008,
+          "prompt": "person",
+          "geometric_prompts": []
+        },
+        {
+          "name": "positive_box_1008",
+          "resolution": 1008,
+          "prompt": null,
+          "geometric_prompts": [
+            {
+              "box": [
+                0.3491796875,
+                0.517625,
+                0.275796875,
+                0.4719166666666667
+              ],
+              "label": true
+            }
+          ]
+        },
+        {
+          "name": "text_giraffe_672",
+          "resolution": 672,
+          "prompt": "giraffe",
+          "geometric_prompts": []
+        }
+      ]
+    },
+    {
+      "id": 95786,
+      "file_name": "000000095786.jpg",
+      "url": "https://s3.amazonaws.com/images.cocodataset.org/val2017/000000095786.jpg",
+      "sha256": "6b4e7b4112fd2ac4e932fd97d47f0b4c5a4f01cdb55c16ba746a413b532f6995",
+      "size": [
+        500,
+        334
+      ],
+      "aspect_bucket": "landscape",
+      "license": {
+        "name": "Attribution-NonCommercial-ShareAlike License",
+        "url": "http://creativecommons.org/licenses/by-nc-sa/2.0/"
+      },
+      "cases": [
+        {
+          "name": "text_vase_1008",
+          "resolution": 1008,
+          "prompt": "vase",
+          "geometric_prompts": []
+        },
+        {
+          "name": "text_cup_1008",
+          "resolution": 1008,
+          "prompt": "cup",
+          "geometric_prompts": []
+        },
+        {
+          "name": "positive_box_1008",
+          "resolution": 1008,
+          "prompt": null,
+          "geometric_prompts": [
+            {
+              "box": [
+                0.23222,
+                0.4836377245508982,
+                0.46444,
+                0.7787724550898204
+              ],
+              "label": true
+            }
+          ]
+        },
+        {
+          "name": "text_vase_504",
+          "resolution": 504,
+          "prompt": "vase",
+          "geometric_prompts": []
+        }
+      ]
+    },
+    {
+      "id": 97924,
+      "file_name": "000000097924.jpg",
+      "url": "https://s3.amazonaws.com/images.cocodataset.org/val2017/000000097924.jpg",
+      "sha256": "015ca73dcfa846a1d24d87f7676fbb4e095fb044f378ebe9dfe3bf2ebab5a798",
+      "size": [
+        600,
+        400
+      ],
+      "aspect_bucket": "landscape",
+      "license": {
+        "name": "Attribution License",
+        "url": "http://creativecommons.org/licenses/by/2.0/"
+      },
+      "cases": [
+        {
+          "name": "text_truck_1008",
+          "resolution": 1008,
+          "prompt": "truck",
+          "geometric_prompts": []
+        },
+        {
+          "name": "text_horse_1008",
+          "resolution": 1008,
+          "prompt": "horse",
+          "geometric_prompts": []
+        },
+        {
+          "name": "positive_box_1008",
+          "resolution": 1008,
+          "prompt": null,
+          "geometric_prompts": [
+            {
+              "box": [
+                0.34615833333333335,
+                0.5009125,
+                0.56445,
+                0.729425
+              ],
+              "label": true
+            }
+          ]
+        },
+        {
+          "name": "text_truck_672",
+          "resolution": 672,
+          "prompt": "truck",
+          "geometric_prompts": []
+        },
+        {
+          "name": "text_nonsense_1008",
+          "resolution": 1008,
+          "prompt": "zzzz_not_a_real_class_qqq",
+          "geometric_prompts": []
+        }
+      ]
+    },
+    {
+      "id": 312586,
+      "file_name": "000000312586.jpg",
+      "url": "https://s3.amazonaws.com/images.cocodataset.org/val2017/000000312586.jpg",
+      "sha256": "1aaea56776b53e55899b583ff6f5d716280a2cc1e9e5d9280d6c2899a6fddaea",
+      "size": [
+        640,
+        428
+      ],
+      "aspect_bucket": "landscape",
+      "license": {
+        "name": "Attribution-NonCommercial-NoDerivs License",
+        "url": "http://creativecommons.org/licenses/by-nc-nd/2.0/"
+      },
+      "cases": [
+        {
+          "name": "text_bear_1008",
+          "resolution": 1008,
+          "prompt": "bear",
+          "geometric_prompts": []
+        },
+        {
+          "name": "positive_box_1008",
+          "resolution": 1008,
+          "prompt": null,
+          "geometric_prompts": [
+            {
+              "box": [
+                0.48414843750000003,
+                0.7328621495327102,
+                0.40598437499999995,
+                0.3266588785046729
+              ],
+              "label": true
+            }
+          ]
+        },
+        {
+          "name": "text_bear_504",
+          "resolution": 504,
+          "prompt": "bear",
+          "geometric_prompts": []
+        }
+      ]
+    },
+    {
+      "id": 378873,
+      "file_name": "000000378873.jpg",
+      "url": "https://s3.amazonaws.com/images.cocodataset.org/val2017/000000378873.jpg",
+      "sha256": "1f529f83c9ceec1086b1fb67bb5d807e5e6992cb641e8b5fd33bb46b01d180c2",
+      "size": [
+        640,
+        426
+      ],
+      "aspect_bucket": "landscape",
+      "license": {
+        "name": "Attribution-NonCommercial-ShareAlike License",
+        "url": "http://creativecommons.org/licenses/by-nc-sa/2.0/"
+      },
+      "cases": [
+        {
+          "name": "text_person_1008",
+          "resolution": 1008,
+          "prompt": "person",
+          "geometric_prompts": []
+        },
+        {
+          "name": "text_dining_table_1008",
+          "resolution": 1008,
+          "prompt": "dining table",
+          "geometric_prompts": []
+        },
+        {
+          "name": "positive_box_1008",
+          "resolution": 1008,
+          "prompt": null,
+          "geometric_prompts": [
+            {
+              "box": [
+                0.8212890625,
+                0.10671361502347418,
+                0.356015625,
+                0.21342723004694836
+              ],
+              "label": true
+            }
+          ]
+        },
+        {
+          "name": "text_person_672",
+          "resolution": 672,
+          "prompt": "person",
+          "geometric_prompts": []
+        }
+      ]
+    },
+    {
+      "id": 425390,
+      "file_name": "000000425390.jpg",
+      "url": "https://s3.amazonaws.com/images.cocodataset.org/val2017/000000425390.jpg",
+      "sha256": "2a0c6f088517c00b84ad76032df9efbe41a9a9d5786aefc08f6cdc1e72da6166",
+      "size": [
+        500,
+        375
+      ],
+      "aspect_bucket": "landscape",
+      "license": {
+        "name": "Attribution-NonCommercial-ShareAlike License",
+        "url": "http://creativecommons.org/licenses/by-nc-sa/2.0/"
+      },
+      "cases": [
+        {
+          "name": "text_cat_1008",
+          "resolution": 1008,
+          "prompt": "cat",
+          "geometric_prompts": []
+        },
+        {
+          "name": "text_laptop_1008",
+          "resolution": 1008,
+          "prompt": "laptop",
+          "geometric_prompts": []
+        },
+        {
+          "name": "positive_box_1008",
+          "resolution": 1008,
+          "prompt": null,
+          "geometric_prompts": [
+            {
+              "box": [
+                0.46632,
+                0.5603466666666667,
+                0.9035599999999999,
+                0.7737066666666667
+              ],
+              "label": true
+            }
+          ]
+        },
+        {
+          "name": "text_cat_504",
+          "resolution": 504,
+          "prompt": "cat",
+          "geometric_prompts": []
+        }
+      ]
+    },
+    {
+      "id": 111179,
+      "file_name": "000000111179.jpg",
+      "url": "https://s3.amazonaws.com/images.cocodataset.org/val2017/000000111179.jpg",
+      "sha256": "c16ed0c88190887b396778d4227060e338daefc595b1ca9912d0ffc68716b26c",
+      "size": [
+        480,
+        640
+      ],
+      "aspect_bucket": "portrait",
+      "license": {
+        "name": "Attribution-ShareAlike License",
+        "url": "http://creativecommons.org/licenses/by-sa/2.0/"
+      },
+      "cases": [
+        {
+          "name": "text_clock_1008",
+          "resolution": 1008,
+          "prompt": "clock",
+          "geometric_prompts": []
+        },
+        {
+          "name": "positive_box_1008",
+          "resolution": 1008,
+          "prompt": null,
+          "geometric_prompts": [
+            {
+              "box": [
+                0.5495208333333333,
+                0.29396875,
+                0.14620833333333336,
+                0.11015625
+              ],
+              "label": true
+            }
+          ]
+        },
+        {
+          "name": "text_clock_672",
+          "resolution": 672,
+          "prompt": "clock",
+          "geometric_prompts": []
+        },
+        {
+          "name": "text_nonsense_1008",
+          "resolution": 1008,
+          "prompt": "zzzz_not_a_real_class_qqq",
+          "geometric_prompts": []
+        }
+      ]
+    },
+    {
+      "id": 125062,
+      "file_name": "000000125062.jpg",
+      "url": "https://s3.amazonaws.com/images.cocodataset.org/val2017/000000125062.jpg",
+      "sha256": "2e0b23c7ae0b7d4d09d7348bf0577fbdbc9c11a010cbd3f52c93ed33616d98c6",
+      "size": [
+        427,
+        640
+      ],
+      "aspect_bucket": "portrait",
+      "license": {
+        "name": "Attribution-NonCommercial License",
+        "url": "http://creativecommons.org/licenses/by-nc/2.0/"
+      },
+      "cases": [
+        {
+          "name": "text_book_1008",
+          "resolution": 1008,
+          "prompt": "book",
+          "geometric_prompts": []
+        },
+        {
+          "name": "text_teddy_bear_1008",
+          "resolution": 1008,
+          "prompt": "teddy bear",
+          "geometric_prompts": []
+        },
+        {
+          "name": "positive_box_1008",
+          "resolution": 1008,
+          "prompt": null,
+          "geometric_prompts": [
+            {
+              "box": [
+                0.7041451990632319,
+                0.73959375,
+                0.5700234192037471,
+                0.4675625
+              ],
+              "label": true
+            }
+          ]
+        },
+        {
+          "name": "text_book_504",
+          "resolution": 504,
+          "prompt": "book",
+          "geometric_prompts": []
+        }
+      ]
+    },
+    {
+      "id": 167067,
+      "file_name": "000000167067.jpg",
+      "url": "https://s3.amazonaws.com/images.cocodataset.org/val2017/000000167067.jpg",
+      "sha256": "b8f6397e0fc88a86a33ea3401d66a07f217e82b48da12f7aa5d2deadf6fd959d",
+      "size": [
+        375,
+        500
+      ],
+      "aspect_bucket": "portrait",
+      "license": {
+        "name": "Attribution-NonCommercial-NoDerivs License",
+        "url": "http://creativecommons.org/licenses/by-nc-nd/2.0/"
+      },
+      "cases": [
+        {
+          "name": "text_person_1008",
+          "resolution": 1008,
+          "prompt": "person",
+          "geometric_prompts": []
+        },
+        {
+          "name": "text_tie_1008",
+          "resolution": 1008,
+          "prompt": "tie",
+          "geometric_prompts": []
+        },
+        {
+          "name": "positive_box_1008",
+          "resolution": 1008,
+          "prompt": null,
+          "geometric_prompts": [
+            {
+              "box": [
+                0.5044933333333333,
+                0.49326,
+                0.9910133333333333,
+                0.98652
+              ],
+              "label": true
+            }
+          ]
+        },
+        {
+          "name": "text_person_672",
+          "resolution": 672,
+          "prompt": "person",
+          "geometric_prompts": []
+        }
+      ]
+    },
+    {
+      "id": 260266,
+      "file_name": "000000260266.jpg",
+      "url": "https://s3.amazonaws.com/images.cocodataset.org/val2017/000000260266.jpg",
+      "sha256": "a5193e5cc5a14ee137092638d926fe3de0132243aede2e40d54aaa2a7d3d344b",
+      "size": [
+        479,
+        640
+      ],
+      "aspect_bucket": "portrait",
+      "license": {
+        "name": "Attribution-NonCommercial-ShareAlike License",
+        "url": "http://creativecommons.org/licenses/by-nc-sa/2.0/"
+      },
+      "cases": [
+        {
+          "name": "text_traffic_light_1008",
+          "resolution": 1008,
+          "prompt": "traffic light",
+          "geometric_prompts": []
+        },
+        {
+          "name": "text_car_1008",
+          "resolution": 1008,
+          "prompt": "car",
+          "geometric_prompts": []
+        },
+        {
+          "name": "positive_box_1008",
+          "resolution": 1008,
+          "prompt": null,
+          "geometric_prompts": [
+            {
+              "box": [
+                0.7656471816283925,
+                0.138203125,
+                0.08407098121085596,
+                0.17753125
+              ],
+              "label": true
+            }
+          ]
+        },
+        {
+          "name": "text_traffic_light_504",
+          "resolution": 504,
+          "prompt": "traffic light",
+          "geometric_prompts": []
+        }
+      ]
+    },
+    {
+      "id": 322429,
+      "file_name": "000000322429.jpg",
+      "url": "https://s3.amazonaws.com/images.cocodataset.org/val2017/000000322429.jpg",
+      "sha256": "f4e3cccc23e7ea0ab284e2383d54a29802be0cb231d6dee7ec365a9470b1e404",
+      "size": [
+        472,
+        640
+      ],
+      "aspect_bucket": "portrait",
+      "license": {
+        "name": "Attribution-NonCommercial License",
+        "url": "http://creativecommons.org/licenses/by-nc/2.0/"
+      },
+      "cases": [
+        {
+          "name": "text_vase_1008",
+          "resolution": 1008,
+          "prompt": "vase",
+          "geometric_prompts": []
+        },
+        {
+          "name": "text_cup_1008",
+          "resolution": 1008,
+          "prompt": "cup",
+          "geometric_prompts": []
+        },
+        {
+          "name": "positive_box_1008",
+          "resolution": 1008,
+          "prompt": null,
+          "geometric_prompts": [
+            {
+              "box": [
+                0.24986228813559322,
+                0.159546875,
+                0.35955508474576275,
+                0.098875
+              ],
+              "label": true
+            }
+          ]
+        },
+        {
+          "name": "text_vase_672",
+          "resolution": 672,
+          "prompt": "vase",
+          "geometric_prompts": []
+        },
+        {
+          "name": "text_nonsense_1008",
+          "resolution": 1008,
+          "prompt": "zzzz_not_a_real_class_qqq",
+          "geometric_prompts": []
+        }
+      ]
+    },
+    {
+      "id": 349594,
+      "file_name": "000000349594.jpg",
+      "url": "https://s3.amazonaws.com/images.cocodataset.org/val2017/000000349594.jpg",
+      "sha256": "17b6593b2a4de3cb6f14bddd952ae49181d2876c13ad29b7d7d1cb27315a49fa",
+      "size": [
+        424,
+        500
+      ],
+      "aspect_bucket": "portrait",
+      "license": {
+        "name": "Attribution-NonCommercial-NoDerivs License",
+        "url": "http://creativecommons.org/licenses/by-nc-nd/2.0/"
+      },
+      "cases": [
+        {
+          "name": "text_person_1008",
+          "resolution": 1008,
+          "prompt": "person",
+          "geometric_prompts": []
+        },
+        {
+          "name": "text_donut_1008",
+          "resolution": 1008,
+          "prompt": "donut",
+          "geometric_prompts": []
+        },
+        {
+          "name": "positive_box_1008",
+          "resolution": 1008,
+          "prompt": null,
+          "geometric_prompts": [
+            {
+              "box": [
+                0.5222051886792453,
+                0.51483,
+                0.9069103773584904,
+                0.94394
+              ],
+              "label": true
+            }
+          ]
+        },
+        {
+          "name": "text_person_504",
+          "resolution": 504,
+          "prompt": "person",
+          "geometric_prompts": []
+        }
+      ]
+    },
+    {
+      "id": 352760,
+      "file_name": "000000352760.jpg",
+      "url": "https://s3.amazonaws.com/images.cocodataset.org/val2017/000000352760.jpg",
+      "sha256": "e8e628840f8275433d429abede2e426da7092545c692d418a12cf58e4fa2ee4d",
+      "size": [
+        544,
+        640
+      ],
+      "aspect_bucket": "portrait",
+      "license": {
+        "name": "Attribution License",
+        "url": "http://creativecommons.org/licenses/by/2.0/"
+      },
+      "cases": [
+        {
+          "name": "text_person_1008",
+          "resolution": 1008,
+          "prompt": "person",
+          "geometric_prompts": []
+        },
+        {
+          "name": "text_skis_1008",
+          "resolution": 1008,
+          "prompt": "skis",
+          "geometric_prompts": []
+        },
+        {
+          "name": "positive_box_1008",
+          "resolution": 1008,
+          "prompt": null,
+          "geometric_prompts": [
+            {
+              "box": [
+                0.4785202205882353,
+                0.39775,
+                0.4335845588235294,
+                0.5438125
+              ],
+              "label": true
+            }
+          ]
+        },
+        {
+          "name": "text_person_672",
+          "resolution": 672,
+          "prompt": "person",
+          "geometric_prompts": []
+        }
+      ]
+    },
+    {
+      "id": 394559,
+      "file_name": "000000394559.jpg",
+      "url": "https://s3.amazonaws.com/images.cocodataset.org/val2017/000000394559.jpg",
+      "sha256": "5d194b7c13af800e8b57c37b52f71e28d642bc046f6c2325e1bb278db9b6d130",
+      "size": [
+        426,
+        640
+      ],
+      "aspect_bucket": "portrait",
+      "license": {
+        "name": "Attribution-NonCommercial License",
+        "url": "http://creativecommons.org/licenses/by-nc/2.0/"
+      },
+      "cases": [
+        {
+          "name": "text_person_1008",
+          "resolution": 1008,
+          "prompt": "person",
+          "geometric_prompts": []
+        },
+        {
+          "name": "text_tennis_racket_1008",
+          "resolution": 1008,
+          "prompt": "tennis racket",
+          "geometric_prompts": []
+        },
+        {
+          "name": "positive_box_1008",
+          "resolution": 1008,
+          "prompt": null,
+          "geometric_prompts": [
+            {
+              "box": [
+                0.5739319248826291,
+                0.5394765625,
+                0.37138497652582164,
+                0.530328125
+              ],
+              "label": true
+            }
+          ]
+        },
+        {
+          "name": "text_person_504",
+          "resolution": 504,
+          "prompt": "person",
+          "geometric_prompts": []
+        }
+      ]
+    },
+    {
+      "id": 28809,
+      "file_name": "000000028809.jpg",
+      "url": "https://s3.amazonaws.com/images.cocodataset.org/val2017/000000028809.jpg",
+      "sha256": "ae2c7be44df33d27135b6aa2f5d82d4c8bb9784e99469a04be708ee68943a45d",
+      "size": [
+        498,
+        500
+      ],
+      "aspect_bucket": "near_square",
+      "license": {
+        "name": "Attribution-ShareAlike License",
+        "url": "http://creativecommons.org/licenses/by-sa/2.0/"
+      },
+      "cases": [
+        {
+          "name": "text_banana_1008",
+          "resolution": 1008,
+          "prompt": "banana",
+          "geometric_prompts": []
+        },
+        {
+          "name": "positive_box_1008",
+          "resolution": 1008,
+          "prompt": null,
+          "geometric_prompts": [
+            {
+              "box": [
+                0.7158734939759036,
+                0.6513399999999999,
+                0.567289156626506,
+                0.6704
+              ],
+              "label": true
+            }
+          ]
+        },
+        {
+          "name": "text_banana_672",
+          "resolution": 672,
+          "prompt": "banana",
+          "geometric_prompts": []
+        },
+        {
+          "name": "text_nonsense_1008",
+          "resolution": 1008,
+          "prompt": "zzzz_not_a_real_class_qqq",
+          "geometric_prompts": []
+        }
+      ]
+    },
+    {
+      "id": 99053,
+      "file_name": "000000099053.jpg",
+      "url": "https://s3.amazonaws.com/images.cocodataset.org/val2017/000000099053.jpg",
+      "sha256": "a4e8405077a8f93115116f548e7d59b29a092a6ac2f749732a525e7b82c2f35a",
+      "size": [
+        640,
+        559
+      ],
+      "aspect_bucket": "near_square",
+      "license": {
+        "name": "Attribution License",
+        "url": "http://creativecommons.org/licenses/by/2.0/"
+      },
+      "cases": [
+        {
+          "name": "text_dining_table_1008",
+          "resolution": 1008,
+          "prompt": "dining table",
+          "geometric_prompts": []
+        },
+        {
+          "name": "text_fork_1008",
+          "resolution": 1008,
+          "prompt": "fork",
+          "geometric_prompts": []
+        },
+        {
+          "name": "positive_box_1008",
+          "resolution": 1008,
+          "prompt": null,
+          "geometric_prompts": [
+            {
+              "box": [
+                0.5,
+                0.5,
+                1.0,
+                1.0
+              ],
+              "label": true
+            }
+          ]
+        },
+        {
+          "name": "text_dining_table_504",
+          "resolution": 504,
+          "prompt": "dining table",
+          "geometric_prompts": []
+        }
+      ]
+    },
+    {
+      "id": 149406,
+      "file_name": "000000149406.jpg",
+      "url": "https://s3.amazonaws.com/images.cocodataset.org/val2017/000000149406.jpg",
+      "sha256": "bb5adc5c3916aec1e6024432e428c6f6b216ab97c02c58590bbf80a5f6fe24bb",
+      "size": [
+        640,
+        638
+      ],
+      "aspect_bucket": "near_square",
+      "license": {
+        "name": "Attribution-NonCommercial-ShareAlike License",
+        "url": "http://creativecommons.org/licenses/by-nc-sa/2.0/"
+      },
+      "cases": [
+        {
+          "name": "text_motorcycle_1008",
+          "resolution": 1008,
+          "prompt": "motorcycle",
+          "geometric_prompts": []
+        },
+        {
+          "name": "positive_box_1008",
+          "resolution": 1008,
+          "prompt": null,
+          "geometric_prompts": [
+            {
+              "box": [
+                0.4491484375,
+                0.7552115987460815,
+                0.629484375,
+                0.3685423197492163
+              ],
+              "label": true
+            }
+          ]
+        },
+        {
+          "name": "text_motorcycle_672",
+          "resolution": 672,
+          "prompt": "motorcycle",
+          "geometric_prompts": []
+        }
+      ]
+    },
+    {
+      "id": 153299,
+      "file_name": "000000153299.jpg",
+      "url": "https://s3.amazonaws.com/images.cocodataset.org/val2017/000000153299.jpg",
+      "sha256": "229f4f5304f7177a5017f06b1672205adbc0c5eb16da33fc0f4773cd2f9ed13c",
+      "size": [
+        461,
+        500
+      ],
+      "aspect_bucket": "near_square",
+      "license": {
+        "name": "Attribution-NonCommercial-ShareAlike License",
+        "url": "http://creativecommons.org/licenses/by-nc-sa/2.0/"
+      },
+      "cases": [
+        {
+          "name": "text_giraffe_1008",
+          "resolution": 1008,
+          "prompt": "giraffe",
+          "geometric_prompts": []
+        },
+        {
+          "name": "positive_box_1008",
+          "resolution": 1008,
+          "prompt": null,
+          "geometric_prompts": [
+            {
+              "box": [
+                0.46796095444685465,
+                0.51236,
+                0.804295010845987,
+                0.8944
+              ],
+              "label": true
+            }
+          ]
+        },
+        {
+          "name": "text_giraffe_504",
+          "resolution": 504,
+          "prompt": "giraffe",
+          "geometric_prompts": []
+        }
+      ]
+    },
+    {
+      "id": 177065,
+      "file_name": "000000177065.jpg",
+      "url": "https://s3.amazonaws.com/images.cocodataset.org/val2017/000000177065.jpg",
+      "sha256": "443418dd6b1bc5a650c53d427c93538dd0f48f3c9cd9083c54ce3af0138821e0",
+      "size": [
+        640,
+        564
+      ],
+      "aspect_bucket": "near_square",
+      "license": {
+        "name": "Attribution License",
+        "url": "http://creativecommons.org/licenses/by/2.0/"
+      },
+      "cases": [
+        {
+          "name": "text_person_1008",
+          "resolution": 1008,
+          "prompt": "person",
+          "geometric_prompts": []
+        },
+        {
+          "name": "text_sports_ball_1008",
+          "resolution": 1008,
+          "prompt": "sports ball",
+          "geometric_prompts": []
+        },
+        {
+          "name": "positive_box_1008",
+          "resolution": 1008,
+          "prompt": null,
+          "geometric_prompts": [
+            {
+              "box": [
+                0.171421875,
+                0.49898936170212765,
+                0.2226875,
+                0.9673758865248228
+              ],
+              "label": true
+            }
+          ]
+        },
+        {
+          "name": "text_person_672",
+          "resolution": 672,
+          "prompt": "person",
+          "geometric_prompts": []
+        },
+        {
+          "name": "text_nonsense_1008",
+          "resolution": 1008,
+          "prompt": "zzzz_not_a_real_class_qqq",
+          "geometric_prompts": []
+        }
+      ]
+    },
+    {
+      "id": 508602,
+      "file_name": "000000508602.jpg",
+      "url": "https://s3.amazonaws.com/images.cocodataset.org/val2017/000000508602.jpg",
+      "sha256": "7152ca666f3c765eb2e99dfaef8e9e62ecdd7159630fc1603f7f649266ee1f9b",
+      "size": [
+        500,
+        429
+      ],
+      "aspect_bucket": "near_square",
+      "license": {
+        "name": "Attribution-NonCommercial-NoDerivs License",
+        "url": "http://creativecommons.org/licenses/by-nc-nd/2.0/"
+      },
+      "cases": [
+        {
+          "name": "text_car_1008",
+          "resolution": 1008,
+          "prompt": "car",
+          "geometric_prompts": []
+        },
+        {
+          "name": "text_bird_1008",
+          "resolution": 1008,
+          "prompt": "bird",
+          "geometric_prompts": []
+        },
+        {
+          "name": "positive_box_1008",
+          "resolution": 1008,
+          "prompt": null,
+          "geometric_prompts": [
+            {
+              "box": [
+                0.50185,
+                0.7883216783216783,
+                0.9963,
+                0.4021445221445222
+              ],
+              "label": true
+            }
+          ]
+        },
+        {
+          "name": "text_car_504",
+          "resolution": 504,
+          "prompt": "car",
+          "geometric_prompts": []
+        }
+      ]
+    },
+    {
+      "id": 522393,
+      "file_name": "000000522393.jpg",
+      "url": "https://s3.amazonaws.com/images.cocodataset.org/val2017/000000522393.jpg",
+      "sha256": "2517edbb93dfb8671bd14bef8485e42f5c5e2ece488e08bcc2fe651ec708a918",
+      "size": [
+        640,
+        640
+      ],
+      "aspect_bucket": "near_square",
+      "license": {
+        "name": "Attribution-NonCommercial-NoDerivs License",
+        "url": "http://creativecommons.org/licenses/by-nc-nd/2.0/"
+      },
+      "cases": [
+        {
+          "name": "text_boat_1008",
+          "resolution": 1008,
+          "prompt": "boat",
+          "geometric_prompts": []
+        },
+        {
+          "name": "text_person_1008",
+          "resolution": 1008,
+          "prompt": "person",
+          "geometric_prompts": []
+        },
+        {
+          "name": "positive_box_1008",
+          "resolution": 1008,
+          "prompt": null,
+          "geometric_prompts": [
+            {
+              "box": [
+                0.57303125,
+                0.8701015625,
+                0.2561875,
+                0.09664062500000001
+              ],
+              "label": true
+            }
+          ]
+        },
+        {
+          "name": "text_boat_672",
+          "resolution": 672,
+          "prompt": "boat",
+          "geometric_prompts": []
+        }
+      ]
+    },
+    {
+      "id": 572462,
+      "file_name": "000000572462.jpg",
+      "url": "https://s3.amazonaws.com/images.cocodataset.org/val2017/000000572462.jpg",
+      "sha256": "4ea4df9f43ef85d3f3ffe88fb95c945ac89b2116df442c3ba30b3ef9dacb6e95",
+      "size": [
+        612,
+        612
+      ],
+      "aspect_bucket": "near_square",
+      "license": {
+        "name": "Attribution-NonCommercial-NoDerivs License",
+        "url": "http://creativecommons.org/licenses/by-nc-nd/2.0/"
+      },
+      "cases": [
+        {
+          "name": "text_train_1008",
+          "resolution": 1008,
+          "prompt": "train",
+          "geometric_prompts": []
+        },
+        {
+          "name": "text_bench_1008",
+          "resolution": 1008,
+          "prompt": "bench",
+          "geometric_prompts": []
+        },
+        {
+          "name": "positive_box_1008",
+          "resolution": 1008,
+          "prompt": null,
+          "geometric_prompts": [
+            {
+              "box": [
+                0.30562091503267974,
+                0.24830882352941178,
+                0.5707843137254902,
+                0.46066993464052286
+              ],
+              "label": true
+            }
+          ]
+        },
+        {
+          "name": "text_train_504",
+          "resolution": 504,
+          "prompt": "train",
+          "geometric_prompts": []
+        }
+      ]
+    }
+  ]
+}

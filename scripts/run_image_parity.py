@@ -364,13 +364,7 @@ def mlx_outputs(
     }
 
 
-_case_specs = case_specs
-_evidence_path = evidence_path
-_mlx_outputs = mlx_outputs
-_validate_official_checkout = validate_official_checkout
-
-
-def _compare_case(
+def compare_release_case(
     spec: OracleCase,
     official: dict[str, np.ndarray],
     mlx: dict[str, np.ndarray],
@@ -506,7 +500,7 @@ def main() -> None:
         preprocessing=args.preprocessing,
     )
     cases = [
-        _compare_case(spec, official, mlx)
+        compare_release_case(spec, official, mlx)
         for spec, official, mlx in zip(
             specs, official_outputs, runtime_outputs, strict=True
         )
