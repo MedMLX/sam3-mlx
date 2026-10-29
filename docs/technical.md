@@ -354,7 +354,10 @@ action and is not implied by the checked-in evidence.
 
 - The two pinned images in the frozen gate do not establish broad segmentation
   quality.
-- No external task-diverse validation corpus is part of the release gate.
+- No external task-diverse validation corpus is part of the release gate. A
+  seeded 24-image COCO val2017 characterization passed 91 of 96 cases; its
+  failures are near-threshold, including two detections that straddle the 0.5
+  confidence cutoff ([receipt](../parity/receipts/coco-val2017-corpus-20261028.json)).
 - Selected-frame inference can be mistaken for tracking if documentation drifts.
 - Random-access OpenCV seeking may be slow on long videos.
 - SAM 3.1 temporal behavior is characterized on a small corpus but not qualified.
@@ -366,11 +369,11 @@ action and is not implied by the checked-in evidence.
 
 ## Highest-leverage next work
 
-1. Add an independent, representative image corpus without weakening the frozen
-   holdout.
-2. Investigate the SAM 3.1 bedroom correction mismatch and qualify temporal
+1. Investigate the SAM 3.1 bedroom correction mismatch and qualify temporal
    tracking on independent sequences, including identity and longer videos.
-3. Run multi-host benchmarks for fast preprocessing.
+2. Run multi-host benchmarks for fast preprocessing.
+3. Decide, before observing new results, how release comparisons should treat
+   detections whose scores straddle the confidence cutoff.
 
 ## Development checks
 

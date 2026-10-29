@@ -6,12 +6,15 @@ listed below. Exploratory and synthetic artifacts do not establish release
 qualification.
 
 A prior broader synthetic image corpus exposed mask-IoU failures at the frozen
-thresholds. Those exploratory artifacts were removed; broader representative-
-image validation remains deferred in `../docs/verification.md`.
+thresholds. Those exploratory artifacts were removed. A seeded COCO val2017
+corpus (`manifests/coco-val2017-v1.json`) now characterizes broader images;
+adding representative images to the release gate remains deferred in
+`../docs/verification.md`.
 
 Later diagnostic characterizations are recorded in
 [`image-bf16-20261027.json`](receipts/image-bf16-20261027.json),
-[`fast-preprocessing-20261028.json`](receipts/fast-preprocessing-20261028.json), and
+[`fast-preprocessing-20261028.json`](receipts/fast-preprocessing-20261028.json),
+[`coco-val2017-corpus-20261028.json`](receipts/coco-val2017-corpus-20261028.json), and
 [`sam31-expanded-temporal-20261026.json`](receipts/sam31-expanded-temporal-20261026.json).
 They do not replace release evidence; their referenced raw diagnostic files may
 not be present in a checkout.

@@ -1,0 +1,205 @@
+{
+  "scope": "Independent characterization of SAM 3 image parity on a seeded COCO val2017 corpus (24 images, 96 cases) against the pinned official CPU FP32 oracle",
+  "manifest": {
+    "path": "parity/manifests/coco-val2017-v1.json",
+    "sha256": "796d7ea889468d186baa79b786b18785bf58e5215ceecd3f84969a9e8c104e2d"
+  },
+  "selection": "Fixed before any output was observed: seed 20261028, 8 landscape / 8 portrait / 8 near-square images; prompts derived from each image's COCO labels",
+  "official_revision": "2814fa619404a722d03e9a012e083e4f293a4e53",
+  "checkpoints": {
+    "official": {
+      "repo": "facebook/sam3",
+      "revision": "3c879f39826c281e95690f02c7821c4de09afae7"
+    },
+    "mlx": {
+      "repo": "mlx-community/sam3-image",
+      "revision": "b72a14d8127e17e6f2a3d2e075bbbf4307ba146e",
+      "precision": "fp32"
+    }
+  },
+  "source_commit": "5f61f1a",
+  "runner": "scripts/run_image_corpus_parity.py --manifest parity/manifests/coco-val2017-v1.json --preprocessing {parity,fast}",
+  "thresholds": {
+    "mask_iou_min": 0.95,
+    "mask_iou_mean_min": 0.99,
+    "box_l_inf_max": 2.0,
+    "score_abs_max": 0.025
+  },
+  "confidence_threshold": 0.5,
+  "host": {
+    "chip": "Apple M5 Max",
+    "platform": "macOS-27.2-arm64",
+    "mlx": "0.32.4",
+    "python": "3.13.17"
+  },
+  "runs": {
+    "parity": {
+      "status": "failed",
+      "summary": {
+        "cases": 96,
+        "detection_count_mismatches": 2,
+        "failed": 5,
+        "passed": 91,
+        "worst_box_l_inf_max": 2.51553,
+        "worst_mask_iou_mean": 0.98911,
+        "worst_mask_iou_min": 0.94825,
+        "worst_score_abs_max": 0.02534
+      },
+      "failures": [
+        {
+          "image_id": 7991,
+          "size": [
+            640,
+            359
+          ],
+          "case": "text_carrot_672",
+          "official_detections": 19,
+          "mlx_detections": 18,
+          "mask_iou_min": null,
+          "mask_iou_mean": null,
+          "box_l_inf_max": null,
+          "score_abs_max": null
+        },
+        {
+          "image_id": 125062,
+          "size": [
+            427,
+            640
+          ],
+          "case": "text_book_1008",
+          "official_detections": 9,
+          "mlx_detections": 9,
+          "mask_iou_min": 0.99754,
+          "mask_iou_mean": 0.99912,
+          "box_l_inf_max": 2.51553,
+          "score_abs_max": 0.00322
+        },
+        {
+          "image_id": 260266,
+          "size": [
+            479,
+            640
+          ],
+          "case": "text_car_1008",
+          "official_detections": 3,
+          "mlx_detections": 3,
+          "mask_iou_min": 0.99866,
+          "mask_iou_mean": 0.99955,
+          "box_l_inf_max": 0.08496,
+          "score_abs_max": 0.02534
+        },
+        {
+          "image_id": 28809,
+          "size": [
+            498,
+            500
+          ],
+          "case": "text_banana_1008",
+          "official_detections": 16,
+          "mlx_detections": 15,
+          "mask_iou_min": null,
+          "mask_iou_mean": null,
+          "box_l_inf_max": null,
+          "score_abs_max": null
+        },
+        {
+          "image_id": 28809,
+          "size": [
+            498,
+            500
+          ],
+          "case": "positive_box_1008",
+          "official_detections": 6,
+          "mlx_detections": 6,
+          "mask_iou_min": 0.94825,
+          "mask_iou_mean": 0.98911,
+          "box_l_inf_max": 1.03978,
+          "score_abs_max": 0.02243
+        }
+      ]
+    },
+    "fast": {
+      "status": "failed",
+      "summary": {
+        "cases": 96,
+        "detection_count_mismatches": 2,
+        "failed": 4,
+        "passed": 92,
+        "worst_box_l_inf_max": 1.45309,
+        "worst_mask_iou_mean": 0.98935,
+        "worst_mask_iou_min": 0.94885,
+        "worst_score_abs_max": 0.02679
+      },
+      "failures": [
+        {
+          "image_id": 7991,
+          "size": [
+            640,
+            359
+          ],
+          "case": "text_carrot_672",
+          "official_detections": 19,
+          "mlx_detections": 18,
+          "mask_iou_min": null,
+          "mask_iou_mean": null,
+          "box_l_inf_max": null,
+          "score_abs_max": null
+        },
+        {
+          "image_id": 260266,
+          "size": [
+            479,
+            640
+          ],
+          "case": "text_car_1008",
+          "official_detections": 3,
+          "mlx_detections": 3,
+          "mask_iou_min": 0.99732,
+          "mask_iou_mean": 0.99911,
+          "box_l_inf_max": 0.07965,
+          "score_abs_max": 0.02679
+        },
+        {
+          "image_id": 28809,
+          "size": [
+            498,
+            500
+          ],
+          "case": "text_banana_1008",
+          "official_detections": 16,
+          "mlx_detections": 15,
+          "mask_iou_min": null,
+          "mask_iou_mean": null,
+          "box_l_inf_max": null,
+          "score_abs_max": null
+        },
+        {
+          "image_id": 28809,
+          "size": [
+            498,
+            500
+          ],
+          "case": "positive_box_1008",
+          "official_detections": 6,
+          "mlx_detections": 6,
+          "mask_iou_min": 0.94885,
+          "mask_iou_mean": 0.98935,
+          "box_l_inf_max": 1.05928,
+          "score_abs_max": 0.02265
+        }
+      ]
+    }
+  },
+  "analysis": [
+    "Both detection-count mismatches are one object straddling the 0.5 confidence threshold: carrot (image 7991, 672) official 0.5026 vs MLX 0.4988; banana (image 28809, 1008) official 0.5131 vs MLX 0.4887. Both score differences are within the 0.025 score tolerance.",
+    "The remaining failures exceed a threshold by at most 26%: one box at 2.52 px (book, parity preprocessing only), one score at 0.0253 (car; 0.0268 with fast preprocessing), and one box-prompt mask at 0.948 minimum IoU (banana).",
+    "Fast preprocessing passed 92 cases and parity preprocessing 91; fast did not fail any case that parity passed.",
+    "Thresholds were not changed after observing these results."
+  ],
+  "limits": [
+    "COCO val2017 images are at most 640 px on the long side, so 1008 cases upsample; downsampling is exercised only at 504.",
+    "This corpus characterizes the runtime; it is not part of the frozen release gate and does not replace the pinned example and holdout reports.",
+    "Images carry mixed Creative Commons licenses and are downloaded on demand from pinned URLs and SHA-256 digests rather than redistributed.",
+    "Raw comparison outputs were kept locally under benchmarks/results and are not distributed."
+  ]
+}

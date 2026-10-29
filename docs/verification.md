@@ -476,6 +476,32 @@ lineage settings, and checks the recorded source revisions. It prints the result
 without writing another report. `validate_release.py` builds and inspects the
 wheel and source distribution.
 
+## COCO val2017 corpus characterization
+
+`parity/manifests/coco-val2017-v1.json` pins 24 COCO val2017 images chosen by
+seed before any output was observed (8 landscape, 8 portrait, 8 near-square)
+and 96 cases derived from each image's own labels. Images are downloaded on
+demand and verified by SHA-256.
+
+```bash
+uv run python scripts/run_image_corpus_parity.py \
+  --official-checkout /path/to/pinned/sam3 \
+  --official-checkpoint /path/to/sam3.pt \
+  --official-python /path/to/oracle/python \
+  --mlx-checkpoint /path/to/model.safetensors \
+  --manifest parity/manifests/coco-val2017-v1.json \
+  --image-dir /path/to/coco-images \
+  --oracle-cache-dir /path/to/oracle-cache \
+  --out benchmarks/results/coco-corpus-parity.json
+```
+
+`scripts/generate_image_parity_corpus.py` regenerates the manifest from
+`instances_val2017.json`. The [characterization](../parity/receipts/coco-val2017-corpus-20261028.json)
+passed 91 of 96 cases with parity preprocessing and 92 with fast preprocessing
+at the frozen thresholds. Two failures are a single detection whose official
+and MLX scores fall on opposite sides of the 0.5 cutoff while agreeing within
+the score tolerance; the other three exceed a threshold by at most 26%.
+
 ## Precision and preprocessing candidates
 
 The frozen image reports use FP32 with parity preprocessing. A later
@@ -586,8 +612,8 @@ baseline rather than bypassing the like-for-like check.
 - investigate the observed SAM 3.1 bedroom correction mismatch and qualify
   temporal identity and numerical behavior on independent representative
   sequences using a compatible CUDA BF16 host and MLX;
-- broader representative-image validation without changing the frozen
-  thresholds;
+- adding representative-image validation to the release gate; the COCO
+  corpus below is a characterization only;
 - long-sequence runs above 300 frames under a separately reviewed execution cap;
 - any default switch to FP16, BF16, `fast`, or `native` preprocessing.
 
