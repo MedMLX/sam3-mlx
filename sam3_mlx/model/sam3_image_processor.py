@@ -445,12 +445,11 @@ def transform_fast(
     image_path_or_pil: ImageSource,
     resolution: object,
 ) -> mx.array:
-    """Resize and normalize on MLX (antialiased bilinear), without the uint8 rounding of parity mode.
+    """Resize and normalize on MLX (antialiased bilinear), rounding to uint8 levels like parity mode.
 
     The output layout and value range match ``transform``. A test on seeded random
     images bounds the maximum difference from ``transform`` to 2/255 in normalized
-    units (one 8-bit level); agreement of the downstream segmentation outputs has not
-    been checked.
+    units (one 8-bit level).
     """
 
     resolution = _validate_processor_resolution(resolution)
@@ -463,7 +462,7 @@ def _resize_normalize_mlx(image: mx.array, *, resolution: int) -> mx.array:
     """Apply the shared device-side HWC uint8 resize and normalization."""
 
     image = image.astype(mx.float32)
-    image = mx.transpose(image, (2, 0, 1))[None] / 255.0
+    image = mx.transpose(image, (2, 0, 1))[None]
     image = interpolate(
         image,
         size=(resolution, resolution),
@@ -471,6 +470,9 @@ def _resize_normalize_mlx(image: mx.array, *, resolution: int) -> mx.array:
         align_corners=False,
         antialias=True,
     )[0]
+    # Round to uint8 levels as TorchVision's uint8 resize does; unrounded inputs
+    # shift text-prompt scores past the release threshold.
+    image = mx.clip(mx.round(image), 0, 255) * (1.0 / 255.0)
     return (image - 0.5) / 0.5
 
 
