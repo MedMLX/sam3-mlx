@@ -440,7 +440,8 @@ def run(
 
     checkpoint: Path | None = None
     if checkpoint_path is not None:
-        checkpoint = Path(checkpoint_path).expanduser().resolve()
+        # Keep symlinks: Hugging Face cache blobs have no suffix for MLX to detect the format.
+        checkpoint = Path(checkpoint_path).expanduser().absolute()
         if not checkpoint.is_file():
             raise AssetNotReadyError(
                 f"Missing sam3-mlx checkpoint: {checkpoint}",

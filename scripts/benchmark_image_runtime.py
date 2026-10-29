@@ -519,7 +519,8 @@ def generate_benchmark(args: argparse.Namespace) -> JsonObject:
             f"{dirty_paths}"
         )
     image, image_identity = _load_image(args)
-    checkpoint = args.checkpoint.resolve()
+    # Keep symlinks: Hugging Face cache blobs have no suffix for MLX to detect the format.
+    checkpoint = args.checkpoint.absolute()
     load_started = time.perf_counter()
     model = sam3_mlx.build_sam3_image_model(
         checkpoint_path=str(checkpoint),

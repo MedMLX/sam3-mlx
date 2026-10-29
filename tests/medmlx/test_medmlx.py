@@ -225,6 +225,31 @@ def test_missing_checkpoint_path_raises_asset_not_ready_before_mlx(
     assert not Path(output_dir).exists()
 
 
+def test_symlinked_checkpoint_keeps_its_safetensors_name(
+    image_path: str, output_dir: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    blob = tmp_path / "blobs" / "0ad4c3f4"
+    blob.parent.mkdir()
+    blob.write_bytes(b"")
+    checkpoint = tmp_path / "model.safetensors"
+    checkpoint.symlink_to(blob)
+    received: list[Path | None] = []
+
+    def fake_build_image_model(*, checkpoint_path: Path | None) -> Sam3Image:
+        received.append(checkpoint_path)
+        raise ValueError("stop after checkpoint resolution")
+
+    monkeypatch.setattr(medmlx, "_build_image_model", fake_build_image_model)
+    with pytest.raises(AssetNotReadyError):
+        medmlx.run(
+            image_path=image_path,
+            output_dir=output_dir,
+            text_prompt="lesion",
+            checkpoint_path=str(checkpoint),
+        )
+    assert received == [checkpoint]
+
+
 def test_output_collision_with_input_is_rejected(tmp_path: Path) -> None:
     colliding_image = tmp_path / medmlx.MASKS_NAME
     Image.new("RGB", (3, 5), (1, 2, 3)).save(colliding_image, format="PNG")
