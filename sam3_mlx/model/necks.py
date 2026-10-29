@@ -130,6 +130,22 @@ def output_levels_for_scalp(total_levels: object, *, scalp: object) -> int | Non
     return total_levels - scalp
 
 
+def _upsample_2x(layer: _ArrayModule, x: mx.array) -> mx.array:
+    """Apply a 2x2, stride-2 ``nn.ConvTranspose2d`` as one matmul plus a pixel shuffle.
+
+    Each input pixel maps to its own 2x2 output block, so this is exact up to
+    float rounding and runs faster than MLX's transposed convolution.
+    """
+    weight = cast(mx.array, getattr(layer, "weight"))  # (out, 2, 2, in)
+    out_channels, kh, kw, in_channels = (int(v) for v in weight.shape)
+    batch, height, width = (int(v) for v in x.shape[:3])
+    y = mx.reshape(x, (-1, in_channels)) @ mx.reshape(weight, (-1, in_channels)).T
+    y = mx.reshape(y, (batch, height, width, out_channels, kh, kw))
+    y = mx.reshape(mx.transpose(y, (0, 1, 4, 2, 5, 3)), (batch, height * kh, width * kw, out_channels))
+    bias = cast(mx.array | None, getattr(layer, "bias", None))
+    return y if bias is None else y + bias
+
+
 def _build_scale_convs(
     dim: int,
     d_model: int,
@@ -211,9 +227,9 @@ class Scale4FN(nn.Module):
         )
 
     def __call__(self, x: mx.array) -> mx.array:
-        x = self.dconv_2x2_0(x)
+        x = _upsample_2x(self.dconv_2x2_0, x)
         x = self.gelu(x)
-        x = self.dconv_2x2_1(x)
+        x = _upsample_2x(self.dconv_2x2_1, x)
         x = self.conv_1x1(x)
         return self.conv_3x3(x)
 
@@ -246,7 +262,7 @@ class Scale2FN(nn.Module):
         )
 
     def __call__(self, x: mx.array) -> mx.array:
-        x = self.dconv_2x2(x)
+        x = _upsample_2x(self.dconv_2x2, x)
         x = self.conv_1x1(x)
         return self.conv_3x3(x)
 
