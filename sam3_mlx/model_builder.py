@@ -43,21 +43,21 @@ from sam3_mlx.checkpoint_loading import (
 from sam3_mlx.sam31_checkpoint import Sam31CheckpointBundle, require_stable_sam31_bundle
 from sam3_mlx.model.sam3_image import Sam3Image
 from sam3_mlx.model_components import (
-    create_dot_product_scoring as _create_dot_product_scoring,
-    create_geometry_encoder as _create_geometry_encoder,
-    create_inst_interactive_predictor as _create_inst_interactive_predictor,
-    create_multiplex_maskmem_backbone as _create_multiplex_maskmem_backbone,
-    create_multiplex_transformer as _create_multiplex_transformer,
-    create_position_encoding as _create_position_encoding,
-    create_sam3_model as _create_sam3_model,
-    create_sam3_transformer as _create_sam3_transformer,
-    create_segmentation_head as _create_segmentation_head,
-    create_text_encoder as _create_text_encoder,
+    create_dot_product_scoring,
+    create_geometry_encoder,
+    create_inst_interactive_predictor,
+    create_multiplex_maskmem_backbone,
+    create_multiplex_transformer,
+    create_position_encoding,
+    create_sam3_model,
+    create_sam3_transformer,
+    create_segmentation_head,
+    create_text_encoder,
     create_tracker_maskmem_backbone,
     create_tracker_transformer,
-    create_vision_backbone as _create_vision_backbone,
-    create_vit_backbone as _create_vit_backbone,
-    create_vl_backbone as _create_vl_backbone,
+    create_vision_backbone,
+    create_vit_backbone,
+    create_vl_backbone,
 )
 from sam3_mlx.model.vl_combiner import SAM3VLBackbone
 
@@ -247,7 +247,7 @@ def build_tracker(
     transformer = create_tracker_transformer()
     backbone = None
     if with_backbone:
-        vision_backbone = _create_vision_backbone(
+        vision_backbone = create_vision_backbone(
             compile_mode=None,
             enable_inst_interactivity=True,
         )
@@ -296,24 +296,24 @@ def _assemble_sam3_image_components(
 ) -> Sam3Image:
     """Construct the image module graph without loading weights or setting policy."""
 
-    vision_encoder = _create_vision_backbone(
+    vision_encoder = create_vision_backbone(
         compile_mode=None,
         enable_inst_interactivity=enable_inst_interactivity,
     )
-    text_encoder = _create_text_encoder(bpe_path)
-    backbone = _create_vl_backbone(
+    text_encoder = create_text_encoder(bpe_path)
+    backbone = create_vl_backbone(
         vision_encoder,
         text_encoder,
         compile_visual=compile,
     )
-    transformer = _create_sam3_transformer()
-    dot_product_scoring = _create_dot_product_scoring()
-    segmentation_head = _create_segmentation_head() if enable_segmentation else None
-    input_geometry_encoder = _create_geometry_encoder()
+    transformer = create_sam3_transformer()
+    dot_product_scoring = create_dot_product_scoring()
+    segmentation_head = create_segmentation_head() if enable_segmentation else None
+    input_geometry_encoder = create_geometry_encoder()
     inst_interactive_predictor = (
-        _create_inst_interactive_predictor() if enable_inst_interactivity else None
+        create_inst_interactive_predictor() if enable_inst_interactivity else None
     )
-    return _create_sam3_model(
+    return create_sam3_model(
         backbone,
         transformer,
         input_geometry_encoder,
@@ -751,8 +751,8 @@ def _create_multiplex_tri_backbone(
         "sam3_mlx.model_builder._create_multiplex_tri_backbone(use_rope_real=True)",
         use_rope_real=use_rope_real,
     )
-    position_encoding = _create_position_encoding(precompute_resolution=1008)
-    vit_backbone = _create_vit_backbone(compile_mode=compile_mode)
+    position_encoding = create_position_encoding(precompute_resolution=1008)
+    vit_backbone = create_vit_backbone(compile_mode=compile_mode)
     return Sam3TriViTDetNeck(
         trunk=vit_backbone,
         position_encoding=position_encoding,
@@ -797,10 +797,10 @@ def build_sam3_multiplex_video_model(
     if bundle is not None:
         checkpoint_path = bundle.weights
 
-    maskmem_backbone = _create_multiplex_maskmem_backbone(
+    maskmem_backbone = create_multiplex_maskmem_backbone(
         multiplex_count=multiplex_count
     )
-    transformer = _create_multiplex_transformer(
+    transformer = create_multiplex_transformer(
         use_fa3=use_fa3,
         use_rope_real=use_rope_real,
     )
@@ -903,12 +903,12 @@ def _build_multiplex_detector_for_predictor(
         use_fa3=use_fa3,
         use_rope_real=use_rope_real,
     )
-    text_encoder = _create_text_encoder(bpe_path)
+    text_encoder = create_text_encoder(bpe_path)
     backbone = SAM3VLBackboneTri(scalp=0, visual=tri_neck, text=text_encoder)
-    transformer = _create_sam3_transformer()
-    segmentation_head = _create_segmentation_head()
-    geometry_encoder = _create_geometry_encoder()
-    dot_prod_scoring = _create_dot_product_scoring()
+    transformer = create_sam3_transformer()
+    segmentation_head = create_segmentation_head()
+    geometry_encoder = create_geometry_encoder()
+    dot_prod_scoring = create_dot_product_scoring()
 
     from sam3_mlx.model.sam3_multiplex_detector import Sam3MultiplexDetector
 

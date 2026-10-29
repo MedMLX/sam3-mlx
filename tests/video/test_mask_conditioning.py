@@ -31,7 +31,8 @@ from sam3_mlx.model.sam3_video_inference import (
 )
 from sam3_mlx.model.sam3_video_predictor import Sam3VideoPredictor
 from sam3_mlx.model.vl_combiner import SAM3VLBackbone
-from sam3_mlx.model_builder import build_sam3_video_model, create_tracker_transformer
+from sam3_mlx.model_builder import build_sam3_video_model
+from sam3_mlx.model_components import create_tracker_transformer
 
 
 class _TinyBackbone:

@@ -21,7 +21,7 @@ from sam3_mlx.model.sam3_tracker_base import (
     TrackerOutputState,
     TrackerStoredFrameOutput,
 )
-from sam3_mlx.model_builder import (
+from sam3_mlx.model_components import (
     create_tracker_maskmem_backbone,
     create_tracker_transformer,
 )

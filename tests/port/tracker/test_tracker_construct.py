@@ -14,8 +14,8 @@ import pytest
 from sam3_mlx.checkpoint_mapping import flatten_model_parameters
 from sam3_mlx.model.sam3_tracker_base import Sam3TrackerBase, concat_points
 from sam3_mlx.model.sam3_tracking_predictor import Sam3TrackerPredictor
-from sam3_mlx.model_builder import (
-    build_tracker,
+from sam3_mlx.model_builder import build_tracker
+from sam3_mlx.model_components import (
     create_tracker_maskmem_backbone,
     create_tracker_transformer,
 )

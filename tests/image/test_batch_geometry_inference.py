@@ -14,7 +14,7 @@ from sam3_mlx.model.sam3_image_processor import (
     Sam3Processor,
     _parse_prompt_batch,  # pyright: ignore[reportPrivateUsage]
 )
-from sam3_mlx.model_builder import _create_geometry_encoder  # pyright: ignore[reportPrivateUsage]
+from sam3_mlx.model_components import create_geometry_encoder
 from tests.image.test_sam3_image_processor import FakeModel
 
 
@@ -90,7 +90,7 @@ def _set_geometry(
 
 def test_native_batched_geometry_matches_individual_inference_with_padding() -> None:
     mx.random.seed(17)
-    encoder = _create_geometry_encoder()
+    encoder = create_geometry_encoder()
     encoder.eval()
     boxes = [[[0.5, 0.5, 0.5, 0.5], [0.25, 0.4, 0.2, 0.4]], [], [[0.6, 0.6, 0.3, 0.3]]]
     points = [[[0.3, 0.7]], [[0.2, 0.3], [0.8, 0.5]], []]

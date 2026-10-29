@@ -104,10 +104,10 @@ def test_refinement_uses_best_previous_mask_and_preserves_prompt_batch() -> None
 
 
 def test_image_builder_uses_official_mask_cleanup_defaults() -> None:
-    from sam3_mlx.model_builder import _create_inst_interactive_predictor  # pyright: ignore[reportPrivateUsage]
+    from sam3_mlx.model_components import create_inst_interactive_predictor
     from types import SimpleNamespace
 
-    predictor = _create_inst_interactive_predictor()
+    predictor = create_inst_interactive_predictor()
     actual = cleanup_policy(cast(InteractiveModel, SimpleNamespace(inst_interactive_predictor=predictor)))
     assert actual.mask_threshold == 0.0
     assert actual.max_hole_area == 256.0
