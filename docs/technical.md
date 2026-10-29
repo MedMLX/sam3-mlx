@@ -113,9 +113,11 @@ artifact with a conversion manifest whose floating dtype inventory matches the
 requested policy.
 
 `Sam3Processor(preprocessing="parity")` retains the TorchVision-matched release
-path. `preprocessing="fast"` uses MLX antialiased resize and records a distinct
-benchmark runtime policy. The fast path has a pixel-level bound but remains
-unattested for segmentation outputs.
+path. `preprocessing="fast"` uses MLX antialiased resize, rounds to uint8 levels like
+the release path, and records a distinct benchmark runtime policy. It passes the
+frozen 11-case thresholds against the official oracle on one Apple Silicon host
+([characterization](../parity/receipts/fast-preprocessing-20261028.json)); it is
+not part of the release-qualified default.
 
 ### Selected-frame video
 
@@ -357,8 +359,8 @@ action and is not implied by the checked-in evidence.
 - Random-access OpenCV seeking may be slow on long videos.
 - SAM 3.1 temporal behavior is characterized on a small corpus but not qualified.
 - `model_builder.py` is a large maintainability hotspot.
-- Independent reduced-precision and fast-preprocessing output parity is not yet
-  attested.
+- Independent reduced-precision output parity is not yet attested. Fast
+  preprocessing is characterized on the two pinned images only.
 - The performance baseline checked into this repository represents one Apple
   Silicon host.
 
@@ -368,7 +370,7 @@ action and is not implied by the checked-in evidence.
    holdout.
 2. Investigate the SAM 3.1 bedroom correction mismatch and qualify temporal
    tracking on independent sequences, including identity and longer videos.
-3. Run output-level parity and multi-host benchmarks for fast preprocessing.
+3. Run multi-host benchmarks for fast preprocessing.
 
 ## Development checks
 

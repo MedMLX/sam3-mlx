@@ -487,7 +487,9 @@ does not replace the frozen reports or establish temporal parity.
 
 Candidate FP16 artifacts and the fast preprocessing path use the legacy
 comparison entrypoint only for local qualification; they do not alter the frozen
-image reports.
+image reports. A [fast-preprocessing characterization](../parity/receipts/fast-preprocessing-20261028.json)
+passed all 11 frozen cases after fast mode adopted uint8 rounding; before that
+change, two `text_shoe` cases exceeded the score threshold.
 The runner requires the candidate artifact's immutable identity and validates
 its dtype manifest before loading:
 

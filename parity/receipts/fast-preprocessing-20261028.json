@@ -1,0 +1,364 @@
+{
+  "scope": "Output-level characterization of preprocessing=\"fast\" against the pinned official CPU FP32 oracle on the frozen 11-case image matrix",
+  "official_revision": "2814fa619404a722d03e9a012e083e4f293a4e53",
+  "checkpoints": {
+    "official": {
+      "repo": "facebook/sam3",
+      "revision": "3c879f39826c281e95690f02c7821c4de09afae7",
+      "name": "sam3.pt"
+    },
+    "mlx": {
+      "repo": "mlx-community/sam3-image",
+      "revision": "b72a14d8127e17e6f2a3d2e075bbbf4307ba146e",
+      "precision": "fp32"
+    }
+  },
+  "runner": "scripts/run_image_parity.py --preprocessing {parity,fast} --profile {example,holdout}",
+  "thresholds": {
+    "box_l_inf_max": 2.0,
+    "mask_iou_mean_min": 0.99,
+    "mask_iou_min": 0.95,
+    "score_abs_max": 0.025
+  },
+  "host": {
+    "chip": "Apple M5 Max",
+    "platform": "macOS-27.2-arm64",
+    "mlx": "0.32.4",
+    "python": "3.13.17"
+  },
+  "runs": {
+    "parity_preprocessing": {
+      "source_commit": "448a466",
+      "example": {
+        "status": "passed",
+        "cases": {
+          "text_shoe_1008": {
+            "status": "passed",
+            "detections": 12,
+            "mask_iou_min": 0.99658,
+            "mask_iou_mean": 0.99933,
+            "box_l_inf_max": 0.04688,
+            "score_abs_max": 0.00182
+          },
+          "text_nonsense_1008": {
+            "status": "passed",
+            "detections": 0,
+            "mask_iou_min": null,
+            "mask_iou_mean": null,
+            "box_l_inf_max": null,
+            "score_abs_max": null
+          },
+          "positive_box_1008": {
+            "status": "passed",
+            "detections": 6,
+            "mask_iou_min": 0.99846,
+            "mask_iou_mean": 0.99929,
+            "box_l_inf_max": 0.55695,
+            "score_abs_max": 0.00891
+          },
+          "positive_negative_box_1008": {
+            "status": "passed",
+            "detections": 5,
+            "mask_iou_min": 0.99952,
+            "mask_iou_mean": 0.99963,
+            "box_l_inf_max": 0.09515,
+            "score_abs_max": 0.00188
+          },
+          "text_shoe_672": {
+            "status": "passed",
+            "detections": 13,
+            "mask_iou_min": 0.99542,
+            "mask_iou_mean": 0.99869,
+            "box_l_inf_max": 0.06033,
+            "score_abs_max": 0.00209
+          },
+          "text_shoe_504": {
+            "status": "passed",
+            "detections": 12,
+            "mask_iou_min": 0.99211,
+            "mask_iou_mean": 0.99884,
+            "box_l_inf_max": 0.13617,
+            "score_abs_max": 0.00172
+          }
+        }
+      },
+      "holdout": {
+        "status": "passed",
+        "cases": {
+          "text_paper_bag_1008": {
+            "status": "passed",
+            "detections": 4,
+            "mask_iou_min": 0.99953,
+            "mask_iou_mean": 0.99978,
+            "box_l_inf_max": 0.03906,
+            "score_abs_max": 0.00143
+          },
+          "text_paper_bag_672": {
+            "status": "passed",
+            "detections": 4,
+            "mask_iou_min": 0.99964,
+            "mask_iou_mean": 0.99984,
+            "box_l_inf_max": 0.03848,
+            "score_abs_max": 0.00044
+          },
+          "text_paper_bag_504": {
+            "status": "passed",
+            "detections": 4,
+            "mask_iou_min": 0.99944,
+            "mask_iou_mean": 0.99956,
+            "box_l_inf_max": 0.03622,
+            "score_abs_max": 0.00041
+          },
+          "text_car_1008": {
+            "status": "passed",
+            "detections": 1,
+            "mask_iou_min": 0.99981,
+            "mask_iou_mean": 0.99981,
+            "box_l_inf_max": 0.08268,
+            "score_abs_max": 0.00065
+          },
+          "text_nonsense_1008": {
+            "status": "passed",
+            "detections": 0,
+            "mask_iou_min": null,
+            "mask_iou_mean": null,
+            "box_l_inf_max": null,
+            "score_abs_max": null
+          }
+        }
+      }
+    },
+    "fast_before_rounding": {
+      "source_commit": "448a466",
+      "example": {
+        "status": "failed",
+        "cases": {
+          "text_shoe_1008": {
+            "status": "failed",
+            "detections": 12,
+            "mask_iou_min": 0.98915,
+            "mask_iou_mean": 0.99724,
+            "box_l_inf_max": 0.18134,
+            "score_abs_max": 0.04751
+          },
+          "text_nonsense_1008": {
+            "status": "passed",
+            "detections": 0,
+            "mask_iou_min": null,
+            "mask_iou_mean": null,
+            "box_l_inf_max": null,
+            "score_abs_max": null
+          },
+          "positive_box_1008": {
+            "status": "passed",
+            "detections": 6,
+            "mask_iou_min": 0.99634,
+            "mask_iou_mean": 0.99793,
+            "box_l_inf_max": 0.46075,
+            "score_abs_max": 0.00652
+          },
+          "positive_negative_box_1008": {
+            "status": "passed",
+            "detections": 5,
+            "mask_iou_min": 0.99638,
+            "mask_iou_mean": 0.99805,
+            "box_l_inf_max": 0.36838,
+            "score_abs_max": 0.01683
+          },
+          "text_shoe_672": {
+            "status": "failed",
+            "detections": 13,
+            "mask_iou_min": 0.95352,
+            "mask_iou_mean": 0.99037,
+            "box_l_inf_max": 0.36432,
+            "score_abs_max": 0.03532
+          },
+          "text_shoe_504": {
+            "status": "passed",
+            "detections": 12,
+            "mask_iou_min": 0.98878,
+            "mask_iou_mean": 0.99617,
+            "box_l_inf_max": 0.2475,
+            "score_abs_max": 0.00376
+          }
+        }
+      },
+      "holdout": {
+        "status": "passed",
+        "cases": {
+          "text_paper_bag_1008": {
+            "status": "passed",
+            "detections": 4,
+            "mask_iou_min": 0.99945,
+            "mask_iou_mean": 0.99972,
+            "box_l_inf_max": 0.05571,
+            "score_abs_max": 0.00319
+          },
+          "text_paper_bag_672": {
+            "status": "passed",
+            "detections": 4,
+            "mask_iou_min": 0.99736,
+            "mask_iou_mean": 0.9985,
+            "box_l_inf_max": 0.11893,
+            "score_abs_max": 0.00758
+          },
+          "text_paper_bag_504": {
+            "status": "passed",
+            "detections": 4,
+            "mask_iou_min": 0.9982,
+            "mask_iou_mean": 0.99885,
+            "box_l_inf_max": 0.11401,
+            "score_abs_max": 0.0023
+          },
+          "text_car_1008": {
+            "status": "passed",
+            "detections": 1,
+            "mask_iou_min": 0.99649,
+            "mask_iou_mean": 0.99649,
+            "box_l_inf_max": 0.07349,
+            "score_abs_max": 0.0039
+          },
+          "text_nonsense_1008": {
+            "status": "passed",
+            "detections": 0,
+            "mask_iou_min": null,
+            "mask_iou_mean": null,
+            "box_l_inf_max": null,
+            "score_abs_max": null
+          }
+        }
+      }
+    },
+    "fast_with_rounding": {
+      "source_commit": "afa90db",
+      "example": {
+        "status": "passed",
+        "cases": {
+          "text_shoe_1008": {
+            "status": "passed",
+            "detections": 12,
+            "mask_iou_min": 0.99563,
+            "mask_iou_mean": 0.99912,
+            "box_l_inf_max": 0.04541,
+            "score_abs_max": 0.00107
+          },
+          "text_nonsense_1008": {
+            "status": "passed",
+            "detections": 0,
+            "mask_iou_min": null,
+            "mask_iou_mean": null,
+            "box_l_inf_max": null,
+            "score_abs_max": null
+          },
+          "positive_box_1008": {
+            "status": "passed",
+            "detections": 6,
+            "mask_iou_min": 0.99791,
+            "mask_iou_mean": 0.99918,
+            "box_l_inf_max": 0.50555,
+            "score_abs_max": 0.00955
+          },
+          "positive_negative_box_1008": {
+            "status": "passed",
+            "detections": 5,
+            "mask_iou_min": 0.99931,
+            "mask_iou_mean": 0.99951,
+            "box_l_inf_max": 0.20581,
+            "score_abs_max": 0.00557
+          },
+          "text_shoe_672": {
+            "status": "passed",
+            "detections": 13,
+            "mask_iou_min": 0.99486,
+            "mask_iou_mean": 0.99841,
+            "box_l_inf_max": 0.06812,
+            "score_abs_max": 0.00534
+          },
+          "text_shoe_504": {
+            "status": "passed",
+            "detections": 12,
+            "mask_iou_min": 0.99211,
+            "mask_iou_mean": 0.9983,
+            "box_l_inf_max": 0.11658,
+            "score_abs_max": 0.00157
+          }
+        }
+      },
+      "holdout": {
+        "status": "passed",
+        "cases": {
+          "text_paper_bag_1008": {
+            "status": "passed",
+            "detections": 4,
+            "mask_iou_min": 0.99953,
+            "mask_iou_mean": 0.99983,
+            "box_l_inf_max": 0.03629,
+            "score_abs_max": 0.00122
+          },
+          "text_paper_bag_672": {
+            "status": "passed",
+            "detections": 4,
+            "mask_iou_min": 0.99964,
+            "mask_iou_mean": 0.99981,
+            "box_l_inf_max": 0.03891,
+            "score_abs_max": 0.00041
+          },
+          "text_paper_bag_504": {
+            "status": "passed",
+            "detections": 4,
+            "mask_iou_min": 0.99936,
+            "mask_iou_mean": 0.99951,
+            "box_l_inf_max": 0.03259,
+            "score_abs_max": 0.00059
+          },
+          "text_car_1008": {
+            "status": "passed",
+            "detections": 1,
+            "mask_iou_min": 0.99979,
+            "mask_iou_mean": 0.99979,
+            "box_l_inf_max": 0.09656,
+            "score_abs_max": 2e-05
+          },
+          "text_nonsense_1008": {
+            "status": "passed",
+            "detections": 0,
+            "mask_iou_min": null,
+            "mask_iou_mean": null,
+            "box_l_inf_max": null,
+            "score_abs_max": null
+          }
+        }
+      }
+    }
+  },
+  "change": "Fast preprocessing previously normalized the antialiased MLX resize without TorchVision's uint8 rounding, leaving inputs up to half an 8-bit level off. It now resizes in 0-255 space and rounds half to even; over 99.8% of pixels match parity mode on both pinned images and the rest differ by one level.",
+  "benchmark_median_ms": {
+    "source_commit": "cb5b87b",
+    "image": "official-checkout/assets/images/test_image.jpg",
+    "parity": {
+      "1008": {
+        "preprocess": 30.7,
+        "full_image_text": 270.2
+      },
+      "672": {
+        "preprocess": 26.9,
+        "full_image_text": 128.3
+      }
+    },
+    "fast": {
+      "1008": {
+        "preprocess": 23.9,
+        "full_image_text": 268.5
+      },
+      "672": {
+        "preprocess": 16.3,
+        "full_image_text": 119.8
+      }
+    }
+  },
+  "limits": [
+    "Two pinned images on one Apple Silicon host; not an independent corpus or multi-host benchmark.",
+    "This characterization does not replace the frozen FP32 parity-preprocessing release reports.",
+    "Raw comparison outputs were kept locally under benchmarks/results and are not distributed."
+  ]
+}
