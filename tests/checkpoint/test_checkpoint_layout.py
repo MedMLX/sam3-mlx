@@ -7,11 +7,11 @@ from hypothesis import given, strategies as st
 
 from sam3_mlx.convert import normalize_sam3_image_weight_layout
 from sam3_mlx.checkpoint_mapping import (
-    normalize_inst_interactive_weights as _normalize_inst_interactive_weights,
-    normalize_sam31_multiplex_tracker_weights as _normalize_sam31_multiplex_tracker_weights,
-    normalize_sam31_multiplex_weights as _normalize_sam31_multiplex_weights,
-    normalize_sam3_image_weights as normalize_sam3_image_weights,
-    normalize_tracker_checkpoint_weights as _normalize_tracker_checkpoint_weights,
+    normalize_inst_interactive_weights,
+    normalize_sam31_multiplex_tracker_weights,
+    normalize_sam31_multiplex_weights,
+    normalize_sam3_image_weights,
+    normalize_tracker_checkpoint_weights,
 )
 from sam3_mlx.model_builder import build_tracker
 from tests.checkpoint._factories import WeightLeaf
@@ -323,7 +323,7 @@ def test_normalize_inst_interactive_weights_splits_transformers_point_embeddings
         ).astype(mx.float32)
     }
 
-    normalized = _normalize_inst_interactive_weights(payload)
+    normalized = normalize_inst_interactive_weights(payload)
 
     assert sorted(normalized) == [
         "inst_interactive_predictor.model.sam_prompt_encoder.point_embeddings.0.weight",
@@ -349,7 +349,7 @@ def test_normalize_inst_interactive_weights_splits_transformers_point_embeddings
 ))
 def test_interactive_point_embedding_split_roundtrip(rows: list[list[int]]) -> None:
     packed = mx.array(rows, dtype=mx.float32)
-    normalized = _normalize_inst_interactive_weights({
+    normalized = normalize_inst_interactive_weights({
         "tracker_model.prompt_encoder.point_embed.weight": packed,
     })
     restored = mx.concatenate([
@@ -374,7 +374,7 @@ def test_interactive_normalization_rejects_colliding_aliases(
     if reverse:
         sources.reverse()
     with pytest.raises(ValueError, match="source weights collide"):
-        _normalize_inst_interactive_weights(dict(sources))
+        normalize_inst_interactive_weights(dict(sources))
 
 
 @pytest.mark.parametrize("prefix", [
@@ -392,7 +392,7 @@ def test_interactive_normalization_rejects_colliding_split_point_embeddings(
     if reverse:
         sources.reverse()
     with pytest.raises(ValueError, match="source weights collide"):
-        _normalize_inst_interactive_weights(dict(sources))
+        normalize_inst_interactive_weights(dict(sources))
 
 
 def test_normalize_inst_interactive_weights_maps_transformers_aliases() -> None:
@@ -422,7 +422,7 @@ def test_normalize_inst_interactive_weights_maps_transformers_aliases() -> None:
         ),
     }
 
-    normalized = _normalize_inst_interactive_weights(payload)
+    normalized = normalize_inst_interactive_weights(payload)
 
     assert "inst_interactive_predictor.model.no_mem_embed" in normalized
     assert (
@@ -474,7 +474,7 @@ def test_normalize_inst_interactive_weights_converts_official_conv2d_layout() ->
         ).astype(mx.float32)
     }
 
-    normalized = _normalize_inst_interactive_weights(payload)
+    normalized = normalize_inst_interactive_weights(payload)
 
     key = (
         "inst_interactive_predictor.model.sam_prompt_encoder."
@@ -502,7 +502,7 @@ def test_normalize_inst_interactive_weights_maps_sam2_predictor_prompt_conv_alia
         ).astype(mx.float32)
     }
 
-    normalized = _normalize_inst_interactive_weights(payload)
+    normalized = normalize_inst_interactive_weights(payload)
 
     key = (
         "inst_interactive_predictor.model.sam_prompt_encoder."
@@ -530,7 +530,7 @@ def test_normalize_inst_interactive_weights_converts_official_convtranspose_layo
         ).astype(mx.float32)
     }
 
-    normalized = _normalize_inst_interactive_weights(payload)
+    normalized = normalize_inst_interactive_weights(payload)
 
     key = (
         "inst_interactive_predictor.model.sam_mask_decoder."
@@ -551,7 +551,7 @@ def test_normalize_inst_interactive_weights_maps_tracker_decoder_upscale_alias()
         ).astype(mx.float32)
     }
 
-    normalized = _normalize_inst_interactive_weights(payload)
+    normalized = normalize_inst_interactive_weights(payload)
 
     key = (
         "inst_interactive_predictor.model.sam_mask_decoder."
@@ -595,7 +595,7 @@ def test_normalize_tracker_checkpoint_weights_maps_core_tracker_aliases() -> Non
         ).astype(mx.float32),
     }
 
-    normalized = _normalize_tracker_checkpoint_weights(payload, model)
+    normalized = normalize_tracker_checkpoint_weights(payload, model)
 
     assert normalized["no_mem_embed"].shape == (1, 1, 256)
     assert normalized["maskmem_tpos_enc"].shape == (7, 1, 1, 64)
@@ -632,7 +632,7 @@ def test_tracker_raw_wrappers_preserve_conv_and_deconv_values(prefix: str) -> No
         prefix + "maskmem_backbone.fuser.layers.0.dwconv.bias": mx.full((256,), 7.0),
         prefix + "sam_mask_decoder.output_upscaling.0.weight": deconv,
     }
-    normalized = _normalize_tracker_checkpoint_weights(payload, model)
+    normalized = normalize_tracker_checkpoint_weights(payload, model)
     conv_key = "maskmem_backbone.fuser.layers.0.dwconv.conv"
     assert normalized[conv_key + ".weight"].shape == (256, 7, 7, 1)
     assert normalized[conv_key + ".weight"][3, 2, 1, 0].item() == depthwise[3, 0, 2, 1].item()
@@ -685,7 +685,7 @@ def test_normalize_sam31_multiplex_weights_maps_detector_and_tracker_aliases() -
         "tracker_model.sam_mask_decoder.output_hypernetworks_mlps.0.proj_out.weight": proj_out,
     }
 
-    normalized = _normalize_sam31_multiplex_weights(payload, model)
+    normalized = normalize_sam31_multiplex_weights(payload, model)
 
     np.testing.assert_array_equal(
         to_numpy(
@@ -770,7 +770,7 @@ def test_normalize_sam31_multiplex_tracker_weights_maps_direct_model_prefix() ->
         )
     }
 
-    normalized = _normalize_sam31_multiplex_tracker_weights(payload, model)
+    normalized = normalize_sam31_multiplex_tracker_weights(payload, model)
 
     assert sorted(normalized) == ["output_valid_embed"]
     np.testing.assert_array_equal(
@@ -783,6 +783,6 @@ def test_sam31_incomplete_split_projection_preserves_unmapped_source() -> None:
     model = _TinySam31MultiplexTree()
     key = "detector_model.vision_encoder.backbone.layers.0.attention.q_proj.weight"
     value = mx.array([[1.0, 2.0], [3.0, 4.0]])
-    normalized = _normalize_sam31_multiplex_weights({key: value}, model)
+    normalized = normalize_sam31_multiplex_weights({key: value}, model)
     assert tuple(normalized) == (key,)
     np.testing.assert_array_equal(to_numpy(normalized[key]), [[1.0, 2.0], [3.0, 4.0]])

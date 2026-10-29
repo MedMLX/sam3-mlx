@@ -11,12 +11,12 @@ from hypothesis import given, strategies as st
 
 from sam3_mlx.checkpoint_loading import (
     Sam3CheckpointLoadReport,
-    audit_sam3_checkpoint_load as audit_sam3_image_checkpoint_load,
-    is_generated_checkpoint_key as _is_generated_checkpoint_key,
-    load_image_checkpoint as _load_checkpoint,
-    load_multiplex_checkpoint as load_multiplex_checkpoint,
-    load_multiplex_tracker_checkpoint as _load_multiplex_tracker_checkpoint,
-    load_tracker_checkpoint as _load_tracker_checkpoint,
+    audit_sam3_checkpoint_load,
+    is_generated_checkpoint_key,
+    load_image_checkpoint,
+    load_multiplex_checkpoint,
+    load_multiplex_tracker_checkpoint,
+    load_tracker_checkpoint,
 )
 from tests._mlx_runtime import save_safetensors
 from sam3_mlx.checkpoint_mapping import (
@@ -136,7 +136,7 @@ def test_checkpoint_audit_reports_loaded_missing_extra_and_shape_mismatch() -> N
         "extra.weight": mx.ones((1,)),
     }
 
-    report = audit_sam3_image_checkpoint_load(model, weights)
+    report = audit_sam3_checkpoint_load(model, weights)
 
     assert report.loaded == ("head.weight",)
     assert report.missing == ("scale",)
@@ -149,11 +149,11 @@ def test_checkpoint_audit_reports_loaded_missing_extra_and_shape_mismatch() -> N
 
 
 def test_generated_checkpoint_allowlist_is_exact() -> None:
-    assert _is_generated_checkpoint_key("backbone.language_backbone.encoder.attn_mask")
-    assert _is_generated_checkpoint_key(
+    assert is_generated_checkpoint_key("backbone.language_backbone.encoder.attn_mask")
+    assert is_generated_checkpoint_key(
         "detector.backbone.language_backbone.encoder.attn_mask"
     )
-    assert not _is_generated_checkpoint_key("detector.attn_mask")
+    assert not is_generated_checkpoint_key("detector.attn_mask")
 
 
 def test_load_checkpoint_rejects_partial_checkpoint_without_mutating_model(
@@ -169,7 +169,7 @@ def test_load_checkpoint_rejects_partial_checkpoint_without_mutating_model(
     )
 
     with pytest.raises(ValueError, match="missing_required=2"):
-        _load_checkpoint(model, checkpoint_path)
+        load_image_checkpoint(model, checkpoint_path)
 
     np.testing.assert_array_equal(
         to_numpy(flatten_model_parameters(model)["head.weight"]),
@@ -185,7 +185,7 @@ def test_load_checkpoint_allows_explicit_development_partial_load(
     replacement = mx.reshape(mx.arange(6), (2, 3)).astype(mx.float32)
     save_safetensors(checkpoint_path, {"head.weight": replacement})
 
-    report = _load_checkpoint(model, checkpoint_path, strict=False)
+    report = load_image_checkpoint(model, checkpoint_path, strict=False)
 
     assert report.loaded == ("head.weight",)
     assert report.missing == ("head.bias", "scale")
@@ -213,7 +213,7 @@ def test_load_checkpoint_rejects_unreviewed_source_weight(
     )
 
     with pytest.raises(ValueError, match="without a reviewed model mapping"):
-        _load_checkpoint(model, checkpoint_path)
+        load_image_checkpoint(model, checkpoint_path)
 
 
 @pytest.mark.parametrize("enable_segmentation", [False, True])
@@ -229,7 +229,7 @@ def test_load_checkpoint_handles_optional_segmentation_head(
         {key: mx.array(value) for key, value in image_checkpoint_values.items()},
     )
 
-    report = _load_checkpoint(model, checkpoint_path)
+    report = load_image_checkpoint(model, checkpoint_path)
 
     assert report.extra == (() if enable_segmentation else ("segmentation_head.weight",))
     assert report.missing == ()
@@ -280,7 +280,7 @@ def test_optional_segmentation_head_keeps_checkpoint_coverage_strict(
     )
 
     with pytest.raises(ValueError, match=error):
-        _load_checkpoint(model, checkpoint_path)
+        load_image_checkpoint(model, checkpoint_path)
 
     parameters = flatten_model_parameters(model)
     for key, expected in original.items():
@@ -303,7 +303,7 @@ def test_load_checkpoint_rejects_shape_mismatch_without_partial_load(
     )
 
     with pytest.raises(ValueError, match="shape-mismatched weights"):
-        _load_checkpoint(model, checkpoint_path)
+        load_image_checkpoint(model, checkpoint_path)
 
     np.testing.assert_array_equal(
         to_numpy(flatten_model_parameters(model)["head.weight"]),
@@ -322,7 +322,7 @@ def test_load_checkpoint_normalizes_known_conv_layout_before_audit(
     )
     save_safetensors(checkpoint_path, {key: torch_layout})
 
-    report = _load_checkpoint(model, checkpoint_path, strict=False)
+    report = load_image_checkpoint(model, checkpoint_path, strict=False)
 
     assert report.loaded == (key,)
     assert report.shape_mismatched == ()
@@ -350,7 +350,7 @@ def test_load_checkpoint_merges_explicit_interactive_checkpoint(tmp_path: Path) 
         },
     )
 
-    report = _load_checkpoint(
+    report = load_image_checkpoint(
         model,
         checkpoint_path,
         interactive_checkpoint_path=interactive_checkpoint_path,
@@ -390,7 +390,7 @@ def test_load_checkpoint_rejects_interactive_checkpoint_without_interactivity(
         ValueError,
         match="interactive_checkpoint_path requires",
     ):
-        _load_checkpoint(
+        load_image_checkpoint(
             model,
             checkpoint_path,
             interactive_checkpoint_path=interactive_checkpoint_path,
@@ -428,7 +428,7 @@ def test_load_checkpoint_rejects_interactive_shape_mismatch_without_partial_load
             r"model \(1, 1, 2\), checkpoint \(1, 1, 3\)"
         ),
     ):
-        _load_checkpoint(
+        load_image_checkpoint(
             model,
             checkpoint_path,
             interactive_checkpoint_path=interactive_checkpoint_path,
@@ -458,7 +458,7 @@ def test_load_tracker_checkpoint_maps_official_alias_and_loads(tmp_path: Path) -
         },
     )
 
-    report = _load_tracker_checkpoint(model, checkpoint_path)
+    report = load_tracker_checkpoint(model, checkpoint_path)
 
     assert report.loaded == ("no_mem_embed",)
     np.testing.assert_array_equal(
@@ -484,7 +484,7 @@ def test_load_tracker_checkpoint_rejects_shape_mismatch_without_partial_load(
     )
 
     with pytest.raises(ValueError, match="shape-mismatched weights"):
-        _load_tracker_checkpoint(model, checkpoint_path)
+        load_tracker_checkpoint(model, checkpoint_path)
 
     np.testing.assert_array_equal(
         to_numpy(flatten_model_parameters(model)["no_mem_embed"]),
@@ -504,7 +504,7 @@ def test_tracker_checkpoint_rejects_unreviewed_source_before_mutation(
         prefix + "unreviewed.weight": mx.ones((1,)),
     })
     with pytest.raises(ValueError, match="source weights without a reviewed model mapping"):
-        _load_tracker_checkpoint(model, checkpoint)
+        load_tracker_checkpoint(model, checkpoint)
     np.testing.assert_array_equal(to_numpy(model.no_mem_embed), original)
 
 
@@ -516,7 +516,7 @@ def test_tracker_checkpoint_rejects_colliding_source_aliases(tmp_path: Path) -> 
         "tracker_model.no_memory_embedding": mx.zeros((1, 1, 2)),
     })
     with pytest.raises(ValueError, match="source weights collide"):
-        _load_tracker_checkpoint(model, checkpoint)
+        load_tracker_checkpoint(model, checkpoint)
 
 
 @pytest.mark.parametrize("key", [
@@ -532,7 +532,7 @@ def test_tracker_checkpoint_ignores_source_outside_tracker_scope(
         "tracker.no_mem_embed": mx.ones((1, 1, 2)),
         key: mx.ones((1,)),
     })
-    report = _load_tracker_checkpoint(model, checkpoint)
+    report = load_tracker_checkpoint(model, checkpoint)
     assert report.loaded == ("no_mem_embed",)
     assert report.extra == ()
 
@@ -554,7 +554,7 @@ def test_tracker_normalization_preserves_unknown_native_weights(
     payload.update(unknown_weights)
 
     normalized = normalize_tracker_checkpoint_weights(payload, model)
-    report = audit_sam3_image_checkpoint_load(model, normalized)
+    report = audit_sam3_checkpoint_load(model, normalized)
 
     assert report.loaded == ("no_mem_embed",)
     assert set(report.extra) == set(unknown_weights)
@@ -794,7 +794,7 @@ def test_load_multiplex_tracker_checkpoint_loads_direct_tracker_model(
         {"tracker_model.output_valid_embed": output_valid},
     )
 
-    report = _load_multiplex_tracker_checkpoint(model, checkpoint_path)
+    report = load_multiplex_tracker_checkpoint(model, checkpoint_path)
 
     assert report.loaded == ("output_valid_embed",)
     np.testing.assert_array_equal(
@@ -814,7 +814,7 @@ def test_load_multiplex_tracker_checkpoint_accepts_merged_tracker_namespace(
         {"tracker.model.output_valid_embed": output_valid},
     )
 
-    report = _load_multiplex_tracker_checkpoint(model, checkpoint_path)
+    report = load_multiplex_tracker_checkpoint(model, checkpoint_path)
 
     assert report.loaded == ("output_valid_embed",)
     np.testing.assert_array_equal(
@@ -850,7 +850,7 @@ def test_tracker_with_backbone_loads_and_evaluates_all_native_weights(
         save_safetensors(image_checkpoint, image_weights)
     else:
         save_safetensors(checkpoint, tracker_weights | image_weights)
-    report = _load_tracker_checkpoint(
+    report = load_tracker_checkpoint(
         model, checkpoint,
         backbone_checkpoint_path=image_checkpoint if separate_backbone else None,
     )
@@ -863,7 +863,7 @@ def test_tracker_checkpoint_missing_backbone_fails_before_mutation(tmp_path: Pat
     checkpoint = tmp_path / "tracker.safetensors"
     save_safetensors(checkpoint, {"tracker.no_mem_embed": mx.ones((1, 1, 2))})
     with pytest.raises(ValueError, match="no detector weights"):
-        _load_tracker_checkpoint(model, checkpoint)
+        load_tracker_checkpoint(model, checkpoint)
     np.testing.assert_array_equal(to_numpy(model.no_mem_embed), np.zeros((1, 1, 2)))
 
 
@@ -929,7 +929,7 @@ def test_interactive_checkpoint_extracts_image_heads_from_full_tracker(
         "tracker.transformer.encoder.weight": mx.ones((2, 2)),
         "tracker.maskmem_backbone.memory.weight": mx.ones((2, 2)),
     })
-    report = _load_checkpoint(model, base, interactive_checkpoint_path=tracker)
+    report = load_image_checkpoint(model, base, interactive_checkpoint_path=tracker)
     assert report.extra == ()
     assert report.loaded == ("base.weight", "inst_interactive_predictor.model.no_mem_embed")
     np.testing.assert_array_equal(to_numpy(flatten_model_parameters(model)["inst_interactive_predictor.model.no_mem_embed"]), [[[7.0, 8.0]]])
@@ -948,7 +948,7 @@ def test_interactive_checkpoint_rejects_unknown_head_without_mutating_model(
         "tracker.sam_mask_decoder.unreviewed.weight": mx.ones((1,)),
     })
     with pytest.raises(ValueError, match="source weights without a reviewed model mapping"):
-        _load_checkpoint(model, base, interactive_checkpoint_path=tracker)
+        load_image_checkpoint(model, base, interactive_checkpoint_path=tracker)
     np.testing.assert_array_equal(to_numpy(flatten_model_parameters(model)["base.weight"]), original)
 
 
@@ -972,7 +972,7 @@ def test_interactive_checkpoint_rejects_colliding_aliases_without_mutating_model
     save_safetensors(tracker, dict(sources))
 
     with pytest.raises(ValueError, match="source weights collide"):
-        _load_checkpoint(model, base, interactive_checkpoint_path=tracker)
+        load_image_checkpoint(model, base, interactive_checkpoint_path=tracker)
 
     for key, value in flatten_model_parameters(model).items():
         np.testing.assert_array_equal(to_numpy(value), original[key])

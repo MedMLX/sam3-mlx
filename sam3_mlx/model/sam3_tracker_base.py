@@ -1397,7 +1397,7 @@ class Sam3TrackerBase(nn.Module):
 
 
 @overload
-def _concat_points(
+def concat_points(
     old_point_inputs: PointInputs | None,
     new_points: mx.array,
     new_labels: mx.array,
@@ -1405,14 +1405,14 @@ def _concat_points(
 
 
 @overload
-def _concat_points(
+def concat_points(
     old_point_inputs: _NumpyPointInputs | None,
     new_points: np.ndarray,
     new_labels: np.ndarray,
 ) -> _NumpyPointInputs: ...
 
 
-def _concat_points(
+def concat_points(
     old_point_inputs: PointInputs | _NumpyPointInputs | None,
     new_points: ArrayLike,
     new_labels: ArrayLike,
@@ -1438,7 +1438,6 @@ def _concat_points(
     )
 
 
-concat_points = _concat_points
 
 
 __all__ = [

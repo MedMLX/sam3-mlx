@@ -43,7 +43,6 @@ from sam3_mlx.model.sam3_image import (
 from sam3_mlx.precision import cast_visual_input, model_precision, parse_precision
 from sam3_mlx.resolutions import DEFAULT_IMAGE_RESOLUTION, PATCH_SIZE
 
-SAM3_IMAGE_PATCH_SIZE = PATCH_SIZE
 PREPROCESSED_LAYOUTS = ("nchw", "nhwc")
 PREPROCESSED_VALUE_CONTRACT = "normalized-minus1-plus1"
 DEFAULT_TEXT_CACHE_SIZE = 8
@@ -170,13 +169,13 @@ def _validate_processor_resolution(resolution: object) -> int:
     if isinstance(resolution, bool) or not isinstance(resolution, Integral):
         raise ValueError(
             "Processor resolution must be a positive integer multiple of "
-            f"{SAM3_IMAGE_PATCH_SIZE}, got {resolution!r}."
+            f"{PATCH_SIZE}, got {resolution!r}."
         )
     resolution = int(resolution)
-    if resolution <= 0 or resolution % SAM3_IMAGE_PATCH_SIZE != 0:
+    if resolution <= 0 or resolution % PATCH_SIZE != 0:
         raise ValueError(
             "Processor resolution must be a positive integer multiple of "
-            f"{SAM3_IMAGE_PATCH_SIZE}, got {resolution}."
+            f"{PATCH_SIZE}, got {resolution}."
         )
     return resolution
 
