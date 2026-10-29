@@ -35,10 +35,10 @@ from sam3_mlx._device import is_mlx_runtime_device
 from sam3_mlx._unsupported import raise_unsupported
 import sam3_mlx.convert as sam3_convert
 from sam3_mlx.checkpoint_loading import (
-    load_image_checkpoint as _load_checkpoint,
+    load_image_checkpoint,
     load_multiplex_checkpoint as load_multiplex_checkpoint,
-    load_multiplex_tracker_checkpoint as _load_multiplex_tracker_checkpoint,
-    load_tracker_checkpoint as _load_tracker_checkpoint,
+    load_multiplex_tracker_checkpoint,
+    load_tracker_checkpoint,
 )
 from sam3_mlx.sam31_checkpoint import Sam31CheckpointBundle, require_stable_sam31_bundle
 from sam3_mlx.model.sam3_image import Sam3Image
@@ -281,7 +281,7 @@ def build_tracker(
         use_memory_selection=apply_temporal_disambiguation,
     )
     if checkpoint_path is not None:
-        _load_tracker_checkpoint(
+        load_tracker_checkpoint(
             model, checkpoint_path, backbone_checkpoint_path=backbone_checkpoint_path
         )
     return model
@@ -543,7 +543,7 @@ def build_sam3_image_model(
         }
 
     if checkpoint_path is not None:
-        _load_checkpoint(
+        load_image_checkpoint(
             model,
             f"{checkpoint_path}",
             interactive_checkpoint_path=interactive_checkpoint_path,
@@ -878,7 +878,7 @@ def build_sam3_multiplex_video_model(
         use_memory_selection=False,
     )
     if checkpoint_path is not None:
-        _load_multiplex_tracker_checkpoint(
+        load_multiplex_tracker_checkpoint(
             model,
             checkpoint_path,
             strict=strict_state_dict_loading,

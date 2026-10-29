@@ -717,5 +717,3 @@ def perf_mask_iom(pred_masks: ArrayValue, gt_masks: ArrayValue) -> ArrayValue:
     return _from_numpy(ioms, pred_masks, gt_masks)
 
 
-mask_iou = perf_mask_iou
-mask_iom = perf_mask_iom

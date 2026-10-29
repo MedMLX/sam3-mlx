@@ -615,7 +615,7 @@ def update_attn_keys(key: str, mlx_weights: MutableMapping[str, mx.array]) -> No
         mlx_weights.update(new_dict)
 
 
-def _unwrap_checkpoint_payload(payload: object) -> object:
+def unwrap_checkpoint_payload(payload: object) -> object:
     if isinstance(payload, Mapping):
         mapping = cast(Mapping[object, object], payload)
         model = mapping.get("model")
@@ -624,7 +624,7 @@ def _unwrap_checkpoint_payload(payload: object) -> object:
     return cast(object, payload)
 
 
-def _remap_official_prefix_keys[T](weights: Mapping[str, T]) -> Mapping[str, T]:
+def remap_official_prefix_keys[T](weights: Mapping[str, T]) -> Mapping[str, T]:
     if not any(
         k.startswith("sam3_model.") or k.startswith("sam2_predictor.") for k in weights
     ):
@@ -722,8 +722,8 @@ def convert(
     torch = cast(_TorchModule, import_module("torch"))
     weight_file = str(model_path / "sam3.pt")
     weights = torch.load(weight_file, map_location="cpu", weights_only=True)
-    weights = _unwrap_checkpoint_payload(weights)
-    weights = _remap_official_prefix_keys(torch_weights(weights))
+    weights = unwrap_checkpoint_payload(weights)
+    weights = remap_official_prefix_keys(torch_weights(weights))
     mlx_weights, ignored = _convert_checkpoint_weights(
         weights, source_label=weight_file
     )
@@ -1101,5 +1101,3 @@ if __name__ == "__main__":
         )
         print(f"MLX weights available at: {weights_path}")
 
-unwrap_checkpoint_payload = _unwrap_checkpoint_payload
-remap_official_prefix_keys = _remap_official_prefix_keys

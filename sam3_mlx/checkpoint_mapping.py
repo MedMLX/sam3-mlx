@@ -26,7 +26,7 @@ CheckpointSource: TypeAlias = Mapping[str, object]
 NormalizedWeights: TypeAlias = dict[str, mx.array]
 
 
-class _HasParameters(Protocol):
+class HasParameters(Protocol):
     def parameters(self) -> object: ...
 
 
@@ -43,7 +43,7 @@ class _TreeFlatten(Protocol):
 _tree_flatten = cast(_TreeFlatten, getattr(mlx_utils, "tree_flatten"))
 
 
-def flatten_model_parameters(model: _HasParameters) -> NormalizedWeights:
+def flatten_model_parameters(model: HasParameters) -> NormalizedWeights:
     """Return the model's parameters as a flat ``{dotted_name: mx.array}`` dict."""
     payload = _tree_flatten(model.parameters(), destination={})
     if not isinstance(payload, dict):
@@ -69,7 +69,7 @@ def _require_checkpoint_mapping(payload: object, *, message: str) -> CheckpointS
     return normalized
 
 
-def _require_mx_array(value: object, *, key: str) -> mx.array:
+def require_mx_array(value: object, *, key: str) -> mx.array:
     if not isinstance(value, mx.array):
         raise TypeError(
             f"Expected checkpoint value for {key!r} to be an MLX array, "
@@ -153,7 +153,7 @@ def normalize_sam3_image_weights(
         return {
             key: sam3_convert.normalize_sam3_image_weight_layout(
                 key,
-                _require_mx_array(value, key=key),
+                require_mx_array(value, key=key),
             )
             for key, value in ckpt_dict.items()
         }
@@ -173,7 +173,7 @@ def normalize_sam3_image_weights(
     return {
         key: sam3_convert.normalize_sam3_image_weight_layout(
             key,
-            _require_mx_array(value, key=key),
+            require_mx_array(value, key=key),
         )
         for key, value in image_weights.items()
     }
@@ -452,7 +452,7 @@ def normalize_inst_interactive_weights(payload: object) -> NormalizedWeights:
             raise ValueError(f"SAM3 interactive source weights collide at {target_key!r}.")
         weights[target_key] = _normalize_inst_interactive_weight_layout(
             target_key,
-            _require_mx_array(value, key=target_key),
+            require_mx_array(value, key=target_key),
         )
 
     return weights
@@ -595,7 +595,7 @@ def _normalize_tracker_weight_to_shape(
     value: object,
     target_shape: Sequence[int],
 ) -> mx.array:
-    value = _require_mx_array(value, key=key)
+    value = require_mx_array(value, key=key)
     if tuple(value.shape) == tuple(target_shape):
         return value
     if len(value.shape) == 4:
@@ -623,7 +623,7 @@ def _resolve_tracker_target_key(
 
 def normalize_tracker_checkpoint_weights(
     payload: object,
-    model: _HasParameters,
+    model: HasParameters,
     *,
     backbone_payload: object | None = None,
 ) -> NormalizedWeights:
@@ -668,7 +668,7 @@ def normalize_tracker_checkpoint_weights(
 
         target_key = _resolve_tracker_target_key(target_key, model_weights)
         if target_key is None:
-            weights[key] = _require_mx_array(value, key=key)
+            weights[key] = require_mx_array(value, key=key)
             continue
         if target_key in weights:
             raise ValueError(f"SAM3 tracker source weights collide at {target_key!r}.")
@@ -713,7 +713,7 @@ def _normalize_sam31_weight_to_shape(
 ) -> mx.array:
     """Normalize a mapped SAM 3.1 checkpoint value to a local MLX parameter."""
 
-    value = _require_mx_array(value, key=key)
+    value = require_mx_array(value, key=key)
     if tuple(value.shape) == tuple(target_shape):
         return value
     if (
@@ -1249,7 +1249,7 @@ def _add_sam31_merged_weight(
 
 def normalize_sam31_multiplex_tracker_weights(
     payload: object,
-    model: _HasParameters,
+    model: HasParameters,
     *,
     prefix: str = "",
 ) -> NormalizedWeights:
@@ -1280,12 +1280,12 @@ def normalize_sam31_multiplex_tracker_weights(
         for source_key, source in ckpt.items():
             if source_key.startswith(("detector.", "detector_model.")):
                 continue
-            value = _require_mx_array(source, key=source_key)
+            value = require_mx_array(source, key=source_key)
             if not source_key.startswith(merged_prefix):
                 weights[source_key] = value
                 continue
             inner = source_key[len(merged_prefix) :]
-            value = _require_mx_array(value, key=source_key)
+            value = require_mx_array(value, key=source_key)
             if not _add_sam31_merged_weight(prefix + inner, value, model_weights, weights):
                 weights[source_key] = value
         return weights
@@ -1308,14 +1308,14 @@ def normalize_sam31_multiplex_tracker_weights(
     for key, value in ckpt.items():
         if not key.startswith("tracker_model."):
             if not key.startswith(("detector.", "detector_model.")):
-                weights[key] = _require_mx_array(value, key=key)
+                weights[key] = require_mx_array(value, key=key)
             continue
         if key == point_key and isinstance(point_embed, mx.array) and len(point_targets) == int(point_embed.shape[0]):
             continue
         inner = key[len("tracker_model.") :]
         target_inner = _map_sam31_multiplex_tracker_inner_key(inner)
         if target_inner is None or not _add_sam31_weight(prefix + target_inner, value, model_weights, weights):
-            weights[key] = _require_mx_array(value, key=key)
+            weights[key] = require_mx_array(value, key=key)
 
     return weights
 
@@ -1329,7 +1329,7 @@ def _normalize_sam31_detector_weights(
     for key, source in ckpt.items():
         if not key.startswith("detector_model."):
             continue
-        value = _require_mx_array(source, key=key)
+        value = require_mx_array(source, key=key)
         mapped = _map_sam31_detector_model_key(key, value, qkv_groups)
         if mapped is not None:
             if not _add_sam31_weight(*mapped, model_weights, weights):
@@ -1349,7 +1349,7 @@ def _normalize_sam31_detector_weights(
 
 def normalize_sam31_multiplex_weights(
     payload: object,
-    model: _HasParameters,
+    model: HasParameters,
 ) -> NormalizedWeights:
     """Normalize SAM 3.1 multiplex checkpoint keys into the local predictor tree.
 
@@ -1373,7 +1373,7 @@ def normalize_sam31_multiplex_weights(
     )
     if merged_keys:
         for key, source in ckpt.items():
-            value = _require_mx_array(source, key=key)
+            value = require_mx_array(source, key=key)
             if not _add_sam31_merged_weight(key, value, model_weights, weights):
                 weights[key] = value
         return weights
@@ -1386,10 +1386,7 @@ def normalize_sam31_multiplex_weights(
     weights.update(tracker_weights)
     for key, value in ckpt.items():
         if not key.startswith(("detector_model.", "tracker_model.")):
-            weights[key] = _require_mx_array(value, key=key)
+            weights[key] = require_mx_array(value, key=key)
     return weights
 
 
-# Public cross-module entry points; private helpers remain implementation details.
-HasParameters = _HasParameters
-require_mx_array = _require_mx_array
