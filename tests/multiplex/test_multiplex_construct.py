@@ -8,14 +8,16 @@ from sam3_mlx import Sam3MlxUnsupportedError
 from sam3_mlx import model_builder
 from sam3_mlx.checkpoint_mapping import flatten_model_parameters
 from sam3_mlx.model.decoder import TransformerEncoderDecoupledCrossAttention
-from sam3_mlx.model.memory import SimpleMaskEncoder
-from sam3_mlx.model.model_misc import TransformerWrapper
 from sam3_mlx.model.multiplex_utils import UnsupportedMultiplexRuntimeError
 from sam3_mlx.model.necks import Sam3TriViTDetNeck
 from sam3_mlx.model.video_tracking_multiplex_demo import (
     Sam3VideoTrackingMultiplexDemo,
 )
 from sam3_mlx.model_builder import build_sam3_multiplex_video_model
+from sam3_mlx.model_components import (
+    create_multiplex_maskmem_backbone,
+    create_multiplex_transformer,
+)
 
 
 def _component_factory(name: str) -> object:
@@ -26,20 +28,12 @@ def _component_factory(name: str) -> object:
 
 
 def test_multiplex_component_builders_construct_official_shapes() -> None:
-    create_maskmem = cast(
-        Callable[[int], SimpleMaskEncoder],
-        _component_factory("_create_multiplex_maskmem_backbone"),
-    )
-    create_transformer = cast(
-        Callable[[bool, bool], TransformerWrapper],
-        _component_factory("_create_multiplex_transformer"),
-    )
     create_tri_backbone = cast(
         Callable[[str | None, bool, bool], Sam3TriViTDetNeck],
         _component_factory("_create_multiplex_tri_backbone"),
     )
-    maskmem = create_maskmem(4)
-    transformer = create_transformer(False, False)
+    maskmem = create_multiplex_maskmem_backbone(4)
+    transformer = create_multiplex_transformer(False, False)
     tri_neck = create_tri_backbone(None, False, False)
 
     assert maskmem.mask_downsampler.multiplex_count == 8

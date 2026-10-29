@@ -522,7 +522,7 @@ class Sam3TrackerPredictor(Sam3TrackerBase):
         **kwargs: Unpack[TrackerBaseOptions],
     ) -> None:
         if transformer is None or maskmem_backbone is None:
-            from sam3_mlx.model_builder import (
+            from sam3_mlx.model_components import (
                 create_tracker_maskmem_backbone,
                 create_tracker_transformer,
             )
