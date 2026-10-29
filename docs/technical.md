@@ -42,6 +42,11 @@ these paths do not enter the wheel.
 stable API above (image segmentation only); it is not itself part of the
 stable API and adds no new capability.
 
+Reusable image, tracker, and multiplex component factories live in
+`sam3_mlx.model_components`. Public builder orchestration and validation remain
+in `sam3_mlx.model_builder`; checkpoint mapping and loading have separate
+modules.
+
 ## Runtime data flow
 
 ### Image inference
@@ -354,9 +359,7 @@ action and is not implied by the checked-in evidence.
 1. Add a broader external image corpus without weakening the frozen holdout.
 2. Run output-level parity and multi-host benchmarks for fast preprocessing.
 3. Add a sequential video decode path for forward propagation.
-4. Split checkpoint normalization and component factories out of
-   `model_builder.py` without changing the stable release contract.
-5. Treat temporal tracking as a separate 0.2 assurance program.
+4. Treat temporal tracking as a separate 0.2 assurance program.
 
 ## Development checks
 
