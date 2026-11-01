@@ -1,0 +1,106 @@
+{
+  "images": [
+    {
+      "file": "chest_xray.jpg",
+      "sha256": "1c9af46d7d423f08989c934c6e8413142de3d3cfb0978a14f506c39778ecc2dc",
+      "size": [
+        671,
+        768
+      ],
+      "mode": "RGB",
+      "modality": "Chest X-ray, posteroanterior",
+      "target": "lungs",
+      "license": "CC0-1.0",
+      "license_url": "https://commons.wikimedia.org/wiki/File:Normal_posteroanterior_(PA)_chest_radiograph_(X-ray).jpg",
+      "attribution": "Chest radiograph by Mikael Häggström, via Wikimedia Commons, CC0 1.0.",
+      "source_url": "https://upload.wikimedia.org/wikipedia/commons/a/a1/Normal_posteroanterior_%28PA%29_chest_radiograph_%28X-ray%29.jpg",
+      "source_sha256": "4cbbcf805291db949e4ff085ca3c7258b2823de21b2857ae684e6c91ff9a38a4",
+      "processing": "Resized to a 768-pixel long side with Lanczos and saved as JPEG quality 90 without metadata."
+    },
+    {
+      "file": "dermoscopy_isic_0000000.jpg",
+      "sha256": "fc5880144d267ae257a8e2bf25315ea5291c958a452de98c920c71904c71326e",
+      "size": [
+        1022,
+        767
+      ],
+      "mode": "RGB",
+      "modality": "Dermoscopy, melanocytic nevus",
+      "target": "skin lesion",
+      "license": "CC0-1.0",
+      "license_url": "https://api.isic-archive.com/api/v2/images/ISIC_0000000/",
+      "attribution": "ISIC_0000000, ISIC Archive (isic-archive.com), CC0 1.0.",
+      "source_url": "https://isic-archive.s3.amazonaws.com/images/ISIC_0000000.jpg",
+      "source_sha256": "fc5880144d267ae257a8e2bf25315ea5291c958a452de98c920c71904c71326e",
+      "processing": "None."
+    },
+    {
+      "file": "ct_abdomen_kidneys.png",
+      "sha256": "df7be9cc88f44d4aa25479ab3032dce8d5c3dd61edb5e8c1276d5744d4d2d986",
+      "size": [
+        450,
+        280
+      ],
+      "mode": "RGB",
+      "modality": "CT, axial abdomen",
+      "target": "kidneys",
+      "license": "CC0-1.0",
+      "license_url": "https://commons.wikimedia.org/wiki/File:CT_of_a_normal_abdomen_and_pelvis,_axial_plane_120.png",
+      "attribution": "Cropped from \"CT of a normal abdomen and pelvis, axial plane 120\" by Mikael Häggström, via Wikimedia Commons, CC0 1.0.",
+      "source_url": "https://upload.wikimedia.org/wikipedia/commons/b/bb/CT_of_a_normal_abdomen_and_pelvis%2C_axial_plane_120.png",
+      "source_sha256": "ab9df3110e2eb4b0b3e1abad6a404e265c6e1a954279496d8a77319e169146e7",
+      "processing": "Cropped to the box (40, 30, 490, 310) to remove viewer labels and the coronal inset."
+    },
+    {
+      "file": "mri_brain_meningiomas.jpg",
+      "sha256": "f72e7c1fa2fe0449aec2e260518c27610639059c5640425abf34d5021de910c5",
+      "size": [
+        509,
+        443
+      ],
+      "mode": "RGB",
+      "modality": "MRI, sagittal T1 with contrast, multiple meningiomas",
+      "target": "meningiomas",
+      "license": "public-domain",
+      "license_url": "https://commons.wikimedia.org/wiki/File:Recklinghausen2.jpg",
+      "attribution": "Sagittal T1 MRI by MBq (German Wikipedia), via Wikimedia Commons, public domain.",
+      "source_url": "https://upload.wikimedia.org/wikipedia/commons/0/02/Recklinghausen2.jpg",
+      "source_sha256": "f72e7c1fa2fe0449aec2e260518c27610639059c5640425abf34d5021de910c5",
+      "processing": "None."
+    },
+    {
+      "file": "ultrasound_gallbladder.jpg",
+      "sha256": "fa7376fbaa22546b7525bedb00bbcdba845988656a8d06e5200613af860949d4",
+      "size": [
+        505,
+        702
+      ],
+      "mode": "RGB",
+      "modality": "Ultrasound, gallbladder with sludge and stones",
+      "target": "gallbladder",
+      "license": "CC0-1.0",
+      "license_url": "https://commons.wikimedia.org/wiki/File:Ultrasonography_of_sludge_and_gallstones.jpg",
+      "attribution": "Ultrasonography by Mikael Häggström, via Wikimedia Commons, CC0 1.0.",
+      "source_url": "https://upload.wikimedia.org/wikipedia/commons/a/a7/Ultrasonography_of_sludge_and_gallstones.jpg",
+      "source_sha256": "fa7376fbaa22546b7525bedb00bbcdba845988656a8d06e5200613af860949d4",
+      "processing": "None."
+    },
+    {
+      "file": "microscopy_nuclei.png",
+      "sha256": "40b323f8d2b24a1723d71a545302a31627b460d3e25712e17d8e54b54dde3a92",
+      "size": [
+        512,
+        512
+      ],
+      "mode": "L",
+      "modality": "Fluorescence microscopy, human cell nuclei (DNA channel), 8-bit grayscale",
+      "target": "cell nuclei",
+      "license": "CC0-1.0",
+      "license_url": "https://github.com/CellProfiler/examples/blob/ab40cbdb6068b04a7e02a0a3e08042b37433a97c/ExampleHuman/README.md",
+      "attribution": "Human cell nuclei, CellProfiler ExampleHuman (Moffat et al., Cell 2006; © David Root), CC0 1.0.",
+      "source_url": "https://raw.githubusercontent.com/CellProfiler/examples/ab40cbdb6068b04a7e02a0a3e08042b37433a97c/ExampleHuman/images/AS_09125_050116030001_D03f00d0.tif",
+      "source_sha256": "2751ba667c4067c5d30817cff004aa06f6f6287f1cdbb5b8c9c6a500308cb456",
+      "processing": "Converted losslessly from TIFF to PNG."
+    }
+  ]
+}
