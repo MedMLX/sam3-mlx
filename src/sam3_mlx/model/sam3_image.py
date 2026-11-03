@@ -302,8 +302,7 @@ class Sam3Image(nn.Module):
         if predictor is None:
             raise ValueError(
                 "predict_inst needs the interactive predictor: build the model with "
-                "build_sam3_image_model(enable_inst_interactivity=True, "
-                "interactive_checkpoint_path=...)."
+                "build_sam3_image_model(enable_inst_interactivity=True)."
             )
         height = inference_state.get("original_height")
         width = inference_state.get("original_width")

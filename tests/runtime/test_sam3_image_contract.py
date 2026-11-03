@@ -26,9 +26,8 @@ def test_predict_inst_without_interactive_predictor_names_the_build_options() ->
     model = _empty_model()
     model.inst_interactive_predictor = None
 
-    with pytest.raises(ValueError, match="enable_inst_interactivity=True") as error:
+    with pytest.raises(ValueError, match="enable_inst_interactivity=True"):
         model.predict_inst(interactive_state(interactive_features(), (12, 20)))
-    assert "interactive_checkpoint_path" in str(error.value)
 
 
 @pytest.mark.parametrize(

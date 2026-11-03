@@ -32,6 +32,9 @@ if TYPE_CHECKING:
 
     from sam3_mlx.model.sam3_video_predictor import Sam3VideoPredictor
 
+# MedMLX model ID of the interactive head; medmlx-core resolves it to MedMLX/sam3-interactive.
+INTERACTIVE_WEIGHTS_ID = "sam3-interactive"
+
 # FP32 checkpoint tensors are materialized in batches of about this many bytes.
 _LOAD_BATCH_BYTES = 64 << 20
 
@@ -108,21 +111,24 @@ def build_sam3_image_model(
     in the MedMLX cache, ``medmlx_core.weights.weights_dir("sam3")``
     (``~/.cache/medmlx/sam3``), which downloads the pinned
     ``mlx-community/sam3-image`` revision on first use. With neither source the
-    image model is randomly initialized and a warning is emitted. The
-    interactive head is never downloaded: it comes only from
-    ``interactive_checkpoint_path``.
+    image model is randomly initialized and a warning is emitted. With
+    ``enable_inst_interactivity`` and ``load_from_HF``, the interactive head
+    comes from ``interactive_checkpoint_path`` or, when that is omitted, from
+    ``model.safetensors`` in ``weights_dir("sam3-interactive")``, which
+    downloads ``MedMLX/sam3-interactive`` on first use.
 
     Args:
         bpe_path: Tokenizer vocabulary; defaults to the packaged file.
         eval_mode: Put the model in evaluation mode.
         checkpoint_path: Local MLX ``.safetensors`` file, not a directory.
         load_from_HF: Without ``checkpoint_path``, load the cached default
-            checkpoint, downloading it if needed. False leaves random
-            initialization.
+            checkpoint, downloading it if needed; likewise the interactive head
+            when it is enabled without ``interactive_checkpoint_path``. False
+            leaves random initialization and downloads nothing.
         enable_inst_interactivity: Also build the SAM1-style interactive
             point/box/mask predictor (``Sam3Image.predict_inst``) and the SAM2
-            feature pyramid. Strict loading of a base checkpoint then needs
-            ``interactive_checkpoint_path``.
+            feature pyramid. Without ``load_from_HF``, strict loading of a base
+            checkpoint then needs ``interactive_checkpoint_path``.
         compile: Compile the visual backbone and grounding graphs with MLX
             (opt-in; image model only).
         precision: ``"fp32"`` (default) or ``"bf16"``. BF16 loads the FP32
@@ -149,6 +155,13 @@ def build_sam3_image_model(
         )
     if checkpoint_path is None and load_from_HF:
         checkpoint_path = weights_dir("sam3") / "model.safetensors"
+    if enable_inst_interactivity and interactive_checkpoint_path is None and load_from_HF:
+        # mlx-community/sam3-image holds only the detector; the head converted
+        # from sam3.pt's tracker (scripts/convert_interactive_head.py) is
+        # published separately as MedMLX/sam3-interactive.
+        interactive_checkpoint_path = (
+            weights_dir(INTERACTIVE_WEIGHTS_ID) / "model.safetensors"
+        )
     model = _assemble_sam3_image_components(
         bpe_path=os.fspath(default_bpe_path() if bpe_path is None else bpe_path),
         enable_inst_interactivity=enable_inst_interactivity,

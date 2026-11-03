@@ -69,6 +69,34 @@ def test_interactive_checkpoint_combines_with_the_cached_default(
     assert loaded == [(tmp_path / "model.safetensors", "interactive.safetensors")]
 
 
+def test_interactive_head_defaults_to_its_medmlx_cache_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Enabling interactivity without a head file downloads MedMLX/sam3-interactive."""
+    requested: list[str] = []
+    loaded: list[tuple[object, object]] = []
+
+    def cached(model_id: str) -> Path:
+        requested.append(model_id)
+        return tmp_path / model_id
+
+    def load(_model: object, checkpoint_path: object, **kwargs: object) -> None:
+        loaded.append((checkpoint_path, kwargs["interactive_checkpoint_path"]))
+        raise _StopAfterLoad
+
+    monkeypatch.setattr(model_builder, "weights_dir", cached)
+    monkeypatch.setattr(model_builder, "load_image_checkpoint", load)
+
+    with pytest.raises(_StopAfterLoad):
+        model_builder.build_sam3_image_model(enable_inst_interactivity=True)
+
+    assert requested == ["sam3", "sam3-interactive"]
+    assert loaded == [(
+        tmp_path / "sam3" / "model.safetensors",
+        tmp_path / "sam3-interactive" / "model.safetensors",
+    )]
+
+
 def test_interactive_checkpoint_without_interactivity_is_rejected_before_building(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

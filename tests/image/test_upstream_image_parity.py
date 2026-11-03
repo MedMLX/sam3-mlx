@@ -1,4 +1,4 @@
-"""Interactive output contracts from upstream SAM3 at 0570b3a.
+"""Interactive output contracts from upstream SAM3 at 2814fa6.
 
 These execute the MLX prompt encoder and decoder on deterministic synthetic
 features; they do not qualify full-checkpoint image accuracy.

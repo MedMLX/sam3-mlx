@@ -123,6 +123,24 @@ the backbone and detector projections in BF16 from the FP32 weights;
 `compile=True` compiles the image graph with MLX. Both can change outputs
 slightly.
 
+For SAM 1-style clicks and boxes in pixels, enable the interactive head. It
+downloads on first use (17 MB, from
+[MedMLX/sam3-interactive](https://huggingface.co/MedMLX/sam3-interactive)):
+
+```python
+import numpy as np
+
+model = build_sam3_image_model(enable_inst_interactivity=True)
+state = Sam3Processor(model).set_image("astronaut.png")
+masks, scores, _ = model.predict_inst(
+    state, point_coords=np.array([[260, 80]]), point_labels=np.array([1])
+)
+```
+
+`masks` holds three candidate masks `(3, height, width)` and `scores` their
+predicted quality; pass `box=np.array([x0, y0, x1, y1])` or
+`multimask_output=False` for one mask.
+
 For video, `build_sam3_predictor()` opens sessions over image folders, image
 lists or video files. Each frame is segmented on its own; with `track=True`, a
 box tracker links the detections across frames so each object keeps its ID:
