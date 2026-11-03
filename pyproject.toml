@@ -66,6 +66,18 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["src/sam3_mlx"]
 
+# Source releases carry only the runtime package, build metadata, README and
+# license notices; tests and development scripts stay in Git.
+[tool.hatch.build.targets.sdist]
+only-include = [
+    "src/sam3_mlx",
+    "pyproject.toml",
+    "README.md",
+    "LICENSE",
+    "THIRD_PARTY_NOTICES.md",
+]
+exclude = []
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src", "."]
