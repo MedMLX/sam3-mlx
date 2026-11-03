@@ -1,0 +1,116 @@
+{
+  "upstream_commit": "2814fa619404a722d03e9a012e083e4f293a4e53",
+  "checkpoint": "facebook/sam3@3c879f39826c281e95690f02c7821c4de09afae7/sam3.pt",
+  "device": "cpu",
+  "resolution": 1008,
+  "confidence_threshold": 0.5,
+  "images": [
+    {
+      "file": "chest_xray.jpg",
+      "text_prompt": "lungs",
+      "scores": [
+        0.578471,
+        0.561368
+      ],
+      "boxes_xyxy": [
+        [
+          362.623,
+          78.118,
+          635.823,
+          695.366
+        ],
+        [
+          40.42,
+          91.602,
+          301.735,
+          703.431
+        ]
+      ],
+      "mask_areas": [
+        94652,
+        103815
+      ]
+    },
+    {
+      "file": "dermoscopy_isic_0000000.jpg",
+      "text_prompt": "skin lesion",
+      "scores": [
+        0.712092
+      ],
+      "boxes_xyxy": [
+        [
+          68.035,
+          52.011,
+          893.271,
+          640.105
+        ]
+      ],
+      "mask_areas": [
+        328534
+      ]
+    },
+    {
+      "file": "ct_abdomen_kidneys.png",
+      "text_prompt": "kidneys",
+      "scores": [],
+      "boxes_xyxy": [],
+      "mask_areas": []
+    },
+    {
+      "file": "mri_brain_meningiomas.jpg",
+      "text_prompt": "meningiomas",
+      "scores": [],
+      "boxes_xyxy": [],
+      "mask_areas": []
+    },
+    {
+      "file": "ultrasound_gallbladder.jpg",
+      "text_prompt": "gallbladder",
+      "scores": [],
+      "boxes_xyxy": [],
+      "mask_areas": []
+    },
+    {
+      "file": "microscopy_nuclei.png",
+      "text_prompt": "cell nuclei",
+      "scores": [
+        0.680144,
+        0.550688,
+        0.739121,
+        0.853584
+      ],
+      "boxes_xyxy": [
+        [
+          174.144,
+          208.661,
+          515.928,
+          511.539
+        ],
+        [
+          170.428,
+          3.332,
+          519.275,
+          510.656
+        ],
+        [
+          1.13,
+          285.902,
+          150.973,
+          511.946
+        ],
+        [
+          25.466,
+          -0.091,
+          237.144,
+          172.781
+        ]
+      ],
+      "mask_areas": [
+        68365,
+        94843,
+        22807,
+        22423
+      ]
+    }
+  ]
+}

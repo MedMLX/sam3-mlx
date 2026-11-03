@@ -6,7 +6,8 @@ Tests are grouped by the contract they protect:
 - `checkpoint/`: checkpoint key mapping, tensor layout, loading and the pinned
   parameter tree.
 - `image/`: the image processor, mask head, ROI Align, resize preprocessing, the
-  interactive predictor and the medical fixtures.
+  interactive predictor, the medical fixtures and, when the weights are cached,
+  the real checkpoint against recorded upstream SAM 3 detections.
 - `medmlx/`: the registered runner's inputs, weights and outputs.
 - `perflib/`: connected-component labeling.
 - `runtime/`: attention, encoder, decoder, geometry, position encoding, caches,
