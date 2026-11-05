@@ -28,7 +28,12 @@ from sam3_mlx.model_components import (
 from sam3_mlx.precision import apply_precision_policy, parse_precision
 
 if TYPE_CHECKING:
+    import mlx.core as mx
+
     from sam3_mlx.model.sam3_video_predictor import Sam3VideoPredictor
+
+# FP32 checkpoint tensors are materialized in batches of about this many bytes.
+_LOAD_BATCH_BYTES = 64 << 20
 
 class Sam3PredictorOptions(TypedDict, total=False):
     """Keyword options that ``build_sam3_predictor`` forwards to ``build_sam3_video_predictor``."""
@@ -170,10 +175,20 @@ def build_sam3_image_model(
             model.load_weights(list(interactive.items()), strict=False)
     apply_precision_policy(model, policy)
     if checkpoint_path is not None:
-        # Materialize after the cast, one tensor at a time, so a BF16 load holds
-        # at most one FP32 source tensor beyond the cast weights.
+        # Materialize after the cast. A BF16 load evaluates one tensor at a time, so
+        # it holds at most one FP32 source tensor beyond the cast weights. FP32 has no
+        # cast, so it evaluates ~64 MB batches: one evaluation per tensor spent more
+        # time synchronizing than reading.
+        limit = _LOAD_BATCH_BYTES if policy == "fp32" else 0
+        batch: list[mx.array] = []
+        size = 0
         for value in flatten_model_parameters(model).values():
-            evaluate_boundary(value)
+            batch.append(value)
+            size += value.nbytes
+            if size >= limit:
+                evaluate_boundary(batch)
+                batch, size = [], 0
+        evaluate_boundary(batch)
     if eval_mode:
         model.eval()
     return model
