@@ -29,15 +29,6 @@ def scalar_int(value: mx.array) -> int:
     return int(item)
 
 
-def scalar_float(value: mx.array) -> float:
-    """Read a real MLX scalar as a float at an explicit sync boundary."""
-
-    item = value.item()
-    if isinstance(item, complex):
-        raise TypeError("Expected a real MLX scalar")
-    return float(item)
-
-
 def evaluate_boundary(*values: object) -> None:
     """Evaluate MLX arrays or nested array trees at a named runtime boundary."""
 

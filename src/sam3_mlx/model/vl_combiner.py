@@ -26,7 +26,7 @@ class SAM3VLBackbone(nn.Module):
     Args:
         visual: Feature-pyramid neck run on the image batch.
         text: Text encoder; may be ``None`` for image-only use, in which case
-            ``forward_text`` cannot be called.
+            ``forward_text`` raises ``ValueError``.
         compile_visual: Wrap the image path in ``mx.compile``. Compiled functions
             are cached per (dtype, shape) of the input, at most 8 at a time.
         scalp: Number of trailing pyramid levels to drop (0 keeps all). These
@@ -97,6 +97,7 @@ class SAM3VLBackbone(nn.Module):
         Returns ``language_features`` ``(L, B, d_model)`` and ``language_mask``
         ``(B, L)`` (True at padding).
         """
-        assert self.language_backbone is not None, "backbone has no text encoder"
+        if self.language_backbone is None:
+            raise ValueError("This backbone was built without a text encoder.")
         text_attention_mask, text_memory = self.language_backbone(captions)
         return {"language_features": text_memory, "language_mask": text_attention_mask}

@@ -92,7 +92,6 @@ class UniversalSegmentationHead(nn.Module):
         super().__init__()
         self.pixel_decoder = pixel_decoder
         self.mask_predictor = MaskPredictor(hidden_dim, mask_dim=hidden_dim)
-        self.instance_keys = ["pred_masks"]
         self.cross_attend_prompt = cross_attend_prompt
         self.cross_attn_norm = nn.LayerNorm(hidden_dim)
         self.semantic_seg_head = nn.Conv2d(hidden_dim, 1, kernel_size=1)

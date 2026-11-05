@@ -6,7 +6,7 @@ import mlx.core as mx
 import pytest
 
 from sam3_mlx.checkpoint_mapping import flatten_model_parameters
-from sam3_mlx.mlx_runtime import evaluate_boundary, scalar_float
+from sam3_mlx.mlx_runtime import evaluate_boundary
 from sam3_mlx.model.necks import (
     Scale0_5FN,
     Scale1FN,
@@ -57,7 +57,7 @@ def test_bf16_scale2_matches_native_autocast_transposed_convolution(
     evaluate_boundary(actual, expected)
     assert actual.dtype == expected.dtype == mx.bfloat16
     error = mx.max(mx.abs(actual.astype(mx.float32) - expected.astype(mx.float32)))
-    assert scalar_float(error) <= 0.0005
+    assert bool(error <= 0.0005)
 
 
 def test_scale_heads_produce_expected_spatial_shapes() -> None:

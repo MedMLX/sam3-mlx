@@ -8,7 +8,7 @@ from medmlx_core.runtime import require_mlx_runtime
 from PIL import Image
 
 import sam3_mlx.model.sam3_video_predictor as predictor_module
-from sam3_mlx.mlx_runtime import evaluate_boundary, scalar_float
+from sam3_mlx.mlx_runtime import evaluate_boundary
 from sam3_mlx.model.io_utils import VideoFrames
 from sam3_mlx.model.sam3_video_inference import Sam3VideoInference
 from sam3_mlx.model.sam3_video_predictor import Sam3VideoPredictor
@@ -75,7 +75,7 @@ def test_close_clears_the_real_metal_buffer_cache() -> None:
     with mx.stream(mx.gpu):
         evaluated = mx.sum(mx.arange(8, dtype=mx.float32))
         evaluate_boundary(evaluated)
-    assert scalar_float(evaluated) == 28.0
+    assert bool(evaluated == 28.0)
     predictor = _predictor()
     predictor.close_session("closed")
     assert mx.get_cache_memory() == 0

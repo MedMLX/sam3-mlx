@@ -100,10 +100,7 @@ class TextTransformer(nn.Module):
         """Configure token, position, transformer and text-projection layers."""
         super().__init__()
         self.num_pos = self.context_length = context_length
-        self.vocab_size = vocab_size
         self.width = width
-        self.output_dim = output_dim
-        self.heads = heads
 
         self.token_embedding = nn.Embedding(vocab_size, width)
         self.positional_embedding = mx.zeros((self.num_pos, width))
@@ -155,7 +152,6 @@ class VETextEncoder(nn.Module):
         """Configure tokenization and the vision-language text encoder."""
         super().__init__()
         self.context_length = context_length
-        self.use_ln_post = use_ln_post
         self.tokenizer = tokenizer
 
         self.encoder = TextTransformer(

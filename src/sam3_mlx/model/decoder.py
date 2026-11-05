@@ -123,7 +123,6 @@ class TransformerDecoder(nn.Module):
         super().__init__()
         self.d_model = d_model
         self.layers = [layer() for _ in range(num_layers)]
-        self.num_queries = num_queries
         self.norm = nn.LayerNorm(d_model)
 
         self.bbox_embed = MLP(d_model, d_model, 4, 3)
