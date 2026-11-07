@@ -22,7 +22,7 @@ Native MLX port of [SAM 3](https://github.com/facebookresearch/sam3) for Apple S
 | **Input** | One 2D image (PNG, JPEG or any Pillow-readable format), or one chosen frame of an image folder or video; a text prompt, one box and/or one point |
 | **Output** | `out/masks.npy`, boolean `(N, height, width)` at the input resolution, and `out/prediction.json` with pixel boxes and scores |
 | **Weights** | [mlx-community/sam3-image](https://huggingface.co/mlx-community/sam3-image), 3.4 GB, SAM License; downloads on first use |
-| **Hardware** | macOS 14 or later on Apple Silicon; about 12 GB peak memory at the default 1008-pixel resolution |
+| **Hardware** | macOS 14 or later on Apple Silicon; 5.4 GB peak MLX memory for one image at the default 1008-pixel resolution, 6.0 GB for a tracked video session |
 | **Intended use** | Research and education. Not a medical device; outputs require human review. |
 
 ## Use with MedMLX

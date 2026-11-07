@@ -63,7 +63,9 @@ MODEL = {
         "frame of an image folder or video the same way; objects are not "
         "tracked across frames."
     ),
-    "peak_memory_gb": 12,
+    # Measured MLX peak, including weights, for one image at 1008 px; flat from
+    # a 450x280 CT slice to a 2560x2930 radiograph.
+    "peak_memory_gb": 5.4,
 }
 
 MASKS_NAME = "masks.npy"
