@@ -40,7 +40,6 @@ from typing import Final, NamedTuple, Self
 
 import numpy as np
 import numpy.typing as npt
-from scipy.optimize import linear_sum_assignment
 
 type FloatArray = npt.NDArray[np.float64]
 type IndexArray = npt.NDArray[np.intp]
@@ -201,6 +200,9 @@ def _associate(
     """
     if not tracks or boxes.shape[0] == 0:
         return [], list(range(len(tracks))), list(range(boxes.shape[0]))
+    # Deferred: scipy.optimize adds ~65 ms to every image-model import.
+    from scipy.optimize import linear_sum_assignment
+
     iou = _iou(_track_boxes(tracks), boxes)
     rows, cols = linear_sum_assignment(iou, maximize=True)
     matches = [

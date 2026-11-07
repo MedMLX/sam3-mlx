@@ -7,7 +7,7 @@ import numpy as np
 from numpy.typing import NDArray
 import pytest
 
-from sam3_mlx.mlx_runtime import to_numpy
+from sam3_mlx.mlx_runtime import mlx_array, to_numpy
 from sam3_mlx.model.model_misc import MultiheadAttention
 from sam3_mlx.precision_layers import attention
 
@@ -154,3 +154,28 @@ def test_bf16_attention_accumulates_scaled_scores_and_bias_in_float32() -> None:
 
     assert output.dtype == mx.bfloat16
     np.testing.assert_array_equal(to_numpy(output.astype(mx.float32)), to_numpy(expected))
+
+
+@pytest.mark.parametrize("mask_kind", ("key_padding", "additive"))
+def test_padded_head_dim_32_matches_reference(mask_kind: str) -> None:
+    # 32-wide heads over more than 8 queries take the zero-padded fused path.
+    rng = np.random.default_rng(seed=2)
+    query, key, value = (
+        rng.standard_normal((2, 4, length, 32)).astype(np.float32) for length in (40, 56, 56)
+    )
+    if mask_kind == "key_padding":
+        keep = np.ones((2, 1, 1, 56), dtype=np.bool_)
+        keep[0, ..., 50:] = False
+        keep[1, ..., :7] = False
+        mask = mlx_array(keep)
+        bias = np.where(keep, np.float32(0), np.float32(-np.inf))
+    else:
+        bias = rng.standard_normal((2, 4, 40, 56)).astype(np.float32)
+        mask = mx.array(bias)
+    scores = query @ np.swapaxes(key, -1, -2) * np.float32(32**-0.5) + bias
+    expected = _softmax(scores) @ value
+
+    output = attention(mx.array(query), mx.array(key), mx.array(value), scale=32**-0.5, mask=mask)
+
+    assert output.shape == (2, 4, 40, 32)
+    np.testing.assert_allclose(to_numpy(output), expected, atol=1e-5, rtol=1e-5)

@@ -12,7 +12,6 @@ from typing import cast
 import mlx.core as mx
 import numpy as np
 from numpy.typing import NDArray
-from scipy.ndimage import label as scipy_label
 
 from sam3_mlx.mlx_runtime import to_numpy
 
@@ -31,6 +30,9 @@ def connected_components[MaskT: (mx.array, NDArray[np.generic])](
     Raises:
         ValueError: ``masks`` has another shape.
     """
+
+    # Deferred: scipy.ndimage adds ~90 ms to every image-model import.
+    from scipy.ndimage import label as scipy_label
 
     host = to_numpy(masks)
     if host.ndim == 3:
