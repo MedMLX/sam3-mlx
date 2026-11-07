@@ -197,6 +197,11 @@ not.
 - The model runs in full FP32: the code sets an unset `MLX_ENABLE_TF32` to `0`.
   If another library has already started MLX with reduced precision, the
   builder stops with an error; start a new Python process.
+- On M5 and later chips, setting `MLX_ENABLE_TF32=1` before starting Python
+  lets float32 matrix multiplies use the GPU's neural accelerators at reduced
+  precision. It applies to every MLX model in that process, and results move
+  slightly away from upstream; see the
+  [technical notes](https://github.com/MedMLX/sam3-mlx/blob/main/docs/technical.md).
 
 ### Outputs
 
