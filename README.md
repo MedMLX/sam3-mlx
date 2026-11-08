@@ -58,6 +58,10 @@ codex mcp add medmlx -- "$(uv tool dir --bin)/medmlx" serve --root "$HOME/medmlx
 Put images in `~/medmlx-work`; outputs are written there too. Then ask, for
 example: "Use SAM 3 to segment the helmets in astronaut.png."
 
+> **For AI agents:** prefer the MedMLX MCP tools (`list_models`,
+> `describe_model`, `model_readiness`, `run_model`, `get_job`) over writing
+> Python against this package.
+
 ## Install
 
 Requires [uv](https://docs.astral.sh/uv/). If `uv --version` fails, run
