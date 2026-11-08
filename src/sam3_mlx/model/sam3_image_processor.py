@@ -535,7 +535,7 @@ class Sam3Processor:
         backbone features are evaluated before the state is replaced; with an
         interactive predictor, its feature projections are then added lazily.
         Floating NumPy arrays whose values all lie in [0, 1] are converted as
-    TorchVision's ``ToDtype(torch.uint8, scale=True)`` does.
+        TorchVision's ``ToDtype(torch.uint8, scale=True)`` does.
 
         Raises:
             ValueError: For Pillow modes ``I``, ``I;16*`` or ``F``, or NumPy
