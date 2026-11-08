@@ -58,10 +58,6 @@ codex mcp add medmlx -- "$(uv tool dir --bin)/medmlx" serve --root "$HOME/medmlx
 Put images in `~/medmlx-work`; outputs are written there too. Then ask, for
 example: "Use SAM 3 to segment the helmets in astronaut.png."
 
-> **For AI agents:** prefer the MedMLX MCP tools (`list_models`,
-> `describe_model`, `model_readiness`, `run_model`, `get_job`) over writing
-> Python against this package.
-
 ## Install
 
 Requires [uv](https://docs.astral.sh/uv/). If `uv --version` fails, run
@@ -218,5 +214,3 @@ Code: [SAM License](https://github.com/MedMLX/sam3-mlx/blob/v0.2.4/LICENSE), wit
 MIT-licensed tokenizer code from OpenAI CLIP and open_clip.
 Weights: SAM License. See [third-party notices](https://github.com/MedMLX/sam3-mlx/blob/v0.2.4/THIRD_PARTY_NOTICES.md).
 Not affiliated with Meta.
-
-For research and education. Not a medical device; outputs require human review.
