@@ -434,11 +434,29 @@ def test_eight_bit_values_in_wider_dtypes_and_unit_floats_are_accepted() -> None
 
     for wider in (pixels.astype(np.uint16), pixels.astype(np.int32), pixels.astype(np.float32)):
         np.testing.assert_array_equal(to_numpy(transform(wider, resolution=14)), expected)
-    unit = np.array([[0.0, 0.5], [1.0, 0.25]], dtype=np.float32)
-    np.testing.assert_array_equal(
-        to_numpy(transform(unit, resolution=14)),
-        to_numpy(transform((unit * 255.0).astype(np.uint8), resolution=14)),
+
+
+def test_unit_float_arrays_convert_to_uint8_as_torchvision_does() -> None:
+    """Float [0, 1] pixels take upstream's v2.ToDtype(torch.uint8, scale=True) levels."""
+    torch_module = importlib.import_module("torch")
+    v2_module = importlib.import_module("torchvision.transforms.v2")
+    to_dtype = _callable_attribute(v2_module, "ToDtype")
+    to_image = _callable_attribute(_attribute(v2_module, "functional"), "to_image")
+    official = _require_callable(
+        to_dtype(_attribute(torch_module, "uint8"), scale=True), "ToDtype"
     )
+    rng = np.random.default_rng(20261108)
+    for dtype in (np.float32, np.float64):
+        unit = rng.random((9, 11, 3)).astype(dtype)
+        unit[0, :3, 0] = (0.0, 0.999, 1.0)
+        expected = to_numpy(
+            _call_method(_call_method(official(to_image(unit)), "permute", 1, 2, 0), "numpy"),
+            dtype=np.uint8,
+        )
+        np.testing.assert_array_equal(
+            to_numpy(transform(unit, resolution=14)),
+            to_numpy(transform(expected, resolution=14)),
+        )
 
 
 def test_set_image_rejects_missing_path_invalid_file_and_invalid_type(

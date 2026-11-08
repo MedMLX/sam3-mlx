@@ -273,7 +273,12 @@ def _numpy_to_uint8(array: npt.NDArray[np.generic]) -> npt.NDArray[np.uint8]:
     if values.size:
         low, high = float(values.min()), float(values.max())
         if not is_integer and low >= 0.0 and high <= 1.0:
-            values = values * 255.0
+            # Upstream's float path, v2.ToDtype(torch.uint8, scale=True), multiplies
+            # by 255 + 1 - 1e-3 in the input dtype and truncates, so 0.999 maps to 255
+            # rather than 254. Narrower floats scale in float32, where the factor
+            # stays below 256.
+            wide = np.float64 if values.dtype == np.float64 else np.float32
+            values = values.astype(wide) * wide(255.0 + 1.0 - 1e-3)
         elif low < 0.0 or high > 255.0:
             raise ValueError(
                 f"Image NumPy array values span [{low:g}, {high:g}], outside the "
@@ -285,7 +290,8 @@ def _numpy_to_uint8(array: npt.NDArray[np.generic]) -> npt.NDArray[np.uint8]:
 def _as_pil_rgb_image(image: object) -> Image.Image:
     """Load a path, PIL image or NumPy array as an 8-bit PIL RGB image.
 
-    Floating NumPy arrays whose values all lie in [0, 1] are scaled by 255.
+    Floating NumPy arrays whose values all lie in [0, 1] are converted as
+    TorchVision's ``ToDtype(torch.uint8, scale=True)`` does.
     Pillow modes ``I``, ``I;16*`` and ``F`` and arrays with values outside
     [0, 255] are rejected rather than clipped.
     """
@@ -528,7 +534,8 @@ class Sam3Processor:
         The original image size is stored for rescaling boxes and masks. The
         backbone features are evaluated before the state is replaced; with an
         interactive predictor, its feature projections are then added lazily.
-        Floating NumPy arrays whose values all lie in [0, 1] are scaled by 255.
+        Floating NumPy arrays whose values all lie in [0, 1] are converted as
+    TorchVision's ``ToDtype(torch.uint8, scale=True)`` does.
 
         Raises:
             ValueError: For Pillow modes ``I``, ``I;16*`` or ``F``, or NumPy
