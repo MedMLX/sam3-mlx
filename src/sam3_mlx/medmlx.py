@@ -1,9 +1,9 @@
 """MedMLX runner for the sam3-mlx SAM 3 image API.
 
-Built on ``build_sam3_image_model`` and ``Sam3Processor``. A chosen frame of an
-image folder or video is read with the video frame store and segmented exactly
-like an image, so it gets the same prompts, validation and outputs. There is no
-tracking across frames.
+Grounding uses ``Sam3Processor.predict``; source-pixel interactive annotation
+uses the dedicated ``Sam3Image.predict_inst`` head. A chosen frame of an image
+folder or video is read with the video frame store and segmented exactly like
+an image. There is no tracking across frames.
 
 Research software, not a medical device: outputs are segmentation proposals that
 require human review.
@@ -19,7 +19,7 @@ import shutil
 import tempfile
 from collections.abc import Sequence
 from pathlib import Path
-from typing import TYPE_CHECKING, TypedDict, cast
+from typing import TYPE_CHECKING, Literal, TypedDict, cast
 
 import numpy as np
 from medmlx_core.errors import (
@@ -30,6 +30,12 @@ from medmlx_core.errors import (
 )
 from medmlx_core.weights import weights_dir, weights_revision
 
+from sam3_mlx.medmlx_interactive import (
+    INTERACTIVE_RESOLUTION,
+    InteractivePrompt,
+    parse_interactive_prompt,
+    segment_interactive,
+)
 from sam3_mlx.resolutions import DEFAULT_IMAGE_RESOLUTION, PATCH_SIZE
 
 if TYPE_CHECKING:
@@ -58,12 +64,13 @@ MODEL = {
     "task": "segmentation",
     "run": "sam3_mlx.medmlx:run",
     "summary": (
-        "Segments one 2D image from a text prompt and/or one box and/or one "
-        "point, using the SAM 3 image model. Can instead segment one chosen "
+        "Segments one 2D image with text/normalized grounding prompts, or the "
+        "dedicated interactive head with source-pixel clicks, a box, and prior logits. "
+        "Can instead segment one chosen "
         "frame of an image folder or video the same way; objects are not "
         "tracked across frames."
     ),
-    # Measured MLX peak, including weights, for one image at 1008 px; flat from
+    # Measured grounding MLX peak, including weights, at 1008 px; flat from
     # a 450x280 CT slice to a 2560x2930 radiograph.
     "peak_memory_gb": 5.4,
 }
@@ -71,6 +78,11 @@ MODEL = {
 MASKS_NAME = "masks.npy"
 PREDICTION_NAME = "prediction.json"
 PREDICTION_SCHEMA = "sam3_mlx.medmlx.prediction.v1"
+INTERACTIVE_FILES = {
+    "candidate_masks": "candidate_masks.npy",
+    "candidate_scores": "candidate_scores.npy",
+    "low_res_logits": "low_res_logits.npy",
+}
 
 
 def _require_bool(name: str, value: object) -> bool:
@@ -168,17 +180,23 @@ def _validate_unit_point(point: object, name: str) -> UnitPoint:
     return x, y
 
 
-def _output_paths(output_dir: str, overwrite: bool) -> tuple[Path, dict[str, Path]]:
+def _output_paths(
+    output_dir: str, overwrite: bool, *, interactive: bool = False
+) -> tuple[Path, dict[str, Path]]:
     """Resolve output paths and reject collisions unless overwriting is allowed."""
     output = Path(output_dir).expanduser().resolve()
     if any(path.exists() and not path.is_dir() for path in (output, *output.parents)):
         raise InvalidInputError(f"output_dir is not a directory: {output}")
     paths = {"masks": output / MASKS_NAME, "prediction": output / PREDICTION_NAME}
+    if interactive:
+        paths.update({role: output / name for role, name in INTERACTIVE_FILES.items()})
     for path in paths.values():
         if path.is_dir():
             raise InvalidInputError(f"Output path is a directory: {path}")
         if (path.exists() or path.is_symlink()) and not overwrite:
-            raise InvalidInputError(f"Output exists: {path}; pass overwrite=True to replace it")
+            raise InvalidInputError(
+                f"Output exists: {path}; pass overwrite=True to replace it"
+            )
     return output, paths
 
 
@@ -189,6 +207,7 @@ def _write_outputs(
     record: dict[str, JsonValue],
     *,
     overwrite: bool,
+    candidate_arrays: dict[str, np.ndarray] | None = None,
 ) -> None:
     """Publish masks and JSON under a lock, restoring earlier files on failure."""
     try:
@@ -197,13 +216,18 @@ def _write_outputs(
         # inodes. Recheck destinations under the lock before taking backups.
         with (output / ".sam3-mlx.lock").open("a+b") as lock_file:
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
-            _output_paths(str(output), overwrite)
+            _output_paths(
+                str(output), overwrite, interactive=candidate_arrays is not None
+            )
             staging = Path(tempfile.mkdtemp(prefix=".sam3-mlx-", dir=output))
             cleanup = True
             try:
                 np.save(staging / MASKS_NAME, masks, allow_pickle=False)
+                for role, array in (candidate_arrays or {}).items():
+                    np.save(staging / paths[role].name, array, allow_pickle=False)
                 (staging / PREDICTION_NAME).write_text(
-                    json.dumps(record, indent=2, sort_keys=True, allow_nan=False) + "\n",
+                    json.dumps(record, indent=2, sort_keys=True, allow_nan=False)
+                    + "\n",
                     encoding="utf-8",
                 )
                 backups: dict[str, Path] = {}
@@ -237,7 +261,9 @@ def _write_outputs(
                 if cleanup:
                     shutil.rmtree(staging)
     except OSError as error:
-        raise InvalidInputError(f"Cannot write sam3-mlx outputs to {output}: {error}") from error
+        raise InvalidInputError(
+            f"Cannot write sam3-mlx outputs to {output}: {error}"
+        ) from error
 
 
 def _flatten_masks(masks: np.ndarray) -> np.ndarray:
@@ -288,6 +314,90 @@ def _build_image_model(*, checkpoint_path: Path) -> Sam3Image:
     return build_sam3_image_model(checkpoint_path=str(checkpoint_path))
 
 
+def _build_interactive_model(
+    *, checkpoint_path: Path, interactive_path: Path
+) -> Sam3Image:
+    """Load the base and explicit interactive head strictly in FP32 without downloads."""
+    from sam3_mlx.model_builder import build_sam3_image_model
+
+    return build_sam3_image_model(
+        checkpoint_path=str(checkpoint_path),
+        load_from_HF=False,
+        enable_inst_interactivity=True,
+        interactive_checkpoint_path=str(interactive_path),
+        strict_checkpoint_loading=True,
+        precision="fp32",
+    )
+
+
+def _validate_prompt_modes(
+    *,
+    mode: object,
+    grounding_prompts: tuple[object, ...],
+    interactive_prompts: tuple[object, ...],
+    box_label: bool,
+    point_label: bool,
+    confidence_threshold: float,
+    resolution: int,
+    multimask_output: bool,
+    selected_candidate: int | None,
+) -> Literal["grounding", "interactive"]:
+    """Reject incompatible prompt conventions and ignored controls before model loading."""
+    if mode not in ("grounding", "interactive"):
+        raise InvalidInputError("mode must be 'grounding' or 'interactive'")
+    if mode == "grounding":
+        if (
+            any(value is not None for value in interactive_prompts)
+            or not multimask_output
+            or selected_candidate is not None
+        ):
+            raise InvalidInputError(
+                "Interactive prompts and controls require mode='interactive'"
+            )
+        if all(value is None for value in grounding_prompts):
+            raise InvalidInputError(
+                "Pass at least one of text_prompt, box_prompt, or point_prompt"
+            )
+        return "grounding"
+    if (
+        any(value is not None for value in grounding_prompts)
+        or not box_label
+        or not point_label
+    ):
+        raise InvalidInputError(
+            "Interactive mode does not accept grounding prompts or their labels"
+        )
+    if confidence_threshold != 0.5:
+        raise InvalidInputError("confidence_threshold applies only to grounding mode")
+    if resolution != INTERACTIVE_RESOLUTION:
+        raise InvalidInputError(
+            "Interactive mode requires resolution=1008 for the trained head geometry"
+        )
+    if selected_candidate is not None:
+        _require_non_negative_int("selected_candidate", selected_candidate)
+        if selected_candidate >= (3 if multimask_output else 1):
+            raise InvalidInputError(
+                "selected_candidate is outside the requested candidate set"
+            )
+    return "interactive"
+
+
+def _interactive_checkpoint(path: str | None) -> Path:
+    """Require an explicit converted interactive head and retain its visible filename."""
+    if not isinstance(path, str) or not path.strip():
+        raise InvalidInputError(
+            "Interactive mode requires an explicit interactive_weights_path file"
+        )
+    checkpoint = Path(path).expanduser()
+    if checkpoint.suffix != ".safetensors" or not checkpoint.is_file():
+        raise AssetNotReadyError(
+            f"Missing SAM 3 interactive .safetensors file: {checkpoint}",
+            reason="missing SAM 3 interactive weights",
+            hint="Pass the converted interactive head as interactive_weights_path.",
+        )
+    return checkpoint
+
+
 def _segment_image(
     *,
     model: Sam3Image,
@@ -328,6 +438,100 @@ def _segment_image(
     )
 
 
+def _run_interactive(
+    *,
+    image: Image.Image,
+    prompt: InteractivePrompt,
+    checkpoint: Path,
+    interactive_path: Path,
+    resolved_input: Path,
+    video: bool,
+    frame_index: int,
+    mask_input_path: str | None,
+    multimask_output: bool,
+    selected_candidate: int | None,
+    output: Path,
+    paths: dict[str, Path],
+    overwrite: bool,
+) -> RunResult:
+    """Publish one selected interactive mask, alternatives, and reusable raw logits."""
+    try:
+        model = _build_interactive_model(
+            checkpoint_path=checkpoint, interactive_path=interactive_path
+        )
+    except (OSError, ValueError, RuntimeError, KeyError) as error:
+        raise AssetNotReadyError(
+            f"sam3-mlx interactive checkpoints could not be loaded: {error}",
+            reason="interactive checkpoint load failed",
+            hint="Pass a compatible base weights_path folder and converted interactive_weights_path file.",
+        ) from error
+    try:
+        prediction = segment_interactive(
+            model=model,
+            image=image,
+            prompt=prompt,
+            multimask_output=multimask_output,
+            selected_candidate=selected_candidate,
+        )
+    except (ValueError, RuntimeError, KeyError) as error:
+        raise ModelExecutionError(
+            f"sam3-mlx interactive inference failed: {error}"
+        ) from error
+    selected = prediction.selected_index
+    details: dict[str, JsonValue] = {
+        "schema_version": PREDICTION_SCHEMA,
+        "backend": "mlx",
+        "mode": "interactive",
+        "input_kind": "video" if video else "image",
+        "input_path": resolved_input.as_posix(),
+        "frame_index": frame_index if video else None,
+        "resolution": INTERACTIVE_RESOLUTION,
+        "checkpoint_path": checkpoint.as_posix(),
+        "weights_revision": weights_revision(checkpoint.parent),
+        "interactive_weights_path": interactive_path.as_posix(),
+        "points_xy": None
+        if prompt.points_xy is None
+        else [list(point) for point in prompt.points_xy],
+        "point_labels": None
+        if prompt.point_labels is None
+        else list(prompt.point_labels),
+        "box_xyxy": None if prompt.box_xyxy is None else list(prompt.box_xyxy),
+        "prompt_coordinates": "source_pixel_xy",
+        "mask_input_path": None
+        if mask_input_path is None
+        else Path(mask_input_path).expanduser().resolve().as_posix(),
+        "multimask_output": multimask_output,
+        "num_candidates": int(prediction.candidate_scores.size),
+        "candidate_scores": prediction.candidate_scores.tolist(),
+        "candidates_are_alternatives": True,
+        "selected_candidate": selected,
+        "selection_policy": prediction.selection_policy,
+        "num_detections": 1,
+        "mask_height": image.height,
+        "mask_width": image.width,
+        "boxes_xyxy": [list(prediction.box_xyxy)],
+        "scores": [float(prediction.candidate_scores[selected])],
+        "object_ids": [0] if video else None,
+    }
+    arrays = {
+        "candidate_masks": prediction.candidate_masks,
+        "candidate_scores": prediction.candidate_scores,
+        "low_res_logits": prediction.low_res_logits,
+    }
+    _write_outputs(
+        output,
+        paths,
+        prediction.masks,
+        details,
+        overwrite=overwrite,
+        candidate_arrays=arrays,
+    )
+    return {
+        "outputs": {role: path.as_posix() for role, path in paths.items()},
+        "details": details,
+    }
+
+
 def run(
     *,
     image_path: str | None = None,
@@ -343,14 +547,23 @@ def run(
     resolution: int = DEFAULT_IMAGE_RESOLUTION,
     frame_index: int = 0,
     weights_path: str | None = None,
+    mode: Literal["grounding", "interactive"] = "grounding",
+    interactive_weights_path: str | None = None,
+    points_xy: Sequence[Sequence[float]] | None = None,
+    point_labels: Sequence[int] | None = None,
+    box_xyxy: Sequence[float] | None = None,
+    mask_input_path: str | None = None,
+    multimask_output: bool = True,
+    selected_candidate: int | None = None,
 ) -> RunResult:
     """Segment one image, or one chosen frame of a video/image folder, with SAM 3.
 
+    The default ``mode="grounding"`` preserves the text/normalized-geometry API.
     Exactly one of ``image_path`` (any Pillow-readable 8-bit image) or
     ``video_path`` (an image file, an image folder, or an OpenCV-decodable video
-    file) must be given. Video files require the ``sam3-mlx[video]`` extra. At
-    least one of ``text_prompt``, ``box_prompt``, or ``point_prompt`` must be
-    given; the ones that are given are combined in one request, matching
+    file) must be given. Video files require the ``sam3-mlx[video]`` extra. In
+    grounding mode, one of ``text_prompt``, ``box_prompt``, or ``point_prompt``
+    must be given; the ones that are given are combined in one request, matching
     ``Sam3Processor``'s single-image API. ``box_prompt`` is
     ``[center_x, center_y, width, height]`` in image fractions: every value must
     be in [0, 1] and width and height must be positive. ``point_prompt`` is
@@ -377,9 +590,28 @@ def run(
     ``outputs["prediction"]`` (``prediction.json``: boxes as pixel
     ``[x0, y0, x1, y1]`` in that same frame, detection scores, frame-local
     ``object_ids`` for video input (``None`` for images), and the request
-    metadata). ``details`` repeats the prediction metadata. Detections are
-    those above ``confidence_threshold``. Existing output files are refused unless
-    ``overwrite=True``.
+    metadata). ``details`` repeats the prediction metadata. Grounding detections
+    are those above ``confidence_threshold``. Existing output files are refused
+    unless ``overwrite=True``.
+
+    ``mode="interactive"`` uses the dedicated interactive head, requiring an
+    explicit converted ``interactive_weights_path`` file. Supply one prompt
+    set through source-pixel ``points_xy`` and integer ``point_labels`` (1 for
+    foreground, 0 for background), a pixel ``box_xyxy``, and/or a previous
+    run's ``mask_input_path``. Points must lie inside the image; ordered box
+    edges may include its full width/height. The prior must be a finite float32
+    NPY array of raw logits with shape ``(1, 288, 288)``. Grounding prompts and
+    nondefault grounding controls cannot be mixed with this mode. Interactive
+    geometry requires ``resolution=1008`` and checkpoint loading is strict FP32.
+
+    Interactive masks are alternatives for one object. ``multimask_output``
+    requests three candidates when true and one otherwise. ``selected_candidate``
+    chooses an index; by default the first candidate with the highest predicted
+    IoU is selected. ``masks.npy`` contains only that mask as bool ``(1,H,W)``.
+    Additional output roles ``candidate_masks`` and ``candidate_scores`` retain
+    all alternatives as bool ``(C,H,W)`` and float32 ``(C,)``. ``low_res_logits``
+    is the selected float32 ``(1,288,288)`` raw logit array for direct reuse as
+    ``mask_input_path``. No score threshold filters interactive candidates.
 
     Args:
         output_dir: Directory for ``masks.npy`` and ``prediction.json``.
@@ -407,15 +639,37 @@ def run(
         input_path, video = video_path, True
     else:
         raise InvalidInputError("Pass exactly one of image_path or video_path")
-    if text_prompt is None and box_prompt is None and point_prompt is None:
-        raise InvalidInputError("Pass at least one of text_prompt, box_prompt, or point_prompt")
+    multimask_output = _require_bool("multimask_output", multimask_output)
+    mode = _validate_prompt_modes(
+        mode=mode,
+        grounding_prompts=(text_prompt, box_prompt, point_prompt),
+        interactive_prompts=(
+            interactive_weights_path,
+            points_xy,
+            point_labels,
+            box_xyxy,
+            mask_input_path,
+        ),
+        box_label=box_label,
+        point_label=point_label,
+        confidence_threshold=confidence_threshold,
+        resolution=resolution,
+        multimask_output=multimask_output,
+        selected_candidate=selected_candidate,
+    )
     text_prompt = _require_optional_text("text_prompt", text_prompt)
     box = None if box_prompt is None else _validate_unit_box(box_prompt, "box_prompt")
-    point = None if point_prompt is None else _validate_unit_point(point_prompt, "point_prompt")
+    point = (
+        None
+        if point_prompt is None
+        else _validate_unit_point(point_prompt, "point_prompt")
+    )
     box_label = _require_bool("box_label", box_label)
     point_label = _require_bool("point_label", point_label)
     overwrite = _require_bool("overwrite", overwrite)
-    confidence_threshold = _require_unit_float("confidence_threshold", confidence_threshold)
+    confidence_threshold = _require_unit_float(
+        "confidence_threshold", confidence_threshold
+    )
     resolution = _require_positive_multiple("resolution", resolution, PATCH_SIZE)
     frame_index = _require_non_negative_int("frame_index", frame_index)
     if not video and frame_index != 0:
@@ -427,8 +681,12 @@ def run(
         kind = "video_path" if video else "image_path"
         raise InvalidInputError(f"Missing {kind}: {resolved_input}")
 
-    output, paths = _output_paths(output_dir, overwrite)
-    if output == resolved_input or any(path == resolved_input for path in paths.values()):
+    output, paths = _output_paths(
+        output_dir, overwrite, interactive=mode == "interactive"
+    )
+    if output == resolved_input or any(
+        path == resolved_input for path in paths.values()
+    ):
         raise InvalidInputError("Output files must differ from the input path")
 
     if weights_path is None:
@@ -443,6 +701,17 @@ def run(
             )
 
     image = _load_input_image(resolved_input, video=video, frame_index=frame_index)
+    interactive_path = None
+    interactive_prompt = None
+    if mode == "interactive":
+        interactive_path = _interactive_checkpoint(interactive_weights_path)
+        interactive_prompt = parse_interactive_prompt(
+            points_xy=points_xy,
+            point_labels=point_labels,
+            box_xyxy=box_xyxy,
+            mask_input_path=mask_input_path,
+            image_size=image.size,
+        )
 
     from medmlx_core.runtime import import_mlx
 
@@ -456,6 +725,22 @@ def run(
             f"SAM 3 weights folder must contain model.safetensors: {directory}",
             reason="missing SAM 3 image weights",
             hint="Retry the download or pass a complete weights_path folder.",
+        )
+    if interactive_prompt is not None and interactive_path is not None:
+        return _run_interactive(
+            image=image,
+            prompt=interactive_prompt,
+            checkpoint=checkpoint,
+            interactive_path=interactive_path,
+            resolved_input=resolved_input,
+            video=video,
+            frame_index=frame_index,
+            mask_input_path=mask_input_path,
+            multimask_output=multimask_output,
+            selected_candidate=selected_candidate,
+            output=output,
+            paths=paths,
+            overwrite=overwrite,
         )
     try:
         model = _build_image_model(checkpoint_path=checkpoint)
@@ -488,6 +773,7 @@ def run(
     details: dict[str, JsonValue] = {
         "schema_version": PREDICTION_SCHEMA,
         "backend": "mlx",
+        "mode": "grounding",
         "input_kind": "video" if video else "image",
         "input_path": resolved_input.as_posix(),
         "frame_index": frame_index if video else None,

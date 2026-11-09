@@ -10,10 +10,12 @@ import warnings
 from importlib.metadata import entry_points
 from pathlib import Path
 from collections.abc import Callable
+from types import ModuleType
 from typing import TYPE_CHECKING, TypedDict, cast
 
 import numpy as np
 import pytest
+from hypothesis import given, settings, strategies as st
 from medmlx_core.errors import (
     AssetNotReadyError,
     InvalidInputError,
@@ -23,6 +25,7 @@ from medmlx_core.errors import (
 from PIL import Image
 
 from sam3_mlx import medmlx
+from sam3_mlx.medmlx_interactive import parse_interactive_prompt
 
 if TYPE_CHECKING:
     from sam3_mlx.model.sam3_image import Sam3Image
@@ -100,6 +103,14 @@ def test_entry_point_declaration_signature_and_lazy_public_api() -> None:
         "resolution",
         "frame_index",
         "weights_path",
+        "mode",
+        "interactive_weights_path",
+        "points_xy",
+        "point_labels",
+        "box_xyxy",
+        "mask_input_path",
+        "multimask_output",
+        "selected_candidate",
     ]
     assert all(item.kind is inspect.Parameter.KEYWORD_ONLY for item in parameters.values())
     assert parameters["overwrite"].default is False
@@ -117,6 +128,7 @@ class BlockModels:
 sys.meta_path.insert(0, BlockModels())
 import sam3_mlx
 from sam3_mlx import medmlx
+from sam3_mlx.medmlx_interactive import parse_interactive_prompt
 assert medmlx.MODEL['id'] == 'sam3'
 assert medmlx.run is medmlx.run
 assert not {'mlx', 'torch', 'monai'} & {n.split('.')[0] for n in sys.modules}
@@ -700,3 +712,445 @@ def test_video_frames_take_the_image_prompts(
     assert request["point_prompt"] == (0.2, 0.3)
     assert result["details"]["object_ids"] == [0, 1]
     assert result["details"]["boxes_xyxy"] == [[1.0, 2.0, 3.0, 4.0], [0.0, 0.0, 5.0, 3.0]]
+
+
+class _InteractiveNativeRequest(TypedDict):
+    points: np.ndarray | None
+    labels: np.ndarray | None
+    box: np.ndarray | None
+    prior: np.ndarray | None
+
+
+class _InteractiveNativeModel:
+    """Stand in for expensive native inference while preserving its public boundary."""
+
+    def __init__(self) -> None:
+        self.requests: list[_InteractiveNativeRequest] = []
+        self.failure: str | None = None
+
+    def predict_inst(
+        self,
+        state: dict[str, object],
+        *,
+        point_coords: np.ndarray | None,
+        point_labels: np.ndarray | None,
+        box: np.ndarray | None,
+        mask_input: np.ndarray | None,
+        multimask_output: bool,
+        return_logits: bool,
+        normalize_coords: bool,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        assert not return_logits and normalize_coords
+        width, height = cast("tuple[int, int]", state["size"])
+        self.requests.append(
+            {
+                "points": point_coords,
+                "labels": point_labels,
+                "box": box,
+                "prior": mask_input,
+            }
+        )
+        count = 3 if multimask_output else 1
+        masks = np.zeros((count, height, width), dtype=np.float32)
+        masks[0, 0, 0] = 1
+        if multimask_output:
+            masks[1, 1:3, 1:4] = 1
+            masks[2, -1, -1] = 1
+        scores = np.array([0.4, 0.9, 0.9][:count], dtype=np.float32)
+        logits = np.broadcast_to(
+            np.array([-3.25, 7.5, -0.125][:count], dtype=np.float32)[:, None, None],
+            (count, 288, 288),
+        ).copy()
+        if self.failure == "shape":
+            logits = logits[:, :-1]
+        elif self.failure == "nonfinite":
+            logits[0, 0, 0] = np.nan
+        elif self.failure == "nonbinary":
+            masks[0, 0, 0] = 0.3
+        return masks, scores, logits
+
+
+@pytest.fixture
+def interactive_native(monkeypatch: pytest.MonkeyPatch) -> _InteractiveNativeModel:
+    """Replace only model construction and image encoding/native computation."""
+    from medmlx_core import runtime
+
+    model = _InteractiveNativeModel()
+
+    def no_native_probe() -> None:
+        return None
+
+    class Processor:
+        def __init__(self, _model: object, *, resolution: int) -> None:
+            assert resolution == 1008
+
+        def set_image(self, image: Image.Image) -> dict[str, object]:
+            return {"size": image.size}
+
+    def build(
+        *,
+        checkpoint_path: str,
+        load_from_HF: bool,
+        enable_inst_interactivity: bool,
+        interactive_checkpoint_path: str,
+        strict_checkpoint_loading: bool,
+        precision: str,
+    ) -> Sam3Image:
+        assert Path(checkpoint_path).is_file()
+        assert Path(interactive_checkpoint_path).is_file()
+        assert not load_from_HF and enable_inst_interactivity
+        assert strict_checkpoint_loading and precision == "fp32"
+        return cast("Sam3Image", model)
+
+    builder = ModuleType("sam3_mlx.model_builder")
+    setattr(builder, "build_sam3_image_model", build)
+    processor = ModuleType("sam3_mlx.model.sam3_image_processor")
+    setattr(processor, "Sam3Processor", Processor)
+    monkeypatch.setitem(sys.modules, builder.__name__, builder)
+    monkeypatch.setitem(sys.modules, processor.__name__, processor)
+    monkeypatch.setattr(runtime, "import_mlx", no_native_probe)
+    return model
+
+
+@pytest.fixture
+def interactive_head(tmp_path: Path) -> str:
+    path = tmp_path / "interactive.safetensors"
+    path.write_bytes(b"synthetic head")
+    return str(path)
+
+
+@pytest.mark.parametrize("selected", [None, 0, 2])
+def test_interactive_alternatives_select_one_mask_and_roundtrip_raw_logits(
+    image_path: str,
+    output_dir: str,
+    interactive_head: str,
+    interactive_native: _InteractiveNativeModel,
+    tmp_path: Path,
+    selected: int | None,
+) -> None:
+    """Canonical masks contain one chosen alternative and raw logits are reusable."""
+    result = medmlx.run(
+        image_path=image_path,
+        output_dir=output_dir,
+        mode="interactive",
+        interactive_weights_path=interactive_head,
+        points_xy=[[3.5, 6.25], [20.0, 30.0]],
+        point_labels=[1, 0],
+        box_xyxy=[0.0, 0.0, 30.0, 40.0],
+        selected_candidate=selected,
+    )
+    chosen = 1 if selected is None else selected
+    masks = np.load(result["outputs"]["masks"], allow_pickle=False)
+    candidates = np.load(result["outputs"]["candidate_masks"], allow_pickle=False)
+    scores = np.load(result["outputs"]["candidate_scores"], allow_pickle=False)
+    logits = np.load(result["outputs"]["low_res_logits"], allow_pickle=False)
+    assert masks.shape == (1, 40, 30) and masks.dtype == np.bool_
+    assert candidates.shape == (3, 40, 30) and candidates.dtype == np.bool_
+    assert scores.shape == (3,) and scores.dtype == np.float32
+    np.testing.assert_array_equal(masks, candidates[chosen : chosen + 1])
+    np.testing.assert_array_equal(scores, np.array([0.4, 0.9, 0.9], dtype=np.float32))
+    assert logits.shape == (1, 288, 288) and logits.dtype == np.float32
+    np.testing.assert_array_equal(
+        logits, np.full((1, 288, 288), [-3.25, 7.5, -0.125][chosen], dtype=np.float32)
+    )
+    details = json.loads(Path(result["outputs"]["prediction"]).read_text())
+    assert details == result["details"]
+    assert details["mode"] == "interactive" and details["candidates_are_alternatives"]
+    assert details["num_detections"] == 1 and details["num_candidates"] == 3
+    assert details["selected_candidate"] == chosen
+    assert details["selection_policy"] == (
+        "highest_predicted_iou" if selected is None else "explicit_index"
+    )
+    assert details["boxes_xyxy"] == [
+        [[0, 0, 1, 1], [1, 1, 4, 3], [29, 39, 30, 40]][chosen]
+    ]
+    assert details["prompt_coordinates"] == "source_pixel_xy"
+    assert json.loads(json.dumps(result, allow_nan=False)) == result
+    request = interactive_native.requests[0]
+    np.testing.assert_array_equal(
+        request["points"], np.array([[3.5, 6.25], [20.0, 30.0]], dtype=np.float32)
+    )
+    np.testing.assert_array_equal(request["labels"], np.array([1, 0], dtype=np.int32))
+    np.testing.assert_array_equal(
+        request["box"], np.array([0, 0, 30, 40], dtype=np.float32)
+    )
+
+    refined = medmlx.run(
+        image_path=image_path,
+        output_dir=str(tmp_path / "refined"),
+        mode="interactive",
+        interactive_weights_path=interactive_head,
+        mask_input_path=result["outputs"]["low_res_logits"],
+        points_xy=[[5.0, 9.0]],
+        point_labels=[0],
+        multimask_output=False,
+    )
+    np.testing.assert_array_equal(interactive_native.requests[1]["prior"], logits)
+    assert np.load(refined["outputs"]["masks"], allow_pickle=False).shape == (1, 40, 30)
+    assert np.load(refined["outputs"]["candidate_masks"], allow_pickle=False).shape == (
+        1,
+        40,
+        30,
+    )
+    assert refined["details"]["selected_candidate"] == 0
+
+
+@pytest.mark.parametrize(
+    "prompt_values",
+    [
+        {"mode": "unknown"},
+        {"mode": "grounding", "points_xy": [[1, 1]], "point_labels": [1]},
+        {"text_prompt": "lesion"},
+        {"box_prompt": [0.5, 0.5, 0.2, 0.2]},
+        {"point_prompt": [0.2, 0.3]},
+        {"box_label": False},
+        {"confidence_threshold": 0.1},
+        {"resolution": 336},
+        {"points_xy": [[1, 2]]},
+        {"points_xy": [[1, 2]], "point_labels": [True]},
+        {"points_xy": [[1, 2]], "point_labels": [2]},
+        {"points_xy": [[1, 2]], "point_labels": [1, 0]},
+        {"points_xy": [[30, 0]], "point_labels": [1]},
+        {"points_xy": [[0, 40]], "point_labels": [1]},
+        {"points_xy": [[float("nan"), 1]], "point_labels": [1]},
+        {"points_xy": [], "point_labels": []},
+        {"box_xyxy": [0, 0, 31, 40]},
+        {"box_xyxy": [5, 1, 4, 2]},
+        {"box_xyxy": [1, 1, 1, 2]},
+        {"multimask_output": "yes"},
+        {"selected_candidate": True},
+        {"selected_candidate": -1},
+        {"selected_candidate": 3},
+        {"multimask_output": False, "selected_candidate": 1},
+        {"interactive_weights_path": None},
+        {"mask_input_path": "missing.npy"},
+    ],
+)
+def test_interactive_invalid_prompts_fail_before_loading_or_writing(
+    image_path: str,
+    output_dir: str,
+    interactive_head: str,
+    monkeypatch: pytest.MonkeyPatch,
+    prompt_values: dict[str, object],
+) -> None:
+    """Mixed conventions, malformed prompts, and ignored controls fail at admission."""
+
+    def forbidden(**_kwargs: object) -> object:
+        raise AssertionError("Invalid input must not load a model")
+
+    monkeypatch.setattr(medmlx, "_build_interactive_model", forbidden)
+    arguments: dict[str, object] = {
+        "image_path": image_path,
+        "output_dir": output_dir,
+        "mode": "interactive",
+        "interactive_weights_path": interactive_head,
+        "points_xy": [[1, 2]],
+        "point_labels": [1],
+    }
+    if "points_xy" in prompt_values and "point_labels" not in prompt_values:
+        arguments.pop("point_labels")
+    arguments.update(prompt_values)
+    run = cast("Callable[..., medmlx.RunResult]", medmlx.run)
+    with pytest.raises(InvalidInputError):
+        run(**arguments)
+    assert not Path(output_dir).exists()
+
+
+@pytest.mark.parametrize("failure", ["shape", "nonfinite", "nonbinary"])
+def test_interactive_bad_native_outputs_are_not_published(
+    image_path: str,
+    output_dir: str,
+    interactive_head: str,
+    interactive_native: _InteractiveNativeModel,
+    failure: str,
+) -> None:
+    interactive_native.failure = failure
+    with pytest.raises(ModelExecutionError):
+        medmlx.run(
+            image_path=image_path,
+            output_dir=output_dir,
+            mode="interactive",
+            interactive_weights_path=interactive_head,
+            box_xyxy=[0, 0, 30, 40],
+        )
+    assert not Path(output_dir).exists()
+
+
+@pytest.mark.parametrize("overwrite", [False, True])
+def test_interactive_candidate_publication_failure_restores_every_output(
+    image_path: str,
+    output_dir: str,
+    interactive_head: str,
+    interactive_native: _InteractiveNativeModel,
+    monkeypatch: pytest.MonkeyPatch,
+    overwrite: bool,
+) -> None:
+    """The selected mask and alternatives are one rollback-protected output set."""
+    output = Path(output_dir)
+    output.mkdir()
+    names = (
+        "masks.npy",
+        "prediction.json",
+        "candidate_masks.npy",
+        "candidate_scores.npy",
+        "low_res_logits.npy",
+    )
+    previous = (
+        {name: f"previous {name}".encode() for name in names} if overwrite else {}
+    )
+    for name, contents in previous.items():
+        (output / name).write_bytes(contents)
+    publish = medmlx.os.replace if overwrite else medmlx.os.link
+
+    def fail_logits(source: Path, destination: Path) -> None:
+        if destination == output / "low_res_logits.npy":
+            raise OSError("injected logit publication failure")
+        publish(source, destination)
+
+    monkeypatch.setattr(medmlx.os, "replace" if overwrite else "link", fail_logits)
+    with pytest.raises(InvalidInputError):
+        medmlx.run(
+            image_path=image_path,
+            output_dir=output_dir,
+            mode="interactive",
+            overwrite=overwrite,
+            interactive_weights_path=interactive_head,
+            box_xyxy=[0, 0, 30, 40],
+        )
+    assert {
+        name: (output / name).read_bytes() for name in names if (output / name).exists()
+    } == previous
+
+
+@given(
+    width=st.integers(1, 2000),
+    height=st.integers(1, 2000),
+    fraction_x=st.floats(min_value=0, max_value=0.999, allow_nan=False),
+    fraction_y=st.floats(min_value=0, max_value=0.999, allow_nan=False),
+    label=st.integers(0, 1),
+)
+def test_interactive_source_pixel_prompt_geometry_is_preserved(
+    width: int,
+    height: int,
+    fraction_x: float,
+    fraction_y: float,
+    label: int,
+) -> None:
+    """Nonsquare source images preserve XY units and full-edge boxes at admission."""
+    x, y = fraction_x * width, fraction_y * height
+    prompt = parse_interactive_prompt(
+        points_xy=[[x, y]],
+        point_labels=[label],
+        box_xyxy=[0, 0, width, height],
+        mask_input_path=None,
+        image_size=(width, height),
+    )
+    assert prompt.points_xy == ((x, y),)
+    assert prompt.point_labels == (label,)
+    assert prompt.box_xyxy == (0.0, 0.0, float(width), float(height))
+
+
+@settings(max_examples=40)
+@given(
+    shape=st.one_of(
+        st.just((1, 288, 288)),
+        st.just((288, 288)),
+        st.just((1, 1, 288, 288)),
+        st.tuples(
+            st.integers(0, 2),
+            st.sampled_from([0, 287, 288, 289]),
+            st.sampled_from([0, 287, 288, 289]),
+        ),
+    ),
+    double_precision=st.booleans(),
+    raw_value=st.floats(width=32, allow_nan=True, allow_infinity=True),
+)
+def test_interactive_prior_file_shape_and_dtype_admission(
+    shape: tuple[int, ...],
+    double_precision: bool,
+    raw_value: float,
+) -> None:
+    """Only one raw float32 288-grid plane crosses the refinement file boundary."""
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as directory:
+        path = Path(directory) / "prior.npy"
+        np.save(
+            path,
+            np.full(
+                shape, raw_value, dtype=np.float64 if double_precision else np.float32
+            ),
+            allow_pickle=False,
+        )
+        valid = (
+            shape == (1, 288, 288) and not double_precision and np.isfinite(raw_value)
+        )
+        if valid:
+            prompt = parse_interactive_prompt(
+                points_xy=None,
+                point_labels=None,
+                box_xyxy=None,
+                mask_input_path=str(path),
+                image_size=(30, 40),
+            )
+            np.testing.assert_array_equal(
+                prompt.mask_input, np.full((1, 288, 288), raw_value, dtype=np.float32)
+            )
+        else:
+            with pytest.raises(InvalidInputError):
+                parse_interactive_prompt(
+                    points_xy=None,
+                    point_labels=None,
+                    box_xyxy=None,
+                    mask_input_path=str(path),
+                    image_size=(30, 40),
+                )
+
+
+@pytest.mark.parametrize("format_kind", ["archive", "object", "truncated", "text"])
+def test_interactive_prior_rejects_unsupported_or_malformed_files(
+    tmp_path: Path,
+    format_kind: str,
+) -> None:
+    """A refinement prior is a plain numeric NPY array with pickle disabled."""
+    path = tmp_path / "prior.npy"
+    if format_kind == "archive":
+        with path.open("wb") as stream:
+            np.savez(stream, logits=np.zeros((1, 288, 288), dtype=np.float32))
+    elif format_kind == "object":
+        np.save(path, np.array([{"value": 1}], dtype=object))
+    elif format_kind == "truncated":
+        np.save(path, np.zeros((1, 288, 288), dtype=np.float32), allow_pickle=False)
+        path.write_bytes(path.read_bytes()[:-8])
+    else:
+        path.write_bytes(b"not a NumPy array")
+    with pytest.raises(InvalidInputError):
+        parse_interactive_prompt(
+            points_xy=None,
+            point_labels=None,
+            box_xyxy=None,
+            mask_input_path=str(path),
+            image_size=(30, 40),
+        )
+
+
+def test_interactive_candidate_file_collision_preserves_existing_output(
+    image_path: str,
+    output_dir: str,
+    interactive_head: str,
+    interactive_native: _InteractiveNativeModel,
+) -> None:
+    output = Path(output_dir)
+    output.mkdir()
+    (output / "candidate_scores.npy").write_bytes(b"previous alternatives")
+    with pytest.raises(InvalidInputError):
+        medmlx.run(
+            image_path=image_path,
+            output_dir=output_dir,
+            mode="interactive",
+            interactive_weights_path=interactive_head,
+            box_xyxy=[0, 0, 30, 40],
+        )
+    assert (output / "candidate_scores.npy").read_bytes() == b"previous alternatives"
+    assert sorted(path.name for path in output.iterdir()) == ["candidate_scores.npy"]
+    assert not interactive_native.requests

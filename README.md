@@ -22,7 +22,7 @@ Native MLX port of [SAM 3](https://github.com/facebookresearch/sam3) for Apple S
 | **Input** | One 2D image (PNG, JPEG or any Pillow-readable format), or one chosen frame of an image folder or video; a text prompt, one box and/or one point |
 | **Output** | `out/masks.npy`, boolean `(N, height, width)` at the input resolution, and `out/prediction.json` with pixel boxes and scores |
 | **Weights** | [mlx-community/sam3-image](https://huggingface.co/mlx-community/sam3-image), 3.4 GB, SAM License; downloads on first use |
-| **Hardware** | macOS 14 or later on Apple Silicon; 5.4 GB peak MLX memory for one image at the default 1008-pixel resolution, 6.0 GB for a tracked video session |
+| **Hardware** | macOS 14 or later on Apple Silicon; 5.4 GB peak MLX memory for one grounding image at the default 1008-pixel resolution, 6.0 GB for a tracked video session; interactive peak memory has not been measured |
 | **Intended use** | Research and education. Not a medical device; outputs require human review. |
 
 ## Use with MedMLX
@@ -46,6 +46,40 @@ medmlx run sam3 --arguments arguments.json --root ~/medmlx-work
   "output_dir": "results/sam3"
 }
 ```
+
+For interactive annotation through the same `sam3` model descriptor, use
+`mode="interactive"` and explicitly select the converted interactive head:
+
+```json
+{
+  "image_path": "inputs/astronaut.png",
+  "weights_path": "weights/sam3",
+  "mode": "interactive",
+  "interactive_weights_path": "weights/sam3-interactive.safetensors",
+  "points_xy": [[260, 80], [350, 200]],
+  "point_labels": [1, 0],
+  "output_dir": "results/sam3-interactive"
+}
+```
+
+Clicks use source-image pixel XY coordinates, with `1` for foreground and `0`
+for background. Optional `box_xyxy` corners are pixel image edges, so a box may
+extend from `[0, 0]` to `[width, height]`. Points must lie inside the image and
+boxes must have positive area. This mode uses the dedicated interactive head
+with strict FP32 checkpoint loading and a fixed `resolution=1008`; it rejects
+grounding prompts (`text_prompt`, `box_prompt`, `point_prompt`) and nondefault
+grounding controls.
+
+Interactive masks are alternatives for one object. By default the first mask
+with the highest predicted IoU is selected. Set `selected_candidate` to a
+zero-based index to choose another, or `multimask_output=false` to request one
+candidate. `masks.npy` contains the selected mask as `(1, height, width)`.
+`candidate_masks.npy` and `candidate_scores.npy` retain all candidates, and
+`prediction.json` records the mode, selection index and policy. Refine a result
+by passing its `low_res_logits.npy` as `mask_input_path`, optionally with more
+clicks or a box and a new output directory. This prior is one finite float32
+NPY array `(1, 288, 288)` of raw logits, preserved without thresholding or
+normalization. `confidence_threshold` does not filter interactive candidates.
 
 To let an AI agent run it, register the server, then restart the client:
 
@@ -207,10 +241,17 @@ not.
 
 | File | Contents |
 | :--- | :--- |
-| `masks.npy` | Boolean NumPy array `(N, height, width)`, one mask per detection, at the input image or frame resolution |
-| `prediction.json` | Pixel boxes `[x0, y0, x1, y1]`, scores, frame-local `object_ids` (video only, otherwise `null`) and the request settings |
+| `masks.npy` | Boolean NumPy array `(N, height, width)` at the input resolution; grounding has one mask per detection, interactive has only the selected mask (`N=1`) |
+| `prediction.json` | Mode, pixel boxes `[x0, y0, x1, y1]`, scores, frame-local `object_ids` (video only, otherwise `null`) and the request settings; interactive also records candidate scores and the selection policy |
+| `candidate_masks.npy` | Interactive only: boolean alternative masks `(C, height, width)` for one object |
+| `candidate_scores.npy` | Interactive only: float32 predicted IoU scores `(C,)` aligned with candidate masks |
+| `low_res_logits.npy` | Interactive only: selected raw float32 logits `(1, 288, 288)` for the next request's `mask_input_path` |
 
-Only detections scoring above `confidence_threshold` (default 0.5) are kept.
+Grounding keeps only detections scoring above `confidence_threshold` (default
+0.5). Interactive returns three alternatives by default or one with
+`multimask_output=false`; it publishes one selected mask in either case. The
+selected pixel box encloses its nonzero mask pixels using exclusive far edges;
+an empty selected mask has the box `[0, 0, 0, 0]`.
 
 ## License
 
