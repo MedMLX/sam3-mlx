@@ -1,6 +1,6 @@
 [project]
 name = "sam3-mlx"
-version = "0.2.4"
+version = "0.2.5"
 description = "Segment objects in images from text, box or point prompts with Meta's SAM 3"
 readme = "README.md"
 license = "LicenseRef-SAM AND MIT"

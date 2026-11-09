@@ -104,7 +104,7 @@ Requires [uv](https://docs.astral.sh/uv/). If `uv --version` fails, run
 ```sh
 uv venv --python 3.13
 source .venv/bin/activate
-uv pip install "sam3-mlx>=0.2.4"
+uv pip install "sam3-mlx>=0.2.5"
 ```
 
 ## Run
