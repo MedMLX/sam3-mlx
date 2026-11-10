@@ -184,8 +184,9 @@ class Sam3VideoPredictor:
         """Stream ``FrameResponse`` items while re-running the prompt on each frame.
 
         ``propagation_direction`` is ``"both"`` (forward then backward), ``"forward"``
-        or ``"backward"``. Each direction is a separate model stream, so a frame can
-        be yielded in both directions. ``start_frame_idx`` defaults to the prompt's
+        or ``"backward"``. Each direction is a separate model stream; forward
+        includes the start frame and backward excludes it, so no frame is yielded
+        twice. ``start_frame_idx`` defaults to the prompt's
         frame. The stream starts, and is checked, when it is first advanced. In a
         tracked session, the backward half of ``"both"`` continues from the start
         frame's tracks, so ids agree across the two directions.

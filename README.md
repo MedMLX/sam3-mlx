@@ -31,7 +31,6 @@ Native MLX port of [SAM 3](https://github.com/facebookresearch/sam3) for Apple S
 
 Weights: [mlx-community/sam3-image](https://huggingface.co/mlx-community/sam3-image), SAM
 License; they download on first use. Requires macOS 14 or later on Apple Silicon.
-Intended for research and education. Not a medical device; outputs require human review.
 
 ## Install
 
