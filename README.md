@@ -20,13 +20,18 @@ Native MLX port of [SAM 3](https://github.com/facebookresearch/sam3) for Apple S
 
 </div>
 
-| | |
+| Input | Output |
 | :--- | :--- |
-| **Input** | One 2D image (PNG, JPEG or any Pillow-readable format), or one chosen frame of an image folder or video; a text prompt, one box and/or one point |
-| **Output** | `out/masks.npy`, boolean `(N, height, width)` at the input resolution, and `out/prediction.json` with pixel boxes and scores |
-| **Weights** | [mlx-community/sam3-image](https://huggingface.co/mlx-community/sam3-image), 3.4 GB, SAM License; downloads on first use |
-| **Hardware** | macOS 14 or later on Apple Silicon; 5.4 GB peak MLX memory for one image at the default 1008-pixel resolution, 6.0 GB for a tracked video session |
-| **Intended use** | Research and education. Not a medical device; outputs require human review. |
+| One 2D image (PNG, JPEG or any Pillow-readable format), or one chosen frame of an image folder or video; a text prompt, one box and/or one point | `out/masks.npy`, boolean `(N, height, width)` at the input resolution, and `out/prediction.json` with pixel boxes and scores |
+
+| Model | Weights download | Peak MLX memory | Measured on |
+| :--- | ---: | ---: | :--- |
+| `sam3` | 3.4 GB | 5.4 GB | One image at the default 1008-pixel resolution |
+| `sam3`, tracked video | 3.4 GB | 6.0 GB | A tracked video session |
+
+Weights: [mlx-community/sam3-image](https://huggingface.co/mlx-community/sam3-image), SAM
+License; they download on first use. Requires macOS 14 or later on Apple Silicon.
+Intended for research and education. Not a medical device; outputs require human review.
 
 ## Use with MedMLX
 
@@ -99,12 +104,15 @@ the 3.4 GB weights.
 | :--- | :--- | :--- |
 | `run` | Segment one image, or one frame of an image folder or video | `image_path` or `video_path`, `output_dir`, `text_prompt`, `box_prompt`, `point_prompt`, `confidence_threshold`, `resolution`, `frame_index`, `weights_path` (optional) |
 
-`box_prompt` is `[center_x, center_y, width, height]` and `point_prompt` is
-`[x, y]`, both as fractions of the image size (between 0 and 1; box width and
-height above 0). `box_label` and `point_label` mark a prompt as positive
-(`True`) or negative. Prompts given together are combined in one request. The
-result has `outputs["masks"]`, `outputs["prediction"]` and `details`, which
-repeats the prediction metadata.
+| Prompt | Format |
+| :--- | :--- |
+| `text_prompt` | Free text, such as `"helmet"` |
+| `box_prompt` | `[center_x, center_y, width, height]` as fractions of the image size, between 0 and 1; width and height above 0 |
+| `point_prompt` | `[x, y]` as fractions of the image size, between 0 and 1 |
+| `box_label`, `point_label` | Mark a prompt as positive (`True`) or negative |
+
+Prompts given together are combined in one request. The result has `outputs["masks"]`,
+`outputs["prediction"]` and `details`, which repeats the prediction metadata.
 
 To keep arrays in memory instead of writing files, use the model directly:
 
@@ -169,14 +177,16 @@ time or pin a revision:
 hf download mlx-community/sam3-image model.safetensors --revision b72a14d8127e17e6f2a3d2e075bbbf4307ba146e --local-dir sam3-weights
 ```
 
-To use your own copy, pass the folder containing `model.safetensors` as
-`weights_path`. Only these converted MLX weights load; Meta's PyTorch `.pt`
-checkpoints do not. Weight terms: the
-[SAM License](https://github.com/MedMLX/sam3-mlx/blob/v0.2.4/LICENSE): royalty-free,
-including commercial use, but not for military, weapons or other uses barred by
-trade controls, and publications must acknowledge SAM. Meta's original
-checkpoints on Hugging Face require an access request; this converted copy does
-not.
+To use your own copy, pass the folder containing `model.safetensors` as `weights_path`.
+Only these converted MLX weights load; Meta's PyTorch `.pt` checkpoints do not. Meta's
+original checkpoints on Hugging Face require an access request; this converted copy
+does not.
+
+Weight terms are the [SAM License](https://github.com/MedMLX/sam3-mlx/blob/v0.2.4/LICENSE):
+
+- royalty-free, including commercial use;
+- not for military, weapons or other uses barred by trade controls;
+- publications must acknowledge SAM.
 
 ### Inputs and limitations
 
