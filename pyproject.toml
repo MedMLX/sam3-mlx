@@ -1,6 +1,6 @@
 [project]
 name = "sam3-mlx"
-version = "0.2.4"
+version = "0.3.0"
 description = "Segment objects in images from text, box or point prompts with Meta's SAM 3"
 readme = "README.md"
 license = "LicenseRef-SAM AND MIT"
@@ -36,7 +36,7 @@ keywords = [
 dependencies = [
     "ftfy>=6.3.1",
     "huggingface-hub>=1.1.6",
-    "medmlx-core==0.2.6",
+    "medmlx-core>=0.2.6,<0.3",
     "mlx==0.32.4; platform_system == 'Darwin' and platform_machine == 'arm64'",
     "numpy>=2.3.5",
     "pillow>=13,<14",

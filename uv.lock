@@ -415,7 +415,7 @@ wheels = [
 
 [[package]]
 name = "sam3-mlx"
-version = "0.2.4"
+version = "0.3.0"
 source = { editable = "." }
 dependencies = [
     { name = "ftfy" },
@@ -448,7 +448,7 @@ dev = [
 requires-dist = [
     { name = "ftfy", specifier = ">=6.3.1" },
     { name = "huggingface-hub", specifier = ">=1.1.6" },
-    { name = "medmlx-core", specifier = "==0.2.6" },
+    { name = "medmlx-core", specifier = ">=0.2.6,<0.3" },
     { name = "mlx", marker = "platform_machine == 'arm64' and sys_platform == 'darwin'", specifier = "==0.32.4" },
     { name = "numpy", specifier = ">=2.3.5" },
     { name = "opencv-python-headless", marker = "extra == 'video'", specifier = ">=4.10.0" },

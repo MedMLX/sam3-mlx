@@ -7,7 +7,7 @@ Native MLX port of [SAM 3](https://github.com/facebookresearch/sam3) for Apple S
 
 [![PyPI](https://img.shields.io/pypi/v/sam3-mlx)](https://pypi.org/project/sam3-mlx/)
 [![Python](https://img.shields.io/pypi/pyversions/sam3-mlx)](https://pypi.org/project/sam3-mlx/)
-[![License](https://img.shields.io/badge/License-SAM-lightgrey)](https://github.com/MedMLX/sam3-mlx/blob/v0.2.4/LICENSE)
+[![License](https://img.shields.io/badge/License-SAM-lightgrey)](https://github.com/MedMLX/sam3-mlx/blob/v0.3.0/LICENSE)
 [![Apple Silicon](https://img.shields.io/badge/Apple_Silicon-MLX-black?logo=apple)](https://github.com/ml-explore/mlx)
 [![Hugging Face](https://img.shields.io/badge/%F0%9F%A4%97_Hugging_Face-weights-yellow)](https://huggingface.co/mlx-community/sam3-image)
 [![MedMLX](https://img.shields.io/badge/MedMLX-runtime-A51C30)](https://github.com/MedMLX/medmlx)
@@ -40,7 +40,7 @@ Requires [uv](https://docs.astral.sh/uv/). If `uv --version` fails, run
 ```sh
 uv venv --python 3.13
 source .venv/bin/activate
-uv pip install "sam3-mlx>=0.2.4"
+uv pip install "sam3-mlx>=0.3.0"
 ```
 
 ## Run
@@ -156,7 +156,7 @@ Only these converted MLX weights load; Meta's PyTorch `.pt` checkpoints do not. 
 original checkpoints on Hugging Face require an access request; this converted copy
 does not.
 
-Weight terms are the [SAM License](https://github.com/MedMLX/sam3-mlx/blob/v0.2.4/LICENSE):
+Weight terms are the [SAM License](https://github.com/MedMLX/sam3-mlx/blob/v0.3.0/LICENSE):
 
 - royalty-free, including commercial use;
 - not for military, weapons or other uses barred by trade controls;
@@ -234,7 +234,7 @@ example: "Use SAM 3 to segment the helmets in astronaut.png."
 
 ## License
 
-Code: [SAM License](https://github.com/MedMLX/sam3-mlx/blob/v0.2.4/LICENSE), with
+Code: [SAM License](https://github.com/MedMLX/sam3-mlx/blob/v0.3.0/LICENSE), with
 MIT-licensed tokenizer code from OpenAI CLIP and open_clip.
-Weights: SAM License. See [third-party notices](https://github.com/MedMLX/sam3-mlx/blob/v0.2.4/THIRD_PARTY_NOTICES.md).
+Weights: SAM License. See [third-party notices](https://github.com/MedMLX/sam3-mlx/blob/v0.3.0/THIRD_PARTY_NOTICES.md).
 Not affiliated with Meta.
