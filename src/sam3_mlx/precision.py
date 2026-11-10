@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from collections.abc import Iterable
 from typing import Literal, TypeAlias, cast
 
@@ -14,23 +15,71 @@ from sam3_mlx.precision_layers import (
     Float32GELU, Float32GroupNorm, Float32LayerNorm, copy_layer,
 )
 
-PrecisionPolicy: TypeAlias = Literal["fp32", "bf16"]
+PrecisionPolicy: TypeAlias = Literal["fp32", "tf32", "bf16"]
 
 _POLICY_COMPUTE_DTYPE: dict[PrecisionPolicy, mx.Dtype] = {
     "fp32": mx.float32,
+    "tf32": mx.float32,
     "bf16": mx.bfloat16,
 }
+
+_TF32_VARIABLE = "MLX_ENABLE_TF32"
 
 
 def parse_precision(value: object) -> PrecisionPolicy:
     """Validate a precision name.
 
     Raises:
-        ValueError: The value is not ``"fp32"`` or ``"bf16"``.
+        ValueError: The value is not ``"fp32"``, ``"tf32"`` or ``"bf16"``.
     """
-    if value != "fp32" and value != "bf16":
-        raise ValueError(f"precision must be 'fp32' or 'bf16'; got {value!r}")
-    return cast(PrecisionPolicy, value)
+    for policy in _POLICY_COMPUTE_DTYPE:
+        if value == policy:
+            return policy
+    raise ValueError(f"precision must be 'fp32', 'tf32' or 'bf16'; got {value!r}")
+
+
+def request_matmul_precision(policy: PrecisionPolicy) -> None:
+    """Ask MLX for TF32 float32 products when ``policy`` is ``"tf32"``.
+
+    MLX reads ``MLX_ENABLE_TF32`` at the process's first float32 product and
+    keeps that choice, so this must run before that product; the shared MedMLX
+    import defaults the variable to ``"0"``. Other policies leave it unchanged.
+    """
+    if policy == "tf32":
+        os.environ[_TF32_VARIABLE] = "1"
+
+
+def check_matmul_precision(policy: PrecisionPolicy) -> None:
+    """Require the process's float32 matmul precision to match ``policy``.
+
+    ``"tf32"`` needs reduced products to be active; ``"fp32"`` and ``"bf16"``
+    (whose FP32 layers are part of its policy) need full ones.
+
+    Raises:
+        ValueError: The process-wide setting disagrees with ``policy``.
+    """
+    reduced = _reduced_float32_matmul()
+    if policy == "tf32" and not reduced:
+        raise ValueError(
+            "precision='tf32' is not active: it needs an M5 or later GPU on "
+            "macOS 26.2 or later, and MLX had to start with MLX_ENABLE_TF32=1. "
+            "Build the model before any other MLX float32 product in the "
+            "process, or start Python with MLX_ENABLE_TF32=1."
+        )
+    if policy != "tf32" and reduced:
+        raise ValueError(
+            f"precision={policy!r} needs full float32 products, but this process "
+            "runs them in TF32 (MLX_ENABLE_TF32=1). Pass precision='tf32', or "
+            "start a new process without MLX_ENABLE_TF32=1."
+        )
+
+
+def _reduced_float32_matmul() -> bool:
+    # 1 + 2**-15 needs 16 mantissa bits and TF32 keeps 10, so a reduced product
+    # rounds it to 1. MLX takes the reduced path from 2x2 upward.
+    value = mx.full((2, 2), 1.0 + 2.0**-15, dtype=mx.float32)
+    product = mx.matmul(value, mx.ones((2, 2), dtype=mx.float32))
+    return product[0, 0].item() != 2.0 + 2.0**-14
 
 
 def compute_dtype_for_policy(policy: PrecisionPolicy) -> mx.Dtype:

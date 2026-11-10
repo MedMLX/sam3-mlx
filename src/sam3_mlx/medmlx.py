@@ -33,6 +33,7 @@ if TYPE_CHECKING:
     from PIL import Image
 
     from sam3_mlx.model.sam3_image import Sam3Image
+    from sam3_mlx.precision import PrecisionPolicy
 
 type JsonValue = str | int | float | bool | None | list[JsonValue] | dict[str, JsonValue]
 type UnitBox = tuple[float, float, float, float]
@@ -278,11 +279,11 @@ def _load_input_image(path: Path, *, video: bool, frame_index: int) -> Image.Ima
     return frame
 
 
-def _build_image_model(*, checkpoint_path: Path) -> Sam3Image:
-    """Build the image model from a local checkpoint file."""
+def _build_image_model(*, checkpoint_path: Path, precision: PrecisionPolicy) -> Sam3Image:
+    """Build the image model from a local checkpoint file at ``precision``."""
     from sam3_mlx.model_builder import build_sam3_image_model
 
-    return build_sam3_image_model(checkpoint_path=str(checkpoint_path))
+    return build_sam3_image_model(checkpoint_path=str(checkpoint_path), precision=precision)
 
 
 def _segment_image(
@@ -340,6 +341,7 @@ def run(
     resolution: int = DEFAULT_IMAGE_RESOLUTION,
     frame_index: int = 0,
     weights_path: str | None = None,
+    precision: str = "fp32",
 ) -> RunResult:
     """Segment one image, or one chosen frame of a video/image folder, with SAM 3.
 
@@ -387,11 +389,15 @@ def run(
         frame_index: Nonnegative frame index for ``video_path`` (default: 0).
         weights_path: Folder containing ``model.safetensors``;
             None downloads the model automatically through MedMLX.
+        precision: ``"fp32"`` (default), ``"tf32"`` (M5 or later; float32
+            products on the neural accelerators, for every MLX model in the
+            process) or ``"bf16"``.
 
     Raises:
         InvalidInputError: Missing, malformed, unreadable or high-bit-depth
-            inputs, a ``frame_index`` past the last frame, or existing outputs
-            without ``overwrite``.
+            inputs, a ``frame_index`` past the last frame, existing outputs
+            without ``overwrite``, an unknown ``precision``, or one the process
+            cannot run (``"tf32"`` before M5, or after MLX fixed full FP32).
         AssetNotReadyError: An explicit ``weights_path`` that does not
             exist, or a checkpoint that fails to load.
         MissingDependencyError: MLX or its Metal device is unavailable, or a
@@ -418,6 +424,14 @@ def run(
     if not video and frame_index != 0:
         raise InvalidInputError("frame_index only applies to video_path inputs")
     weights_path = _require_optional_str("weights_path", weights_path)
+    from sam3_mlx.precision import (
+        check_matmul_precision, parse_precision, request_matmul_precision,
+    )
+
+    try:
+        policy = parse_precision(precision)
+    except ValueError as error:
+        raise InvalidInputError(str(error)) from error
 
     resolved_input = Path(input_path).expanduser().resolve()
     if not (resolved_input.exists() if video else resolved_input.is_file()):
@@ -443,7 +457,12 @@ def run(
 
     from medmlx_core.runtime import import_mlx
 
+    request_matmul_precision(policy)
     import_mlx()
+    try:
+        check_matmul_precision(policy)
+    except ValueError as error:
+        raise InvalidInputError(str(error)) from error
 
     if directory is None:
         directory = weights_dir("sam3")
@@ -455,7 +474,7 @@ def run(
             hint="Retry the download or pass a complete weights_path folder.",
         )
     try:
-        model = _build_image_model(checkpoint_path=checkpoint)
+        model = _build_image_model(checkpoint_path=checkpoint, precision=policy)
     except (OSError, ValueError, RuntimeError, KeyError) as error:
         raise AssetNotReadyError(
             f"sam3-mlx checkpoint could not be loaded: {error}",
@@ -495,6 +514,7 @@ def run(
         "point_label": point_label if point is not None else None,
         "confidence_threshold": confidence_threshold,
         "resolution": resolution,
+        "precision": policy,
         "checkpoint_path": checkpoint.as_posix(),
         "weights_revision": weights_revision(directory),
         "num_detections": num_detections,

@@ -16,8 +16,9 @@ from sam3_mlx.precision import (
 from sam3_mlx.model.sam3_image_processor import transform
 
 
-def test_parse_precision_accepts_fp32_and_bf16_only() -> None:
+def test_parse_precision_accepts_fp32_tf32_and_bf16_only() -> None:
     assert parse_precision("fp32") == "fp32"
+    assert parse_precision("tf32") == "tf32"
     assert parse_precision("bf16") == "bf16"
     for value in ("fp16", "mixed", "bfloat16", "int8", 16):
         with pytest.raises(ValueError):

@@ -64,7 +64,7 @@ the 3.4 GB weights.
 
 | Runner | Use | Key arguments |
 | :--- | :--- | :--- |
-| `run` | Segment one image, or one frame of an image folder or video | `image_path` or `video_path`, `output_dir`, `text_prompt`, `box_prompt`, `point_prompt`, `confidence_threshold`, `resolution`, `frame_index`, `weights_path` (optional) |
+| `run` | Segment one image, or one frame of an image folder or video | `image_path` or `video_path`, `output_dir`, `text_prompt`, `box_prompt`, `point_prompt`, `confidence_threshold`, `resolution`, `frame_index`, `weights_path` (optional), `precision` |
 
 | Prompt | Format |
 | :--- | :--- |
@@ -75,6 +75,18 @@ the 3.4 GB weights.
 
 Prompts given together are combined in one request. The result has `outputs["masks"]`,
 `outputs["prediction"]` and `details`, which repeats the prediction metadata.
+
+| `precision` | What runs | Largest difference from upstream SAM 3 (FP32) on the six medical fixtures |
+| :--- | :--- | :--- |
+| `"fp32"` (default) | Full float32 | Score 4e-5, box 0.002 px, 2 mask pixels |
+| `"tf32"` | Float32 model; matrix products on the GPU's neural accelerators. M5 or later | Score 0.005, box 0.4 px, 0.24% of mask area |
+| `"bf16"` | BF16 projections in the backbone and detector; FP32 mask head | Score 0.012, box 0.5 px, 0.7% of mask area |
+
+Every level finds the same detections as upstream on those fixtures. Speed for
+each level is in the
+[technical notes](https://github.com/MedMLX/sam3-mlx/blob/main/docs/technical.md).
+`"tf32"` applies to every MLX model in the Python process, so build the model
+before other MLX work, or start Python with `MLX_ENABLE_TF32=1`.
 
 To keep arrays in memory instead of writing files, use the model directly:
 
@@ -91,9 +103,9 @@ masks, boxes, scores = state["masks"], state["boxes"], state["scores"]
 ```
 
 `masks` is boolean `(N, 1, height, width)`, `boxes` are pixel `[x0, y0, x1, y1]`
-and `scores` has shape `(N,)`. `build_sam3_image_model(precision="bf16")` runs
-the backbone and detector projections in BF16 from the FP32 weights;
-`compile=True` compiles the image graph with MLX. Both can change outputs
+and `scores` has shape `(N,)`. `build_sam3_image_model` and
+`build_sam3_predictor` take the same `precision` values as `run`;
+`compile=True` compiles the image graph with MLX, which can change outputs
 slightly.
 
 For SAM 1-style clicks and boxes in pixels, enable the interactive head. It
@@ -169,14 +181,10 @@ Weight terms are the [SAM License](https://github.com/MedMLX/sam3-mlx/blob/v0.2.
 - SAM 3 is a general-purpose model; its accuracy on medical images is not
   established. Tests compare preprocessing and individual layers with PyTorch
   and TorchVision.
-- The model runs in full FP32: the code sets an unset `MLX_ENABLE_TF32` to `0`.
-  If another library has already started MLX with reduced precision, the
-  builder stops with an error; start a new Python process.
-- On M5 and later chips, setting `MLX_ENABLE_TF32=1` before starting Python
-  lets float32 matrix multiplies use the GPU's neural accelerators at reduced
-  precision. It applies to every MLX model in that process, and results move
-  slightly away from upstream; see the
-  [technical notes](https://github.com/MedMLX/sam3-mlx/blob/main/docs/technical.md).
+- MLX fixes its float32 product precision for the whole process at its first
+  float32 product. A `"fp32"` or `"bf16"` model in a process already running
+  TF32, or a `"tf32"` model in one fixed to full FP32 or on a chip before M5,
+  stops with an error; start a new Python process.
 
 ### Outputs
 

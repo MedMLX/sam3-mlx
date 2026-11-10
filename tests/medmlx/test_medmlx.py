@@ -100,6 +100,7 @@ def test_entry_point_declaration_signature_and_lazy_public_api() -> None:
         "resolution",
         "frame_index",
         "weights_path",
+        "precision",
     ]
     assert all(item.kind is inspect.Parameter.KEYWORD_ONLY for item in parameters.values())
     assert parameters["overwrite"].default is False
@@ -248,7 +249,7 @@ def test_symlinked_checkpoint_keeps_its_safetensors_name(
     checkpoint.symlink_to(blob)
     received: list[Path | None] = []
 
-    def fake_build_image_model(*, checkpoint_path: Path | None) -> Sam3Image:
+    def fake_build_image_model(*, checkpoint_path: Path | None, precision: str) -> Sam3Image:
         """Capture the checkpoint path passed to the model builder."""
         received.append(checkpoint_path)
         raise ValueError("stop after checkpoint resolution")

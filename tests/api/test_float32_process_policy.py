@@ -105,3 +105,53 @@ assert mx.default_device() == mx.gpu, mx.default_device()
     if completed.returncode == 77:
         pytest.skip("MLX Metal is unavailable")
     assert completed.returncode == 0, completed.stderr
+
+
+def test_tf32_precision_selects_reduced_products_or_refuses() -> None:
+    """``precision='tf32'`` runs TF32 products on capable GPUs and errors elsewhere."""
+    code = r"""
+import mlx.core as mx
+from sam3_mlx.model_builder import build_sam3_image_model
+try:
+    model = build_sam3_image_model(load_from_HF=False, precision="tf32")
+except ValueError as exc:
+    assert "not active" in str(exc), exc
+else:
+    assert model.precision == "tf32"
+    x = mx.full((2, 2), 1 + 2**-15, dtype=mx.float32)
+    assert (x @ mx.ones((2, 2), dtype=mx.float32))[0, 0].item() == 2
+"""
+    environment = os.environ.copy()
+    environment.pop("MLX_ENABLE_TF32", None)
+    completed = subprocess.run(
+        [sys.executable, "-W", "ignore", "-c", code], env=environment,
+        capture_output=True, text=True, check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+
+
+def test_fp32_precision_rejects_a_tf32_process() -> None:
+    """An FP32 model is refused when the process already runs TF32 products."""
+    code = r"""
+import sys
+import mlx.core as mx
+x = mx.full((2, 2), 1 + 2**-15, dtype=mx.float32)
+if (x @ mx.ones((2, 2), dtype=mx.float32))[0, 0].item() != 2:
+    sys.exit(77)  # This hardware did not select reduced products.
+from sam3_mlx.model_builder import build_sam3_image_model
+try:
+    build_sam3_image_model(load_from_HF=False)
+except ValueError as exc:
+    assert "precision='tf32'" in str(exc), exc
+else:
+    raise AssertionError("FP32 build accepted a TF32 process")
+"""
+    environment = os.environ.copy()
+    environment["MLX_ENABLE_TF32"] = "1"
+    completed = subprocess.run(
+        [sys.executable, "-W", "ignore", "-c", code], env=environment,
+        capture_output=True, text=True, check=False,
+    )
+    if completed.returncode == 77:
+        pytest.skip("MLX did not select reduced-precision products on this hardware")
+    assert completed.returncode == 0, completed.stderr

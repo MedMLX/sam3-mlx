@@ -25,7 +25,10 @@ from sam3_mlx.model_components import (
     create_sam3_transformer, create_segmentation_head, create_text_encoder,
     create_vision_backbone, create_vl_backbone,
 )
-from sam3_mlx.precision import apply_precision_policy, parse_precision
+from sam3_mlx.precision import (
+    apply_precision_policy, check_matmul_precision, parse_precision,
+    request_matmul_precision,
+)
 
 if TYPE_CHECKING:
     import mlx.core as mx
@@ -43,6 +46,7 @@ class Sam3PredictorOptions(TypedDict, total=False):
 
     strict_state_dict_loading: bool
     image_model: object | None
+    precision: str
     resolution: int
     confidence_threshold: float
     processor_factory: ProcessorFactory | None
@@ -131,9 +135,13 @@ def build_sam3_image_model(
             checkpoint then needs ``interactive_checkpoint_path``.
         compile: Compile the visual backbone and grounding graphs with MLX
             (opt-in; image model only).
-        precision: ``"fp32"`` (default) or ``"bf16"``. BF16 loads the FP32
-            checkpoint, runs autocast projections in BF16 and keeps the
-            segmentation head in FP32.
+        precision: ``"fp32"`` (default), ``"tf32"`` or ``"bf16"``. TF32 keeps
+            the FP32 model and runs float32 matrix products on the M5 GPU's
+            neural accelerators; it sets ``MLX_ENABLE_TF32=1``, which applies
+            to every MLX model in the process and must take effect before the
+            process's first float32 product. BF16 loads the FP32 checkpoint,
+            runs autocast projections in BF16 and keeps the segmentation head
+            in FP32.
         interactive_checkpoint_path: The converted interactive head, a flat MLX
             ``.safetensors`` file of ``inst_interactive_predictor.*`` tensors;
             requires ``enable_inst_interactivity=True``. It is checked strictly
@@ -143,12 +151,15 @@ def build_sam3_image_model(
             audit is stored on ``model.checkpoint_load_report``.
 
     Raises:
-        ValueError: An unknown precision, ``interactive_checkpoint_path``
+        ValueError: An unknown precision, a process whose float32 product
+            precision disagrees with it, ``interactive_checkpoint_path``
             without ``enable_inst_interactivity``, a wrong interactive file, or
             checkpoint coverage/shape errors.
     """
-    import_mlx()
     policy = parse_precision(precision)
+    request_matmul_precision(policy)
+    import_mlx()
+    check_matmul_precision(policy)
     if interactive_checkpoint_path is not None and not enable_inst_interactivity:
         raise ValueError(
             "interactive_checkpoint_path requires enable_inst_interactivity=True."
@@ -192,7 +203,7 @@ def build_sam3_image_model(
         # it holds at most one FP32 source tensor beyond the cast weights. FP32 has no
         # cast, so it evaluates ~64 MB batches: one evaluation per tensor spent more
         # time synchronizing than reading.
-        limit = _LOAD_BATCH_BYTES if policy == "fp32" else 0
+        limit = 0 if policy == "bf16" else _LOAD_BATCH_BYTES
         batch: list[mx.array] = []
         size = 0
         for value in flatten_model_parameters(model).values():
@@ -218,6 +229,7 @@ def build_sam3_video_predictor(
     load_from_HF: bool = True,
     processor_factory: ProcessorFactory | None = None,
     frame_feature_cache_size: int = 4,
+    precision: str = "fp32",
 ) -> Sam3VideoPredictor:
     """Build the selected-frame SAM 3 video predictor.
 
@@ -238,6 +250,7 @@ def build_sam3_video_predictor(
             confidence_threshold=confidence_threshold,
             processor_factory=processor_factory,
             frame_feature_cache_size=frame_feature_cache_size,
+            precision=precision,
         )
     )
 
@@ -252,13 +265,15 @@ def build_sam3_video_model(
     confidence_threshold: float = 0.5,
     processor_factory: ProcessorFactory | None = None,
     frame_feature_cache_size: int = 4,
+    precision: str = "fp32",
 ) -> Sam3VideoInference:
     """Wrap an image model for independent, bounded-memory frame inference.
 
     Without ``image_model``, the image model is built by ``build_sam3_image_model``
     from ``checkpoint_path``, ``load_from_HF``, ``bpe_path`` and
     ``strict_state_dict_loading`` (its ``strict_checkpoint_loading``). A supplied
-    ``image_model`` is used as given. ``resolution`` is the square model input
+    ``image_model`` is used as given, and ``precision`` (passed to
+    ``build_sam3_image_model``) applies only when the image model is built here. ``resolution`` is the square model input
     size, ``confidence_threshold`` the default score threshold,
     ``processor_factory`` builds each session's image processor (default
     ``Sam3Processor``) and ``frame_feature_cache_size`` bounds the frame encodings
@@ -272,6 +287,7 @@ def build_sam3_video_model(
             bpe_path=bpe_path, eval_mode=True,
             checkpoint_path=checkpoint_path, load_from_HF=load_from_HF,
             strict_checkpoint_loading=strict_state_dict_loading,
+            precision=precision,
         )
     elif checkpoint_path is not None:
         raise ValueError("Pass checkpoint_path or image_model, not both.")

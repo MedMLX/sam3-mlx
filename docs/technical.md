@@ -4,17 +4,21 @@
 
 Measured on an Apple M5 Max (40-core GPU, 128 GB) with MLX 0.32.4 on Metal and
 the pinned `mlx-community/sam3-image` weights, at the default 1008-pixel
-resolution. Times are warm medians in a fresh process, after the model is loaded,
-on the chest X-ray fixture. The one-image times come from 7 alternating rounds
-of the two settings in fresh processes; TF32 took 0.44-0.46 of the FP32 time
-(98% interval).
+resolution, on the chest X-ray fixture. Times are warm medians in fresh
+processes after the model is loaded, from 6 counted rounds alternating the three
+`precision` settings; ratios are against FP32 with their 97% intervals. Another
+workload shared the host during these rounds; on a quiet machine an FP32 image
+with one prompt took about 500 ms.
 
-| Step | Full FP32 (default) | TF32 (`MLX_ENABLE_TF32=1`) |
-| :--- | ---: | ---: |
-| One image with one text prompt (`set_image` + `set_text_prompt`) | ~530 ms | ~240 ms |
-| Another text prompt on the same image | ~50 ms | ~25 ms |
-| Peak MLX memory through `medmlx run`, weights included | 5.4 GB | 5.4 GB |
-| Peak MLX memory, tracked video session | 6.0 GB | 6.0 GB |
+| Step | `"fp32"` (default) | `"tf32"` | `"bf16"` |
+| :--- | ---: | ---: | ---: |
+| One image with one text prompt (`set_image` + `set_text_prompt`) | 564 ms | 281 ms (×0.48-0.53) | 422 ms (×0.74-0.76) |
+| Another text prompt on the same image | 44 ms | 36 ms (×0.80-0.84) | 39 ms (×0.83-0.88) |
+
+The process footprint for one image was within 1% across the three settings; a
+further BF16 prompt added 590 MB more than an FP32 one. In FP32, peak MLX memory
+through `medmlx run`, weights included, is 5.4 GB for one image and 6.0 GB for a
+tracked video session.
 
 Peak memory does not depend on the input image size, because every image is
 resized to the 1008-pixel model input: it was the same for a 450×280 CT slice
@@ -31,10 +35,11 @@ in full FP32. Attention itself (28 windowed and 4 global blocks) takes about
 
 In MLX 0.32.4, float32 matrix multiplies use the M5 neural-accelerator kernels
 only when TF32 is enabled. `medmlx-core` sets an unset `MLX_ENABLE_TF32` to `0`
-so results match the FP32 upstream reference, so by default these projections
-run on the regular GPU kernels at 11-14 TFLOP/s. With TF32 they run about three
-times faster, and the image encoder takes ~190 ms instead of ~475 ms; attention
-is unchanged.
+so results match the FP32 upstream reference, so with `"fp32"` these
+projections run on the regular GPU kernels at 11-15 TFLOP/s. `"tf32"` sets the
+variable to `1`; the projections then run about three times faster and
+attention is unchanged. For the MLP's first projection (5184 × 1024 by 1024 ×
+4736), one product takes 3.3 ms in FP32, 1.0 ms in TF32 and 0.8 ms in BF16.
 
 The fusion encoder's attention heads are 32 wide, below the 64-wide minimum of
 MLX's fused attention kernel. Without a mask, `attention_metal.py` runs them
@@ -49,21 +54,21 @@ longer than 8 tokens, which keeps the result and avoids MLX's unfused path that
 materializes the full score matrix; padding lowered peak memory from 8.6 to
 5.7 GB for one image.
 
-### TF32 accuracy
+### Accuracy by precision
 
-`MLX_ENABLE_TF32` is read once per process and applies to every MLX
-computation in it, so sam3-mlx does not change it. Differences from upstream
-PyTorch SAM 3 (FP32, CPU) on the six medical fixtures in
-`tests/fixtures/upstream_text_prompts.json`:
+MLX reads `MLX_ENABLE_TF32` at the first float32 product and keeps it for the
+process, so `"tf32"` applies to every MLX computation in it; a build whose
+`precision` disagrees with the process setting raises an error. Differences
+from upstream PyTorch SAM 3 (FP32, CPU) on the six medical fixtures in
+`tests/fixtures/upstream_text_prompts.json`, as the largest absolute difference
+per image (relative for mask area):
 
-| Fixture | Detections | Score | Box | Mask area |
-| :--- | ---: | ---: | ---: | ---: |
-| Chest X-ray | 2 | 0.0001 | 0.05 px | 0.04% |
-| Dermoscopy | 1 | 0.0008 | 0.07 px | 0.03% |
-| Microscopy | 4 | 0.0049 | 0.38 px | 0.21% |
+| Fixture | Detections | `"fp32"` score / box / mask area | `"tf32"` | `"bf16"` |
+| :--- | ---: | :--- | :--- | :--- |
+| Chest X-ray | 2 | 6e-6 / 0.0005 px / 0% | 0.0002 / 0.05 px / 0.03% | 0.0067 / 0.15 px / 0.04% |
+| Dermoscopy | 1 | 2e-6 / 0.0006 px / 0% | 0.0008 / 0.07 px / 0.03% | 0.0028 / 0.25 px / 0.01% |
+| Microscopy | 4 | 4e-5 / 0.002 px / 0.005% | 0.0046 / 0.36 px / 0.24% | 0.012 / 0.48 px / 0.69% |
 | CT, MRI, ultrasound | 0 | — | — | — |
 
-Values are the largest absolute difference per image (relative for mask area).
-Detection counts match upstream in every case. In full FP32 the same
-differences are at most 4.3e-5 in score, 0.003 px in box and two pixels per
-mask. Upstream's own examples run the model under BF16 autocast.
+Detection counts match upstream at every precision. Upstream's own examples run
+the model under BF16 autocast.
