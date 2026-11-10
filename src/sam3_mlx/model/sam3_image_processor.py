@@ -34,7 +34,7 @@ from sam3_mlx.resolutions import DEFAULT_IMAGE_RESOLUTION, PATCH_SIZE
 DEFAULT_TEXT_CACHE_SIZE = 8
 IndexArray: TypeAlias = npt.NDArray[np.int64]
 WeightArray: TypeAlias = npt.NDArray[np.float32]
-ResizeWeights: TypeAlias = tuple[tuple[IndexArray, WeightArray], ...]
+ResizeWeights: TypeAlias = tuple[IndexArray, WeightArray]
 ImageSource: TypeAlias = str | os.PathLike[str] | Image.Image | npt.NDArray[np.generic]
 ProcessorState = dict[str, object]
 
@@ -77,17 +77,34 @@ def _upsample_spatial(array: mx.array, img_h: int, img_w: int) -> mx.array:
     return interpolate(array, size=(img_h, img_w))
 
 
-def _upsample_and_activate_masks(
-    out_masks: mx.array, img_h: int, img_w: int
+def _upsample_boolean_masks(
+    out_masks: mx.array, img_h: int, img_w: int, batch_bytes: int
 ) -> mx.array:
-    """Bilinearly upsample mask logits ``(K, H, W)`` to ``img_h`` x ``img_w`` and apply a sigmoid.
+    """Resize logits, apply the FP32 sigmoid and threshold in bounded mask groups.
 
-    Returns probabilities of shape ``(K, 1, img_h, img_w)`` in float32. Sigmoid is
-    applied after the resize, so interpolation acts on logits.
+    ``batch_bytes`` bounds one FP32 resized group's payload, with at least one
+    mask per group. The returned bool tensor still holds every retained mask.
     """
-    return mx.sigmoid(
-        _upsample_spatial(out_masks.astype(mx.float32)[:, None], img_h, img_w)
-    )
+    count = out_masks.shape[0]
+    group = max(1, batch_bytes // (4 * img_h * img_w))
+    if count <= group:
+        return (
+            mx.sigmoid(
+                _upsample_spatial(out_masks.astype(mx.float32)[:, None], img_h, img_w)
+            )
+            > 0.5
+        )
+    result = mx.zeros((count, 1, img_h, img_w), dtype=mx.bool_)
+    for start in range(0, count, group):
+        stop = min(start + group, count)
+        probabilities = mx.sigmoid(
+            _upsample_spatial(
+                out_masks[start:stop].astype(mx.float32)[:, None], img_h, img_w
+            )
+        )
+        result[start:stop] = probabilities > 0.5
+        evaluate_boundary(result)
+    return result
 
 
 def _validate_processor_resolution(resolution: object) -> int:
@@ -116,7 +133,7 @@ def _readonly_array[DTypeT: np.generic](
 
 @lru_cache(maxsize=128)
 def _resize_weights_1d(in_size: int, out_size: int) -> ResizeWeights:
-    """Cache float32 antialias indices and weights for one resize axis."""
+    """Cache immutable packed antialias indices and FP32 weights for one resize axis."""
     scale = np.float32(in_size / out_size)
     support = max(scale, np.float32(1.0))
     invscale = np.float32(1.0 / float(scale)) if scale >= 1 else np.float32(1.0)
@@ -137,7 +154,13 @@ def _resize_weights_1d(in_size: int, out_size: int) -> ResizeWeights:
             total = np.float32(total + weight)
         weights /= total
         weights_by_output.append((_readonly_array(indices), _readonly_array(weights)))
-    return tuple(weights_by_output)
+    taps = max(len(indices) for indices, _ in weights_by_output)
+    packed_indices = np.zeros((out_size, taps), dtype=np.int64)
+    coefficients = np.zeros((out_size, taps), dtype=np.float32)
+    for row, (source_indices, source_weights) in enumerate(weights_by_output):
+        packed_indices[row, : len(source_indices)] = source_indices
+        coefficients[row, : len(source_weights)] = source_weights
+    return _readonly_array(packed_indices), _readonly_array(coefficients)
 
 
 def _fused_multiply_add_float32(
@@ -155,23 +178,34 @@ def _fused_multiply_add_float32(
 def _resample_antialiased_axis(
     image: npt.NDArray[np.float32], weights: ResizeWeights, *, axis: int
 ) -> npt.NDArray[np.float32]:
-    """Apply cached separable antialias weights along one image axis."""
-    taps = max(len(indices) for indices, _ in weights)
-    indices = np.zeros((len(weights), taps), dtype=np.int64)
-    coefficients = np.zeros((len(weights), taps), dtype=np.float32)
-    for row, (source_indices, source_weights) in enumerate(weights):
-        indices[row, : len(source_indices)] = source_indices
-        coefficients[row, : len(source_weights)] = source_weights
+    """Apply cached weights in strips, preserving each pixel's FP32 FMA sequence.
+
+    Each FP64 image temporary is at most 4 MiB, except when a single output
+    strip is larger. The float32 destination contains the complete resized image.
+    """
+    indices, coefficients = weights
+    taps = indices.shape[1]
     shape = (-1, 1, 1) if axis == 0 else (1, -1, 1)
-    output = np.take(image, indices[:, 0], axis=axis) * coefficients[:, 0].reshape(
-        shape
-    )
-    for tap in range(1, taps):
-        output = _fused_multiply_add_float32(
-            np.take(image, indices[:, tap], axis=axis),
-            coefficients[:, tap].reshape(shape),
-            output,
+    output_shape = list(image.shape)
+    output_shape[axis] = len(indices)
+    output = np.empty(output_shape, dtype=np.float32)
+    across = 1 - axis
+    strip_size = max(1, (4 * 1024**2) // (8 * len(indices) * image.shape[2]))
+    for start in range(0, image.shape[across], strip_size):
+        window = [slice(None)] * 3
+        window[across] = slice(start, start + strip_size)
+        region = tuple(window)
+        source = image[region]
+        tile = np.take(source, indices[:, 0], axis=axis) * coefficients[:, 0].reshape(
+            shape
         )
+        for tap in range(1, taps):
+            tile = _fused_multiply_add_float32(
+                np.take(source, indices[:, tap], axis=axis),
+                coefficients[:, tap].reshape(shape),
+                tile,
+            )
+        output[region] = tile
     return output
 
 
@@ -452,6 +486,8 @@ class Sam3Processor:
         confidence_threshold: Score threshold in [0, 1].
         text_cache_size: Number of text-encoder outputs to cache by normalized
             prompt; 0 disables caching.
+        mask_batch_bytes: FP32 resized-mask payload per group; one mask is the
+            minimum group even when it exceeds this budget.
     """
 
     def __init__(
@@ -460,14 +496,22 @@ class Sam3Processor:
         resolution: object = DEFAULT_IMAGE_RESOLUTION,
         confidence_threshold: float = 0.5,
         text_cache_size: object = DEFAULT_TEXT_CACHE_SIZE,
+        mask_batch_bytes: object = 64 * 1024**2,
     ) -> None:
         """Validate the resolution, threshold and text-cache settings."""
         if not 0.0 <= confidence_threshold <= 1.0:
             raise ValueError("Confidence threshold must be between 0.0 and 1.0.")
         cache_size = _validate_text_cache_size(text_cache_size)
+        if (
+            isinstance(mask_batch_bytes, bool)
+            or not isinstance(mask_batch_bytes, int)
+            or mask_batch_bytes < 1
+        ):
+            raise ValueError("mask_batch_bytes must be a positive integer")
         self.model = model
         self.resolution = _validate_processor_resolution(resolution)
         self.confidence_threshold = confidence_threshold
+        self.mask_batch_bytes = mask_batch_bytes
         self._text_cache: BoundedLRUCache[str, Mapping[str, mx.array]] | None = (
             None if cache_size == 0 else BoundedLRUCache(cache_size)
         )
@@ -715,13 +759,13 @@ class Sam3Processor:
         }
         for index, (img_h, img_w) in enumerate(sizes):
             keep = _score_keep_indices(scores[index], self.confidence_threshold)
-            masks = _upsample_and_activate_masks(
-                outputs["pred_masks"][index][keep], img_h, img_w
+            masks = _upsample_boolean_masks(
+                outputs["pred_masks"][index][keep], img_h, img_w, self.mask_batch_bytes
             )
             results["boxes"].append(
                 _boxes_to_original_xyxy(outputs["pred_boxes"][index][keep], img_h, img_w)
             )
-            results["masks"].append(masks > 0.5)
+            results["masks"].append(masks)
             results["scores"].append(scores[index][keep])
             results["semantic_seg"].append(
                 _upsample_spatial(semantic_seg[index : index + 1], img_h, img_w)

@@ -198,7 +198,8 @@ def test_bf16_scores_round_probabilities_before_thresholding() -> None:
 
 @pytest.mark.parametrize(
     ("name", "value"),
-    [("resolution", 15), ("resolution", True), ("text_cache_size", -1)],
+    [("resolution", 15), ("resolution", True), ("text_cache_size", -1),
+     ("mask_batch_bytes", 0), ("mask_batch_bytes", True)],
 )
 def test_processor_rejects_invalid_configuration(name: str, value: object) -> None:
     arguments: dict[str, object] = {"resolution": 14, name: value}
@@ -909,3 +910,28 @@ def test_single_image_results_match_a_batch_of_one() -> None:
         np.testing.assert_array_equal(
             to_numpy(_state_array(single, key)), to_numpy(batch_value)
         )
+
+
+@pytest.mark.parametrize("dtype", [mx.float32, mx.bfloat16])
+def test_large_mask_groups_preserve_resize_sigmoid_decisions(dtype: mx.Dtype) -> None:
+    """Preserve odd-size masks and sigmoid rounding near zero across short final groups."""
+    from sam3_mlx.model.data_misc import interpolate
+
+    logits = mx.reshape(mx.sin(mx.arange(7 * 15, dtype=mx.float32)), (1, 7, 3, 5))
+    logits = (logits * 1e-7).astype(dtype)
+    model = FakeModel(
+        _raw(
+            logits=mx.full((1, 7, 1), 30.0),
+            boxes=mx.full((1, 7, 4), 0.5),
+            masks=logits,
+            presence=mx.full((1, 1), 30.0),
+        )
+    )
+    processor = Sam3Processor(model, resolution=14, mask_batch_bytes=4 * 513 * 777 * 2)
+    state = processor.predict(_prompted_state(processor, (777, 513)))
+    expected = (
+        mx.sigmoid(interpolate(logits[0].astype(mx.float32)[:, None], (513, 777))) > 0.5
+    )
+    observed = _state_array(state, "masks")
+    assert observed.dtype == mx.bool_
+    np.testing.assert_array_equal(to_numpy(observed), to_numpy(expected))
