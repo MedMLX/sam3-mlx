@@ -860,6 +860,25 @@ def _three_query_outputs(presence_logit: float) -> RawPrediction:
     )
 
 
+@pytest.mark.parametrize(
+    "field",
+    ["pred_logits", "presence_logit_dec", "pred_boxes", "pred_masks", "semantic_seg"],
+)
+@pytest.mark.parametrize("value", [float("nan"), float("inf")])
+def test_predict_rejects_nonfinite_outputs_before_thresholding(
+    field: str, value: float
+) -> None:
+    """Numerical failures must not become empty detections or Boolean masks."""
+    outputs = _three_query_outputs(10.0)
+    arrays = cast(dict[str, mx.array], outputs)
+    arrays[field] = mx.full_like(arrays[field], value)
+    processor = Sam3Processor(FakeModel(outputs), resolution=14)
+    state = _prompted_state(processor, (8, 4))
+
+    with pytest.raises(ValueError, match="non-finite"):
+        processor.predict(state)
+
+
 def test_processor_predict_raw_is_unfiltered_and_predict_materializes() -> None:
     """Return raw logits before filtering; ``predict`` produces thresholded masks, boxes and scores."""
     presence_logit = 10.0
