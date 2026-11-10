@@ -8,12 +8,15 @@ Native MLX port of [SAM 3](https://github.com/facebookresearch/sam3) for Apple S
 [![PyPI](https://img.shields.io/pypi/v/sam3-mlx)](https://pypi.org/project/sam3-mlx/)
 [![Python](https://img.shields.io/pypi/pyversions/sam3-mlx)](https://pypi.org/project/sam3-mlx/)
 [![License](https://img.shields.io/badge/License-SAM-lightgrey)](https://github.com/MedMLX/sam3-mlx/blob/v0.2.4/LICENSE)
+[![Apple Silicon](https://img.shields.io/badge/Apple_Silicon-MLX-black?logo=apple)](https://github.com/ml-explore/mlx)
+[![Hugging Face](https://img.shields.io/badge/%F0%9F%A4%97_Hugging_Face-weights-yellow)](https://huggingface.co/mlx-community/sam3-image)
+[![MedMLX](https://img.shields.io/badge/MedMLX-runtime-A51C30)](https://github.com/MedMLX/medmlx)
 
 [Weights](https://huggingface.co/mlx-community/sam3-image) · [Upstream](https://github.com/facebookresearch/sam3) · [MedMLX](https://medmlx.org)
 
-<img src="https://raw.githubusercontent.com/MedMLX/sam3-mlx/v0.2.4/docs/showcase.png" alt="A photograph of an astronaut, then the same photograph with SAM 3 masks for the text prompts person and helmet" width="100%">
+<img src="https://raw.githubusercontent.com/MedMLX/sam3-mlx/main/docs/showcase.png" alt="An abdominal CT slice, the SAM 3 mask for the text prompt liver, and the AMOS22 reference liver label" width="100%">
 
-<sub>Photograph of astronaut Eileen Collins: NASA, public domain, via the scikit-image sample data.</sub>
+<sub>Abdominal CT and reference label from [AMOS22](https://zenodo.org/records/7262581), CC BY 4.0.</sub>
 
 </div>
 
