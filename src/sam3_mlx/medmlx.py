@@ -4,9 +4,6 @@ Built on ``build_sam3_image_model`` and ``Sam3Processor``. A chosen frame of an
 image folder or video is read with the video frame store and segmented exactly
 like an image, so it gets the same prompts, validation and outputs. There is no
 tracking across frames.
-
-Research software, not a medical device: outputs are segmentation proposals that
-require human review.
 """
 
 from __future__ import annotations
