@@ -145,7 +145,7 @@ def create_dot_product_scoring() -> DotProductScoring:
 
 
 def create_segmentation_head() -> UniversalSegmentationHead:
-    """Build the fixed 256-d mask head with 3 nearest-neighbour upsampling stages."""
+    """Build the fixed 256-d mask head with 3 nearest-neighbor upsampling stages."""
     pixel_decoder = PixelDecoder(hidden_dim=256, num_upsampling_stages=3)
     cross_attend_prompt = MultiheadAttention(256, 8)
     return UniversalSegmentationHead(

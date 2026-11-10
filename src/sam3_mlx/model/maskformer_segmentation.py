@@ -38,7 +38,7 @@ class PixelDecoder(nn.Module):
     """Top-down feature-pyramid decoder over NHWC levels.
 
     Starting from the lowest-resolution level, each step upsamples the running
-    feature (nearest neighbour) to the next level's size, adds that level, then
+    feature (nearest neighbor) to the next level's size, adds that level, then
     applies a 3x3 convolution, GroupNorm(8) and ReLU. At most
     ``num_upsampling_stages`` steps are supported.
     """
