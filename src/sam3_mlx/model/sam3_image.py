@@ -64,6 +64,7 @@ class _Decoder(Protocol):
         memory_text: mx.array,
         text_attention_mask: mx.array,
         feat_size: tuple[int, int],
+        return_intermediate: bool = True,
     ) -> tuple[mx.array, mx.array, mx.array, mx.array]:
         """Return per-layer queries, reference boxes, presence logits and presence features."""
         ...
@@ -193,6 +194,7 @@ class Sam3Image(nn.Module):
             memory_text=prompt,
             text_attention_mask=prompt_mask,
             feat_size=feat_size,
+            return_intermediate=False,
         )
         scores = self.dot_prod_scoring(hs, prompt, prompt_mask)
         boxes = mx.sigmoid(

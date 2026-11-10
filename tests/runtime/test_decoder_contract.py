@@ -68,3 +68,29 @@ def test_decoder_layer_cross_attention_mask_is_batch_first_with_presence_row() -
         atol=1e-5,
         rtol=1e-5,
     )
+
+
+def test_final_decoder_output_preserves_refinement_references() -> None:
+    """Keep final queries, entering boxes and presence equal to the diagnostic layer stack."""
+    from sam3_mlx.model.decoder import TransformerDecoder
+
+    mx.random.seed(975)
+    decoder = TransformerDecoder(
+        layer=lambda: TransformerDecoderLayer(
+            d_model=8, dim_feedforward=16,
+            cross_attention=MultiheadAttention(8, 2), n_heads=2,
+        ),
+        num_layers=3, num_queries=5, d_model=8,
+    )
+    arguments = (
+        mx.random.normal((2, 5, 8)),
+        mx.random.normal((2, 6, 8)),
+        mx.random.normal((2, 6, 8)),
+        mx.random.normal((4, 2, 8)),
+        mx.zeros((2, 4), dtype=mx.bool_),
+    )
+    full = decoder(*arguments, feat_size=(2, 3))
+    final = decoder(*arguments, feat_size=(2, 3), return_intermediate=False)
+    for index in range(3):
+        np.testing.assert_array_equal(to_numpy(final[index][0]), to_numpy(full[index][-1]))
+    np.testing.assert_array_equal(to_numpy(final[3]), to_numpy(full[3]))

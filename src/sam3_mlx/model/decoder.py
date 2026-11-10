@@ -176,6 +176,7 @@ class TransformerDecoder(nn.Module):
         memory_text: mx.array,
         text_attention_mask: mx.array,
         feat_size: tuple[int, int],
+        return_intermediate: bool = True,
     ) -> tuple[mx.array, mx.array, mx.array, mx.array]:
         """Decode ``tgt`` queries ``(B, nq, C)`` against image ``memory`` ``(B, H*W, C)``.
 
@@ -183,6 +184,8 @@ class TransformerDecoder(nn.Module):
         grid. ``memory_text`` ``(L, B, C)`` and ``text_attention_mask`` ``(B, L)``
         (True at padding) feed text cross-attention. The boxes start from the
         learned reference points through a sigmoid.
+        ``return_intermediate=False`` keeps only the final layer in each output
+        stack, including the reference boxes entering its final refinement.
 
         Returns:
             ``(hs, reference_boxes, presence_logits, presence_feats)``:
@@ -212,6 +215,7 @@ class TransformerDecoder(nn.Module):
         intermediate_ref_boxes = [reference_boxes]
         intermediate_presence_logits: list[mx.array] = []
         output = tgt
+        normed_output = tgt
         for layer_idx, layer in enumerate(self.layers):
             query_sine_embed = gen_sineembed_for_position(reference_boxes, self.d_model)
             query_pos = self.ref_point_head(query_sine_embed)
@@ -227,17 +231,23 @@ class TransformerDecoder(nn.Module):
             )
 
             normed_output = self.norm(output)
-            delta_unsig = self.bbox_embed(normed_output)
-            reference_boxes = mx.sigmoid(delta_unsig + inverse_sigmoid(reference_boxes))
             if layer_idx != len(self.layers) - 1:
-                intermediate_ref_boxes.append(reference_boxes)
+                delta_unsig = self.bbox_embed(normed_output)
+                reference_boxes = mx.sigmoid(delta_unsig + inverse_sigmoid(reference_boxes))
+                if return_intermediate:
+                    intermediate_ref_boxes.append(reference_boxes)
 
-            intermediate.append(normed_output)
-            intermediate_presence_logits.append(
-                self.presence_token_head(
-                    self.presence_token_out_norm(presence)
-                ).squeeze(-1)
-            )
+            if return_intermediate:
+                intermediate.append(normed_output)
+                intermediate_presence_logits.append(
+                    self.presence_token_head(
+                        self.presence_token_out_norm(presence)
+                    ).squeeze(-1)
+                )
+
+        if not return_intermediate:
+            logits = self.presence_token_head(self.presence_token_out_norm(presence)).squeeze(-1)
+            return normed_output[None], reference_boxes[None], logits[None], presence
 
         return (
             mx.stack(intermediate),
