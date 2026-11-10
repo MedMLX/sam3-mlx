@@ -741,8 +741,18 @@ class Sam3Processor:
         confidence threshold, and ``masks`` are Boolean arrays of shape
         ``(N, 1, height, width)``. Batch states hold one array per image for each
         field, preserving each image's dimensions.
+
+        Raises:
+            ValueError: Model predictions contain non-finite values.
         """
         outputs = self.predict_raw(state)
+        # Thresholding NaNs can hide failed inference as empty detections or masks.
+        finite = mx.all(mx.stack([
+            mx.all(mx.isfinite(value))
+            for value in cast(Mapping[str, mx.array], outputs).values()
+        ]))
+        if not scalar_int(finite):
+            raise ValueError("SAM 3 returned non-finite predictions")
         batch_sizes = _batch_original_sizes(state)
         sizes = batch_sizes or [
             (cast(int, state["original_height"]), cast(int, state["original_width"]))
