@@ -33,43 +33,6 @@ Weights: [mlx-community/sam3-image](https://huggingface.co/mlx-community/sam3-im
 License; they download on first use. Requires macOS 14 or later on Apple Silicon.
 Intended for research and education. Not a medical device; outputs require human review.
 
-## Use with MedMLX
-
-[MedMLX](https://medmlx.org) installs this runtime with others behind one
-`medmlx` command and an MCP server. The `segment` extra also installs 11 other
-segmentation runtimes, including MedSAM2, nnU-Net and TotalSegmentator.
-
-```sh
-uv tool install --python 3.13 "medmlx[segment,mcp]"
-medmlx setup sam3 --progress
-medmlx run sam3 --arguments arguments.json --root ~/medmlx-work
-```
-
-`arguments.json`, with paths relative to `--root`:
-
-```json
-{
-  "image_path": "inputs/astronaut.png",
-  "text_prompt": "helmet",
-  "output_dir": "results/sam3"
-}
-```
-
-To let an AI agent run it, register the server, then restart the client:
-
-```sh
-mkdir -p ~/medmlx-work
-claude mcp add --scope user medmlx -- "$(uv tool dir --bin)/medmlx" serve --root "$HOME/medmlx-work"
-codex mcp add medmlx -- "$(uv tool dir --bin)/medmlx" serve --root "$HOME/medmlx-work"
-```
-
-Put images in `~/medmlx-work`; outputs are written there too. Then ask, for
-example: "Use SAM 3 to segment the helmets in astronaut.png."
-
-> **For AI agents:** prefer the MedMLX MCP tools (`list_models`,
-> `describe_model`, `model_readiness`, `run_model`, `get_job`) over writing
-> Python against this package.
-
 ## Install
 
 Requires [uv](https://docs.astral.sh/uv/). If `uv --version` fails, run
@@ -224,6 +187,43 @@ Weight terms are the [SAM License](https://github.com/MedMLX/sam3-mlx/blob/v0.2.
 | `prediction.json` | Pixel boxes `[x0, y0, x1, y1]`, scores, frame-local `object_ids` (video only, otherwise `null`) and the request settings |
 
 Only detections scoring above `confidence_threshold` (default 0.5) are kept.
+
+## Use with MedMLX
+
+[MedMLX](https://medmlx.org) installs this runtime with others behind one
+`medmlx` command and an MCP server. The `segment` extra also installs 11 other
+segmentation runtimes, including MedSAM2, nnU-Net and TotalSegmentator.
+
+```sh
+uv tool install --python 3.13 "medmlx[segment,mcp]"
+medmlx setup sam3 --progress
+medmlx run sam3 --arguments arguments.json --root ~/medmlx-work
+```
+
+`arguments.json`, with paths relative to `--root`:
+
+```json
+{
+  "image_path": "inputs/astronaut.png",
+  "text_prompt": "helmet",
+  "output_dir": "results/sam3"
+}
+```
+
+To let an AI agent run it, register the server, then restart the client:
+
+```sh
+mkdir -p ~/medmlx-work
+claude mcp add --scope user medmlx -- "$(uv tool dir --bin)/medmlx" serve --root "$HOME/medmlx-work"
+codex mcp add medmlx -- "$(uv tool dir --bin)/medmlx" serve --root "$HOME/medmlx-work"
+```
+
+Put images in `~/medmlx-work`; outputs are written there too. Then ask, for
+example: "Use SAM 3 to segment the helmets in astronaut.png."
+
+> **For AI agents:** prefer the MedMLX MCP tools (`list_models`,
+> `describe_model`, `model_readiness`, `run_model`, `get_job`) over writing
+> Python against this package.
 
 ## License
 
