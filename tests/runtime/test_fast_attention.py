@@ -156,14 +156,19 @@ def test_bf16_attention_accumulates_scaled_scores_and_bias_in_float32() -> None:
     np.testing.assert_array_equal(to_numpy(output.astype(mx.float32)), to_numpy(expected))
 
 
-@pytest.mark.parametrize("mask_kind", ("key_padding", "additive"))
-def test_padded_head_dim_32_matches_reference(mask_kind: str) -> None:
-    # 32-wide heads over more than 8 queries take the zero-padded fused path.
+@pytest.mark.parametrize("mask_kind", ("none", "key_padding", "additive"))
+def test_head_dim_32_matches_reference(mask_kind: str) -> None:
+    # 32-wide heads over more than 8 queries take the head-dim-32 Metal kernel
+    # without a mask and the zero-padded fused path with one. 40 queries and 56
+    # keys leave partial query and key blocks.
     rng = np.random.default_rng(seed=2)
     query, key, value = (
         rng.standard_normal((2, 4, length, 32)).astype(np.float32) for length in (40, 56, 56)
     )
-    if mask_kind == "key_padding":
+    mask: mx.array | None = None
+    if mask_kind == "none":
+        bias = np.float32(0)
+    elif mask_kind == "key_padding":
         keep = np.ones((2, 1, 1, 56), dtype=np.bool_)
         keep[0, ..., 50:] = False
         keep[1, ..., :7] = False

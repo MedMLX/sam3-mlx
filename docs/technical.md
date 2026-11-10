@@ -37,10 +37,17 @@ times faster, and the image encoder takes ~190 ms instead of ~475 ms; attention
 is unchanged.
 
 The fusion encoder's attention heads are 32 wide, below the 64-wide minimum of
-MLX's fused attention kernel. `precision_layers.attention` zero-pads them to 64
-for queries longer than 8 tokens, which keeps the result and avoids the unfused
-path that materializes the full score matrix. This lowered peak memory from
-8.6 to 5.7 GB for one image.
+MLX's fused attention kernel. Without a mask, `attention_metal.py` runs them
+on an FP32 flash-attention Metal kernel at their real width: each 5184-token
+self-attention takes 2.1 ms instead of 4.4 ms when zero-padded to 64. A
+further text prompt on the same image takes 27% less time (paired fresh-process
+rounds, 97% ratio interval 0.68-0.87) and its peak process footprint is
+230 MB lower. Against the padded path, masks
+on the six medical fixtures are identical, scores differ by at most 1.2e-7 and
+boxes by 6e-5 px. Masked 32-wide heads are still zero-padded to 64 for queries
+longer than 8 tokens, which keeps the result and avoids MLX's unfused path that
+materializes the full score matrix; padding lowered peak memory from 8.6 to
+5.7 GB for one image.
 
 ### TF32 accuracy
 

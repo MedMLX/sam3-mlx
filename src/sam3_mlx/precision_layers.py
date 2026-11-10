@@ -7,6 +7,9 @@ from mlx import nn
 from collections.abc import Callable
 from typing import cast
 
+from sam3_mlx.attention_metal import HEAD_DIM as _NARROW_HEAD_DIM
+from sam3_mlx.attention_metal import attention_head_dim_32
+
 
 def _array_call(operation: object, x: mx.array) -> mx.array:
     # These MLX calls have unannotated inputs but take and return one array.
@@ -112,13 +115,16 @@ def attention(
 ) -> mx.array:
     """Accumulate BF16 attention scores and additive bias in FP32.
 
-    Head dims below ``_FUSED_MIN_HEAD_DIM`` are zero-padded to it for queries
-    longer than ``_VECTOR_MAX_QUERY_LENGTH``; the output is sliced back. Zero
-    lanes add nothing to ``q @ k.T`` and the caller's scale is kept, so this is
-    the same attention evaluated by the fused kernel instead of MLX's unfused
-    fallback, which materializes the full score matrix (MLX pads head dims 72
-    and 80 to 96 the same way). For the fusion encoder's 8 x 32-wide heads over
-    5184 tokens this cuts each self-attention from 7.6 to 4.4 ms.
+    Unmasked 32-wide heads over more than ``_VECTOR_MAX_QUERY_LENGTH`` queries
+    run ``attention_head_dim_32``, a fused FP32 kernel at the real head width;
+    for the fusion encoder's 8 x 32-wide heads over 5184 tokens each
+    self-attention takes 2.1 ms instead of 4.4 ms zero-padded. Other head dims
+    below ``_FUSED_MIN_HEAD_DIM``, and masked 32-wide heads, are zero-padded to
+    it for such queries; the output is sliced back. Zero lanes add nothing to
+    ``q @ k.T`` and the caller's scale is kept, so this is the same attention
+    evaluated by the fused kernel instead of MLX's unfused fallback, which
+    materializes the full score matrix (MLX pads head dims 72 and 80 to 96 the
+    same way).
     """
     dtype = query.dtype
     if dtype == mx.bfloat16:
@@ -126,6 +132,15 @@ def attention(
         if mask is not None and mask.dtype != mx.bool_:
             mask = mask.astype(mx.float32)
     head_dim = query.shape[-1]
+    if (
+        mask is None
+        and query.dtype == mx.float32
+        and head_dim == _NARROW_HEAD_DIM
+        and value.shape[-1] == _NARROW_HEAD_DIM
+        and query.shape[-2] > _VECTOR_MAX_QUERY_LENGTH
+        and query.shape[:2] == key.shape[:2] == value.shape[:2]
+    ):
+        return attention_head_dim_32(query, key, value, scale=scale).astype(dtype)
     if (
         head_dim < _FUSED_MIN_HEAD_DIM
         and head_dim == value.shape[-1]
