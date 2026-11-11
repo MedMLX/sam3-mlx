@@ -167,9 +167,8 @@ def build_sam3_image_model(
     if checkpoint_path is None and load_from_HF:
         checkpoint_path = weights_dir("sam3") / "model.safetensors"
     if enable_inst_interactivity and interactive_checkpoint_path is None and load_from_HF:
-        # mlx-community/sam3-image holds only the detector; the head converted
-        # from sam3.pt's tracker (scripts/convert_interactive_head.py) is
-        # published separately as MedMLX/sam3-interactive.
+        # The published image weights omit the interactive head; fetch its
+        # native MLX checkpoint from the separate MedMLX bundle.
         interactive_checkpoint_path = (
             weights_dir(INTERACTIVE_WEIGHTS_ID) / "model.safetensors"
         )
