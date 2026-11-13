@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+from tests._images import chest_frame
+
 import mlx.core as mx
 from mlx import nn
 import pytest
-from PIL import Image
 
 from sam3_mlx.mlx_runtime import evaluate_boundary
 from sam3_mlx.precision import (
@@ -70,7 +71,7 @@ def test_bf16_attention_projections_cast_generated_fp32_inputs() -> None:
 
 def test_transform_stays_fp32_and_visual_boundary_casts_once() -> None:
     """Preprocessing remains FP32 before each policy selects the visual input dtype."""
-    tensor = transform(Image.new("RGB", (4, 4), color=(12, 34, 56)), resolution=14)
+    tensor = transform(chest_frame((4, 4)), resolution=14)
 
     assert tensor.dtype == mx.float32
     assert cast_visual_input(tensor, "fp32").dtype == mx.float32

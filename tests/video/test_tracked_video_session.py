@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from tests._images import chest_frame
+
 import warnings
 from collections.abc import Callable
 
@@ -16,6 +18,7 @@ from sam3_mlx.model.sam3_video_inference import Sam3VideoInference, VideoOutputs
 from sam3_mlx.model.sam3_video_predictor import Sam3VideoPredictor
 from sam3_mlx.tracking import LOW_SCORE_THRESH
 from tests.api._stubs import FRAME_SIZE
+from tests._paths import MEDICAL_FIXTURE_ROOT
 
 WIDTH, HEIGHT = FRAME_SIZE
 type SceneObject = tuple[str, tuple[float, float, float, float], float]
@@ -92,7 +95,8 @@ def _model(scene: Scene) -> tuple[Sam3VideoInference, list[_SceneProcessor]]:
 
 
 def _frames(count: int) -> list[Image.Image]:
-    return [Image.new("RGB", FRAME_SIZE, (index, 0, 0)) for index in range(count)]
+    """Use radiograph frames with one marked pixel carrying the stub's frame index."""
+    return [chest_frame(FRAME_SIZE, marker=index) for index in range(count)]
 
 
 def _labeled(scene: Scene, frame_idx: int, outputs: VideoOutputs) -> dict[str, int]:
@@ -233,8 +237,9 @@ def test_seeded_model_tracks_a_static_clip() -> None:
     """Real (checkpoint-free, seeded) forward passes: tracked outputs are untracked detections."""
     require_mlx_runtime()
     model = Sam3VideoInference(_seeded_model(), resolution=336, confidence_threshold=0.0)
-    pixels = np.random.default_rng(7).integers(0, 256, size=(44, 36, 3), dtype=np.uint8)
-    frames = [Image.fromarray(pixels)] * 4
+    with Image.open(MEDICAL_FIXTURE_ROOT / "chest_xray.jpg") as image:
+        frame = image.convert("RGB").crop((128, 128, 164, 172))
+    frames = [frame] * 4
 
     plain = model.init_state(frames)
     model.add_prompt(plain, frame_idx=0, text_str="lesion")

@@ -4,6 +4,7 @@ from typing import cast
 
 import mlx.core as mx
 import pytest
+from tests._images import chest_input
 
 from sam3_mlx.checkpoint_mapping import flatten_model_parameters
 from sam3_mlx.mlx_runtime import evaluate_boundary
@@ -101,9 +102,9 @@ def test_vl_backbone_scalp_does_not_execute_discarded_head() -> None:
     neck.convs[3] = discarded
     neck.sam2_convs[3] = discarded_sam2
 
-    full_neck = neck(mx.ones((1, 3, 16, 16), dtype=mx.float32))
+    full_neck = neck(mx.array(chest_input((16, 16))))
     backbone = SAM3VLBackbone(visual=neck, text=None, scalp=1)
-    output = backbone.forward_image(mx.ones((1, 3, 16, 16), dtype=mx.float32))
+    output = backbone.forward_image(mx.array(chest_input((16, 16))))
     features = cast(list[mx.array], output["backbone_fpn"])
     positions = cast(list[mx.array], output["vision_pos_enc"])
     sam2_out = cast(dict[str, object], output["sam2_backbone_out"])
@@ -125,7 +126,7 @@ def test_vl_backbone_scalp_does_not_execute_discarded_head() -> None:
 
 def test_dual_neck_keeps_discarded_head_checkpoint_keys() -> None:
     dual = _dual_neck()
-    evaluate_boundary(*dual(mx.ones((1, 3, 16, 16)), scalp=1)[0])
+    evaluate_boundary(*dual(mx.array(chest_input((16, 16))), scalp=1)[0])
     keys = set(flatten_model_parameters(dual))
     assert any(key.startswith("convs.3.") for key in keys)
     assert any(key.startswith("sam2_convs.3.") for key in keys)

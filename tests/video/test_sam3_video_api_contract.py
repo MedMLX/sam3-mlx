@@ -9,6 +9,7 @@ import numpy as np
 import pytest
 from numpy.typing import NDArray
 from PIL import Image
+from tests._images import chest_frame as _real_frame
 
 from sam3_mlx._unsupported import Sam3MlxUnsupportedError
 from sam3_mlx.mlx_runtime import to_numpy
@@ -19,6 +20,7 @@ from sam3_mlx.model.io_utils import (
     VideoFrames,
     load_video_frames,
 )
+
 
 
 def _bounded_cache_state(
@@ -34,7 +36,7 @@ def _bounded_cache_state(
 def test_single_image_path_loads_as_one_frame_video(tmp_path: Path) -> None:
     """A single image becomes one RGB frame at its source size."""
     image_path = tmp_path / "frame.png"
-    Image.new("L", (4, 3), 200).save(image_path)
+    _real_frame((4, 3)).convert("L").save(image_path)
 
     frames = load_video_frames(image_path)
 
@@ -46,9 +48,8 @@ def test_single_image_path_loads_as_one_frame_video(tmp_path: Path) -> None:
 
 def test_image_folder_frames_follow_official_numeric_sort(tmp_path: Path) -> None:
     """Order numbered filenames numerically rather than lexicographically."""
-    Image.new("RGB", (8, 6), "red").save(tmp_path / "10.jpg")
-    Image.new("RGB", (8, 6), "blue").save(tmp_path / "2.jpg")
-    Image.new("RGB", (8, 6), "green").save(tmp_path / "1.jpg")
+    for name, offset in (("10.jpg", 10), ("2.jpg", 20), ("1.jpg", 30)):
+        _real_frame((8, 6), offset).save(tmp_path / name)
 
     frames = load_video_frames(tmp_path)
 
@@ -60,8 +61,9 @@ def test_image_folder_frames_follow_official_numeric_sort(tmp_path: Path) -> Non
 
 def test_image_folder_skips_dot_files_and_reads_tif(tmp_path: Path) -> None:
     """macOS ``._*`` sidecars and other dot-files are not frames; ``.tif`` files are."""
-    Image.new("RGB", (8, 6), (1, 2, 3)).save(tmp_path / "0000.tif")
-    Image.new("RGB", (8, 6), (4, 5, 6)).save(tmp_path / "0001.png")
+    original = [_real_frame((8, 6), offset) for offset in (0, 100)]
+    original[0].save(tmp_path / "0000.tif")
+    original[1].save(tmp_path / "0001.png")
     (tmp_path / "._0000.tif").write_bytes(b"\x00\x05\x16\x07 AppleDouble sidecar")
     (tmp_path / ".DS_Store.png").write_bytes(b"not an image")
     (tmp_path / "notes.txt").write_text("not a frame")
@@ -70,8 +72,8 @@ def test_image_folder_skips_dot_files_and_reads_tif(tmp_path: Path) -> None:
 
     assert isinstance(frames, LazyImageFolderFrames)
     assert [path.name for path in frames.frame_paths] == ["0000.tif", "0001.png"]
-    assert frames[0].getpixel((0, 0)) == (1, 2, 3)
-    assert frames[1].getpixel((0, 0)) == (4, 5, 6)
+    assert frames[0].getpixel((0, 0)) == original[0].getpixel((0, 0))
+    assert frames[1].getpixel((0, 0)) == original[1].getpixel((0, 0))
 
 
 def test_folder_without_images_is_rejected(tmp_path: Path) -> None:
@@ -83,7 +85,7 @@ def test_folder_without_images_is_rejected(tmp_path: Path) -> None:
 @pytest.mark.parametrize("source", ["folder", "pil"])
 def test_video_frames_reject_mixed_frame_dimensions(tmp_path: Path, source: str) -> None:
     """A folder or image sequence cannot form one video if frame sizes differ."""
-    images = [Image.new("RGB", (8, 6), "red"), Image.new("RGB", (4, 3), "blue")]
+    images = [_real_frame((8, 6)), _real_frame((4, 3), 100)]
     with pytest.raises(ValueError, match="dimensions"):
         if source == "folder":
             for index, image in enumerate(images, start=1):
@@ -97,7 +99,7 @@ def test_video_frames_reject_mixed_frame_dimensions(tmp_path: Path, source: str)
 @pytest.mark.parametrize("source", ["folder", "pil"])
 def test_high_bit_depth_frames_are_rejected(tmp_path: Path, source: str, mode: str) -> None:
     """High-bit-depth frames are refused instead of being clipped to 8 bits."""
-    image = Image.new(mode, (4, 3), 1000)
+    image = _real_frame((4, 3)).convert("L").convert(mode)
     with pytest.raises(ValueError, match="high-bit-depth"):
         if source == "folder":
             image.save(tmp_path / "0.tif")
@@ -108,11 +110,12 @@ def test_high_bit_depth_frames_are_rejected(tmp_path: Path, source: str, mode: s
 
 def test_pil_sequence_stores_rgb_copies() -> None:
     """PIL frames are converted to RGB copies, detached from the caller's images."""
-    source = Image.new("L", (2, 1), 7)
+    source = _real_frame((2, 1)).convert("L")
+    original = source.getpixel((0, 0))
     frames = load_video_frames([source])
     source.putpixel((0, 0), 99)
     assert frames[0].mode == "RGB"
-    assert frames[0].getpixel((0, 0)) == (7, 7, 7)
+    assert frames[0].getpixel((0, 0)) == (original, original, original)
     with pytest.raises(TypeError):
         load_video_frames(cast(list[Image.Image], [source, "frame.png"]))
 
@@ -127,7 +130,7 @@ def test_selected_frame_image_folder_uses_bounded_lazy_host_cache(
 ) -> None:
     """Load selected folder frames on demand with a bounded host cache."""
     for index in range(12):
-        Image.new("RGB", (6, 4), (index, 0, 0)).save(tmp_path / f"{index:02d}.png")
+        _real_frame((6, 4), index * 10).save(tmp_path / f"{index:02d}.png")
 
     frames = load_video_frames(tmp_path)
     assert isinstance(frames, LazyImageFolderFrames)
@@ -137,7 +140,8 @@ def test_selected_frame_image_folder_uses_bounded_lazy_host_cache(
     # Access more frames than the default cache size; cache stays bounded.
     for index in range(12):
         frame = frames[index]
-        assert frame.size == (6, 4) and frame.getpixel((0, 0)) == (index, 0, 0)
+        assert frame.size == (6, 4)
+        assert frame.getpixel((0, 0)) == _real_frame((6, 4), index * 10).getpixel((0, 0))
     cache, cache_size = _bounded_cache_state(frames)
     assert cache_size < 12
     assert cache.get(0) is None
@@ -223,14 +227,12 @@ def test_indexed_video_continues_forward_and_seeks_after_jumps(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Cache hits preserve decoder position; nonsequential requests seek explicitly."""
-    decoded = [
-        np.full((3, 4, 3), fill_value=index, dtype=np.uint8) for index in range(12)
-    ]
+    decoded = [np.asarray(_real_frame((4, 3), index * 10)) for index in range(12)]
     captures = _install_indexed_fake_cv2(monkeypatch, decoded)
     frames = LazyVideoFileFrames(tmp_path / "video.mp4", cache_size=2)
     try:
         for index in (0, 1, 2, 3, 2, 4, 9, 10, 2, 3, 4):
-            assert to_numpy(frames[index])[0, 0, 0] == index
+            np.testing.assert_array_equal(to_numpy(frames[index]), decoded[index])
         # Cache hits must not move the decoder, and a jump must reset its position.
         assert getattr(captures[0], "seeks") == [0, 9, 2]
         _, maximum = _bounded_cache_state(frames)
@@ -244,16 +246,14 @@ def test_indexed_video_reseeks_after_a_failed_read(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A failed frame read must not make the next retry consume the following frame."""
-    decoded = [
-        np.full((3, 4, 3), fill_value=index, dtype=np.uint8) for index in range(3)
-    ]
+    decoded = [np.asarray(_real_frame((4, 3), index * 10)) for index in range(3)]
     captures = _install_indexed_fake_cv2(monkeypatch, decoded, fail_read_once_at=1)
     frames = LazyVideoFileFrames(tmp_path / "video.mp4")
     try:
         with pytest.raises(RuntimeError):
             frames[1]
-        assert to_numpy(frames[1])[0, 0, 0] == 1
-        assert to_numpy(frames[2])[0, 0, 0] == 2
+        np.testing.assert_array_equal(to_numpy(frames[1]), decoded[1])
+        np.testing.assert_array_equal(to_numpy(frames[2]), decoded[2])
         assert getattr(captures[0], "seeks") == [0, 1]
     finally:
         frames.close()
@@ -271,13 +271,8 @@ def test_indexed_video_matches_sequential_compressed_video_oracle(
         pytest.skip("OpenCV build has no MPEG-4 video writer")
     try:
         for index in range(24):
-            pixels = np.zeros((48, 64, 3), dtype=np.uint8)
-            pixels[:, :, 0] = (np.arange(64, dtype=np.uint16) + index * 7) % 256
-            pixels[:, :, 1] = (
-                np.arange(48, dtype=np.uint16)[:, None] + index * 11
-            ) % 256
-            pixels[:, :, 2] = index * 9
-            writer.write(pixels)
+            pixels = np.asarray(_real_frame((64, 48), index * 10))
+            writer.write(cv2.cvtColor(pixels, cv2.COLOR_RGB2BGR))
     finally:
         writer.release()
 
@@ -310,9 +305,9 @@ def test_indexed_video_rejects_invalid_reads_without_caching_the_frame(
     failure: str,
 ) -> None:
     """Failed seeks or inconsistent dimensions never populate the frame cache."""
-    decoded: list[NDArray[np.uint8]] = [np.zeros((3, 4, 3), dtype=np.uint8) for _ in range(3)]
+    decoded = [np.asarray(_real_frame((4, 3), index * 10)) for index in range(3)]
     if failure == "dimensions":
-        decoded[2] = np.zeros((6, 8, 3), dtype=np.uint8)
+        decoded[2] = np.asarray(_real_frame((8, 6), 20))
     captures = _install_indexed_fake_cv2(
         monkeypatch, decoded, reject_seek_at=2 if failure == "seek" else None
     )
@@ -334,7 +329,7 @@ def test_indexed_video_initialization_releases_capture_on_invalid_first_frame(
 ) -> None:
     """Release the capture when the initial seek fails."""
     captures = _install_indexed_fake_cv2(
-        monkeypatch, [np.zeros((3, 4, 3), dtype=np.uint8)], reject_seek_at=0
+        monkeypatch, [np.asarray(_real_frame((4, 3)))], reject_seek_at=0
     )
     with pytest.raises(RuntimeError):
         LazyVideoFileFrames(tmp_path / "video.mp4")
@@ -346,7 +341,7 @@ def test_indexed_video_takes_its_size_from_the_first_frame(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The decoded first frame, not container metadata, fixes the frame size."""
-    _install_indexed_fake_cv2(monkeypatch, [np.zeros((3, 4, 3), dtype=np.uint8)])
+    _install_indexed_fake_cv2(monkeypatch, [np.asarray(_real_frame((4, 3)))])
     frames = LazyVideoFileFrames(tmp_path / "video.mp4")
     try:
         assert (frames.orig_height, frames.orig_width) == (3, 4)

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from tests._images import chest_frame
+
 from collections.abc import Callable
 from typing import cast
 
@@ -81,7 +83,7 @@ def _video_model(
     model = Sam3VideoInference(
         image_model=object(), processor_factory=factory, confidence_threshold=0.4
     )
-    state = model.init_state([Image.new("RGB", (width, height))] * num_frames)
+    state = model.init_state([chest_frame((width, height))] * num_frames)
     assert len(created) == 1
     return model, state, processor
 

@@ -25,6 +25,8 @@ from sam3_mlx.model.sam3_image_processor import (
     transform,
 )
 from tests._json_contracts import require_list, require_mapping
+from tests._paths import MEDICAL_FIXTURE_ROOT
+from tests._images import chest_input
 from tests._resize_reference import resize_reference_float32
 
 
@@ -143,7 +145,7 @@ def _state_array_list(state: ProcessorState, key: str) -> list[mx.array]:
 
 
 def _prompted_state(processor: Sam3Processor, size: tuple[int, int]) -> ProcessorState:
-    state = processor.set_image(Image.new("RGB", size, color=(0, 0, 0)))
+    state = processor.set_image(_real_rgb_image(*size))
     return processor.set_text_prompt("shoe", state, run_grounding=False)
 
 
@@ -207,85 +209,45 @@ def test_processor_rejects_invalid_configuration(name: str, value: object) -> No
     with pytest.raises(ValueError):
         construct(FakeModel(), **arguments)
     with pytest.raises(ValueError):
-        transform(Image.new("RGB", (4, 2)), resolution=13)
+        transform(_real_rgb_image(4, 2), resolution=13)
+
+
+def _xray_pixels() -> npt.NDArray[np.uint8]:
+    """Read the sourced chest X-ray used by the resize reference cases."""
+    with Image.open(MEDICAL_FIXTURE_ROOT / "chest_xray.jpg") as image:
+        return np.asarray(image.convert("RGB"), dtype=np.uint8)
 
 
 def test_resize_uint8_bilinear_matches_torchvision_upsample_literal() -> None:
-    image = np.array(
-        [
-            [[0, 0, 0], [255, 0, 0]],
-            [[0, 255, 0], [0, 0, 255]],
-        ],
-        dtype=np.uint8,
-    )
-
-    resized = _resize_uint8_bilinear_like_torchvision(image, (4, 4))
-
+    image = _xray_pixels()[400:402, 300:302]
+    expected = np.array([[162, 163, 165, 166], [162, 162, 164, 166],
+                         [160, 162, 164, 164], [160, 161, 163, 164]], dtype=np.uint8)
     np.testing.assert_array_equal(
-        resized,
-        np.array(
-            [
-                [[0, 0, 0], [64, 0, 0], [191, 0, 0], [255, 0, 0]],
-                [[0, 64, 0], [48, 48, 16], [143, 16, 48], [191, 0, 64]],
-                [[0, 191, 0], [16, 143, 48], [48, 48, 143], [64, 0, 191]],
-                [[0, 255, 0], [0, 191, 64], [0, 64, 191], [0, 0, 255]],
-            ],
-            dtype=np.uint8,
-        ),
+        _resize_uint8_bilinear_like_torchvision(image, (4, 4)),
+        np.repeat(expected[..., None], 3, axis=2),
     )
 
 
 def test_resize_uint8_bilinear_matches_torchvision_float_tie_direction() -> None:
-    image = np.zeros((1, 256, 3), dtype=np.uint8)
-    image[:, 21, 2] = 174
-    image[:, 22, 2] = 183
-
+    # This real X-ray row has 174 and 183 at columns 21 and 22.
+    image = _xray_pixels()[526:527, 16:272]
     resized = _resize_uint8_bilinear_like_torchvision(image, (4, 1008))
-
     assert resized[0, 87, 2] == 181
 
 
-def test_resize_uint8_bilinear_matches_torchvision_antialiased_downsample_literal() -> (
-    None
-):
-    image = np.array(
-        [
-            [[0, 5, 10], [15, 20, 25], [30, 35, 40], [45, 50, 55]],
-            [[60, 65, 70], [75, 80, 85], [90, 95, 100], [105, 110, 115]],
-            [[120, 125, 130], [135, 140, 145], [150, 155, 160], [165, 170, 175]],
-            [[180, 185, 190], [195, 200, 205], [210, 215, 220], [225, 230, 235]],
-            [[240, 245, 250], [255, 0, 5], [10, 15, 20], [25, 30, 35]],
-        ],
-        dtype=np.uint8,
-    )
-
-    resized = _resize_uint8_bilinear_like_torchvision(image, (2, 3))
-
-    np.testing.assert_allclose(
-        resized,
-        np.array(
-            [
-                [[64, 70, 74], [82, 88, 92], [101, 106, 111]],
-                [[184, 165, 170], [161, 125, 130], [138, 143, 148]],
-            ],
-            dtype=np.uint8,
-        ),
-        rtol=0.0,
-        atol=1,
+def test_resize_uint8_bilinear_matches_torchvision_antialiased_downsample_literal() -> None:
+    image = _xray_pixels()[400:405, 300:304]
+    expected = np.array([[162, 166, 169], [161, 164, 168]], dtype=np.uint8)
+    np.testing.assert_array_equal(
+        _resize_uint8_bilinear_like_torchvision(image, (2, 3)),
+        np.repeat(expected[..., None], 3, axis=2),
     )
 
 
-def _synthetic_rgb_image(width: int, height: int) -> Image.Image:
-    y, x = np.mgrid[:height, :width]
-    image = np.stack(
-        [
-            (17 * x + 3 * y) % 256,
-            (5 * x + 29 * y) % 256,
-            (11 * x + 7 * y) % 256,
-        ],
-        axis=-1,
-    ).astype(np.uint8)
-    return Image.fromarray(image, mode="RGB")
+def _real_rgb_image(width: int, height: int) -> Image.Image:
+    """Resize the sourced chest X-ray to the test's requested dimensions."""
+    with Image.open(MEDICAL_FIXTURE_ROOT / "chest_xray.jpg") as image:
+        return image.convert("RGB").resize((width, height))
 
 
 class _PathLikeStr:
@@ -314,7 +276,7 @@ def _call_method(value: object, name: str, *args: object) -> object:
     return _callable_attribute(value, name)(*args)
 
 
-def test_transform_matches_torchvision_on_synthetic_aspect_ratios() -> None:
+def test_transform_matches_torchvision_on_real_image_aspect_ratios() -> None:
     torch_module = importlib.import_module("torch")
     v2_module = importlib.import_module("torchvision.transforms.v2")
     functional_module = importlib.import_module("torchvision.transforms.v2.functional")
@@ -336,13 +298,12 @@ def test_transform_matches_torchvision_on_synthetic_aspect_ratios() -> None:
         "torchvision Compose result",
     )
 
-    rng = np.random.default_rng(20260820)
     for image in (
-        Image.fromarray(np.full((resolution, resolution, 3), 127, dtype=np.uint8)),
-        _synthetic_rgb_image(7, 5),
-        _synthetic_rgb_image(64, 21),
-        _synthetic_rgb_image(21, 64),
-        Image.fromarray(rng.integers(0, 256, size=(119, 73, 3), dtype=np.uint8)),
+        _real_rgb_image(resolution, resolution),
+        _real_rgb_image(7, 5),
+        _real_rgb_image(64, 21),
+        _real_rgb_image(21, 64),
+        _real_rgb_image(73, 119),
     ):
         official_tensor = resize_reference_float32(to_image(image), (resolution, resolution))
         official_hwc = _call_method(official_tensor, "permute", 1, 2, 0)
@@ -375,7 +336,7 @@ def test_transform_matches_torchvision_on_synthetic_aspect_ratios() -> None:
 
 
 def test_set_image_paths_pil_and_numpy_encode_identically(tmp_path: Path) -> None:
-    image = _synthetic_rgb_image(4, 2)
+    image = _real_rgb_image(4, 2)
     path = tmp_path / "image.png"
     image.save(path)
     model = FakeModel()
@@ -400,28 +361,30 @@ def test_set_image_paths_pil_and_numpy_encode_identically(tmp_path: Path) -> Non
 
 
 @pytest.mark.parametrize(
-    "image",
-    [
-        Image.fromarray(np.full((2, 3), 1000, dtype=np.uint16)),
-        Image.new("I", (3, 2), 70_000),
-        Image.new("F", (3, 2), 0.5),
-        np.full((2, 3), 256, dtype=np.uint16),
-        np.full((2, 3, 3), -1, dtype=np.int16),
-        np.full((2, 3), 300.0, dtype=np.float32),
-    ],
-    ids=("pil-i16", "pil-i32", "pil-float", "uint16-array", "negative-array", "float-array"),
+    "kind", ["pil-i16", "pil-i32", "pil-float", "uint16-array", "negative-array", "float-array"]
 )
-def test_high_bit_depth_images_are_rejected_instead_of_clipped(image: ImageSource) -> None:
+def test_high_bit_depth_images_are_rejected_instead_of_clipped(kind: str) -> None:
+    pixels = _xray_pixels()[400:402, 300:303, 0]
+    high = pixels.astype(np.uint16) * 257
+    inputs: dict[str, ImageSource] = {
+        "pil-i16": Image.fromarray(high),
+        "pil-i32": Image.fromarray(high.astype(np.int32)),
+        "pil-float": Image.fromarray(pixels.astype(np.float32)),
+        "uint16-array": high,
+        "negative-array": -pixels.astype(np.int16),
+        "float-array": pixels.astype(np.float32) * 2,
+    }
     processor = Sam3Processor(FakeModel(), resolution=14)
     with pytest.raises(ValueError, match="8-bit"):
-        processor.set_image(image)
+        processor.set_image(inputs[kind])
     with pytest.raises(ValueError, match="8-bit"):
-        transform(image, resolution=14)
+        transform(inputs[kind], resolution=14)
 
 
 def test_sixteen_bit_png_path_is_rejected(tmp_path: Path) -> None:
     path = tmp_path / "ct16.png"
-    Image.fromarray(np.arange(6, dtype=np.uint16).reshape(2, 3) * 4000).save(path)
+    pixels = _xray_pixels()[400:402, 300:303, 0].astype(np.uint16) * 257
+    Image.fromarray(pixels).save(path)
     with Image.open(path) as opened:
         assert opened.mode.startswith("I")
 
@@ -430,9 +393,8 @@ def test_sixteen_bit_png_path_is_rejected(tmp_path: Path) -> None:
 
 
 def test_eight_bit_values_in_wider_dtypes_and_unit_floats_are_accepted() -> None:
-    pixels = np.array([[0, 64, 255], [32, 128, 192]], dtype=np.uint8)
+    pixels = _xray_pixels()[400:402, 300:303, 0]
     expected = to_numpy(transform(pixels, resolution=14))
-
     for wider in (pixels.astype(np.uint16), pixels.astype(np.int32), pixels.astype(np.float32)):
         np.testing.assert_array_equal(to_numpy(transform(wider, resolution=14)), expected)
 
@@ -446,10 +408,8 @@ def test_unit_float_arrays_convert_to_uint8_as_torchvision_does() -> None:
     official = _require_callable(
         to_dtype(_attribute(torch_module, "uint8"), scale=True), "ToDtype"
     )
-    rng = np.random.default_rng(20261108)
     for dtype in (np.float32, np.float64):
-        unit = rng.random((9, 11, 3)).astype(dtype)
-        unit[0, :3, 0] = (0.0, 0.999, 1.0)
+        unit = _xray_pixels()[400:409, 300:311].astype(dtype) / 255
         expected = to_numpy(
             _call_method(_call_method(official(to_image(unit)), "permute", 1, 2, 0), "numpy"),
             dtype=np.uint8,
@@ -478,13 +438,13 @@ def test_set_image_rejects_missing_path_invalid_file_and_invalid_type(
 def test_set_image_batch_accepts_mixed_sources_and_records_each_size(
     tmp_path: Path,
 ) -> None:
-    image = _synthetic_rgb_image(4, 2)
+    image = _real_rgb_image(4, 2)
     path = tmp_path / "image.png"
     image.save(path)
     model = FakeModel()
     processor = Sam3Processor(model, resolution=14)
 
-    state = processor.set_image_batch([str(path), image, np.zeros((3, 5, 3), dtype=np.uint8)])
+    state = processor.set_image_batch([str(path), image, np.asarray(_real_rgb_image(5, 3), dtype=np.uint8)])
 
     assert state["original_heights"] == [2, 2, 3]
     assert state["original_widths"] == [4, 4, 5]
@@ -495,9 +455,9 @@ def test_set_image_batch_accepts_mixed_sources_and_records_each_size(
 
 def test_set_image_batch_rejects_bare_path_string(tmp_path: Path) -> None:
     path = tmp_path / "image.png"
-    _synthetic_rgb_image(4, 2).save(path)
+    _real_rgb_image(4, 2).save(path)
     processor = Sam3Processor(FakeModel(), resolution=14)
-    state = processor.set_image(_synthetic_rgb_image(4, 2))
+    state = processor.set_image(_real_rgb_image(4, 2))
     processor.set_text_prompt("shoe", state, run_grounding=False)
 
     with pytest.raises(ValueError):
@@ -524,7 +484,7 @@ def test_single_prompts_reject_invalid_inputs_without_mutating_state(
     """Single prompts enforce the batch contract before creating text or geometry state."""
     model = FakeModel()
     processor = Sam3Processor(model, resolution=14)
-    state = processor.set_image(Image.new("RGB", (4, 2), "red"))
+    state = processor.set_image(_real_rgb_image(4, 2))
     backbone = _state_mapping(state, "backbone_out")
     action = processor.add_geometric_prompt if kind == "box" else processor.add_point_prompt
 
@@ -582,8 +542,8 @@ def test_batch_text_prompt_returns_per_image_outputs_with_sizes_and_thresholding
     processor = Sam3Processor(model, resolution=14, confidence_threshold=0.5)
     state = processor.set_image_batch(
         [
-            Image.new("RGB", (4, 2), color=(255, 0, 0)),
-            Image.new("RGB", (2, 4), color=(0, 255, 0)),
+            _real_rgb_image(4, 2),
+            _real_rgb_image(2, 4),
         ]
     )
 
@@ -650,7 +610,7 @@ def test_batch_geometry_broadcasts_prompt_and_preserves_negative_labels(
     model = FakeModel()
     processor = Sam3Processor(model)
     state: ProcessorState = {
-        "backbone_out": {"image_batch": mx.zeros((2, 3, 4, 4), dtype=mx.float32)},
+        "backbone_out": {"image_batch": mx.array(np.repeat(chest_input((4, 4)), 2, axis=0))},
         "original_heights": [2, 4],
         "original_widths": [4, 2],
     }
@@ -682,7 +642,7 @@ def test_failed_set_image_preserves_previous_image_state(
         )
     )
     processor = Sam3Processor(model, resolution=14)
-    state = processor.set_image(Image.new("RGB", (4, 2), color="red"))
+    state = processor.set_image(_real_rgb_image(4, 2))
     processor.set_text_prompt("shoe", state)
     original_image = model.backbone.forward_image_inputs[-1]
     original_forward = model.backbone.forward_image
@@ -695,7 +655,7 @@ def test_failed_set_image_preserves_previous_image_state(
 
     monkeypatch.setattr(model.backbone, "forward_image", fail_forward_image)
     with pytest.raises(RuntimeError, match="scripted encoder failure"):
-        processor.set_image(Image.new("RGB", (6, 8), color="green"), state=state)
+        processor.set_image(_real_rgb_image(6, 8), state=state)
 
     assert _state_mapping(state, "backbone_out")["image_batch"] is original_image
     assert (state["original_height"], state["original_width"]) == (2, 4)
@@ -706,7 +666,7 @@ def test_failed_set_image_preserves_previous_image_state(
     assert to_numpy(state["masks"]).shape == (1, 1, 2, 4)
 
     monkeypatch.setattr(model.backbone, "forward_image", original_forward)
-    assert processor.set_image(Image.new("RGB", (6, 8), color="green"), state) is state
+    assert processor.set_image(_real_rgb_image(6, 8), state) is state
     assert (state["original_height"], state["original_width"]) == (8, 6)
     assert "geometric_prompt" not in state
     assert "masks" not in state
@@ -720,15 +680,15 @@ def test_set_image_after_batch_clears_batch_metadata() -> None:
     processor = Sam3Processor(model, resolution=14)
     state = processor.set_image_batch(
         [
-            Image.new("RGB", (4, 2), color=(255, 0, 0)),
-            Image.new("RGB", (2, 4), color=(0, 255, 0)),
+            _real_rgb_image(4, 2),
+            _real_rgb_image(2, 4),
         ]
     )
     state["geometric_prompt"] = {"stale": True}
     state["boxes"] = mx.zeros((1, 4), dtype=mx.float32)
     state["scores"] = mx.zeros((1,), dtype=mx.float32)
 
-    state = processor.set_image(Image.new("RGB", (6, 8), color=(0, 0, 255)), state)
+    state = processor.set_image(_real_rgb_image(6, 8), state)
 
     assert "original_heights" not in state
     assert "original_widths" not in state
@@ -786,7 +746,7 @@ def test_text_cache_hits_misses_and_equals_uncached_outputs() -> None:
     uncached_model = _UniqueTextModel()
     cached = Sam3Processor(cached_model, resolution=14, text_cache_size=4)
     uncached = Sam3Processor(uncached_model, resolution=14, text_cache_size=0)
-    image = Image.new("RGB", (4, 4), color=(0, 0, 0))
+    image = _real_rgb_image(4, 4)
 
     cached_state = cached.set_image(image)
     uncached_state = uncached.set_image(image)
@@ -819,7 +779,7 @@ def test_text_cache_evicts_least_recent_prompt() -> None:
     """Re-encode a prompt after it is evicted from a two-entry cache."""
     model = _UniqueTextModel()
     processor = Sam3Processor(model, resolution=14, text_cache_size=2)
-    image = Image.new("RGB", (4, 4), color=(0, 0, 0))
+    image = _real_rgb_image(4, 4)
     state = processor.set_image(image)
     for prompt in ("one", "two", "three"):
         processor.set_text_prompt(prompt, state, run_grounding=False)
@@ -832,7 +792,7 @@ def test_text_cache_evicts_least_recent_prompt() -> None:
 def test_text_cache_reuses_prompts_and_can_be_disabled() -> None:
     model = _UniqueTextModel()
     processor = Sam3Processor(model, resolution=14, text_cache_size=2)
-    image = Image.new("RGB", (4, 4), color=(0, 0, 0))
+    image = _real_rgb_image(4, 4)
     state = processor.set_image(image)
     processor.set_text_prompt("shoe", state, run_grounding=False)
     processor.set_text_prompt("shoe", state, run_grounding=False)
@@ -919,7 +879,7 @@ def test_single_image_results_match_a_batch_of_one() -> None:
     """The single-image state unwraps the same per-image results a batch state lists."""
     model = FakeModel(_three_query_outputs(10.0))
     processor = Sam3Processor(model, resolution=14, confidence_threshold=0.5)
-    image = Image.new("RGB", (8, 4), color=(0, 0, 0))
+    image = _real_rgb_image(8, 4)
 
     single = processor.set_text_prompt("shoe", processor.set_image(image))
     batch = processor.set_text_prompt("shoe", processor.set_image_batch([image]))

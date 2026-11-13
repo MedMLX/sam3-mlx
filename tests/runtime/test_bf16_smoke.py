@@ -11,6 +11,7 @@ from PIL import Image
 from sam3_mlx.mlx_runtime import to_numpy
 from sam3_mlx.model.sam3_image_processor import Sam3Processor
 from sam3_mlx.model_builder import build_sam3_image_model
+from tests._images import chest_frame
 
 
 def _predict(precision: str, image: Image.Image) -> dict[str, np.ndarray]:
@@ -24,7 +25,7 @@ def _predict(precision: str, image: Image.Image) -> dict[str, np.ndarray]:
 
 
 def test_bf16_build_matches_fp32_output_types_and_scores() -> None:
-    image = Image.fromarray(np.arange(48 * 64 * 3, dtype=np.uint8).reshape(48, 64, 3))
+    image = chest_frame((64, 48))
     fp32 = _predict("fp32", image)
     bf16 = _predict("bf16", image)
 
@@ -34,7 +35,6 @@ def test_bf16_build_matches_fp32_output_types_and_scores() -> None:
     assert bf16["masks"].shape[1:] == (1, 48, 64)
     assert bf16["masks"].dtype == np.bool_
     assert np.isfinite(bf16["boxes"]).all() and np.isfinite(bf16["scores"]).all()
-    # Same seeded weights: BF16 rounding moves the scores (by about 3e-3 here),
-    # but only slightly.
+    # The same seeded weights bound score changes due to BF16 rounding.
     assert not np.array_equal(bf16["scores"], fp32["scores"])
     np.testing.assert_allclose(bf16["scores"], fp32["scores"], atol=1e-2, rtol=0)

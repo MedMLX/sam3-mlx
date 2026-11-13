@@ -1,4 +1,4 @@
-"""ROI Align geometry and precision against synthetic scalar and TorchVision references."""
+"""Chest X-ray ROI Align geometry against scalar and TorchVision references."""
 
 from __future__ import annotations
 
@@ -12,6 +12,8 @@ import mlx.core as mx
 import numpy as np
 from numpy.typing import NDArray
 import pytest
+from PIL import Image
+from tests._paths import MEDICAL_FIXTURE_ROOT
 
 from sam3_mlx.mlx_runtime import evaluate_boundary, to_numpy
 from sam3_mlx.model.roi_align import roi_align
@@ -112,8 +114,14 @@ def _per_image_boxes(rois: np.ndarray, batch_size: int) -> list[mx.array]:
     return [mx.array(rois[rois[:, 0] == index, 1:]) for index in range(batch_size)]
 
 
-def _fixture_image() -> np.ndarray:
-    return np.arange(2 * 2 * 5 * 6, dtype=np.float32).reshape(2, 2, 5, 6) / 17.0
+def _fixture_image(height: int = 5, width: int = 6) -> NDArray[np.float32]:
+    """Read a radiograph crop, with flips distinguishing batches and channels."""
+    with Image.open(MEDICAL_FIXTURE_ROOT / "chest_xray.jpg") as image:
+        plane = np.asarray(image.convert("L"), dtype=np.float32)[
+            128:128 + height, 128:128 + width,
+        ] / np.float32(32)
+    channels = np.stack((plane, plane[:, ::-1]))
+    return np.asarray(np.stack((channels, channels[:, ::-1])), dtype=np.float32)
 
 
 _EDGE_ROIS = np.array(
@@ -161,7 +169,9 @@ def test_roi_align_matches_scalar_reference(
 
 def test_roi_align_zeroes_samples_beyond_torchvision_boundary() -> None:
     """Retain samples exactly at the supported edge and zero those just beyond it."""
-    image = mx.array([[[[7.0]]]], dtype=mx.float32)
+    source = _fixture_image()[:1, :1, :1, :1]
+    image = mx.array(source)
+    value = float(source[0, 0, 0, 0])
     # A unit box gives one sample at its center; 2**-10 is exact in float32.
     sample_coordinates = (-1.0 - 2**-10, -1.0, 1.0, 1.0 + 2**-10)
     boxes = mx.array(
@@ -177,7 +187,7 @@ def test_roi_align_zeroes_samples_beyond_torchvision_boundary() -> None:
 
     np.testing.assert_array_equal(
         to_numpy(actual).reshape(-1),
-        np.array([0.0, 7.0, 7.0, 0.0], dtype=np.float32),
+        np.array([0.0, value, value, 0.0], dtype=np.float32),
     )
 
 
@@ -217,7 +227,7 @@ def test_roi_align_precision_outputs_are_finite_and_bounded(
 
 def test_bfloat16_roi_geometry_uses_fp32_at_out_of_bounds_boundary() -> None:
     """BF16 inputs retain the FP32 geometry decision at an out-of-bounds edge."""
-    image = mx.reshape(mx.arange(55, dtype=mx.float32), (1, 1, 11, 5))
+    image = mx.array(_fixture_image(11, 5)[:1, :1])
     image = image.astype(mx.bfloat16)
     boxes = mx.array([[1.640625, 9.1875, 5.5, 9.25]], dtype=mx.bfloat16)
 
@@ -225,10 +235,14 @@ def test_bfloat16_roi_geometry_uses_fp32_at_out_of_bounds_boundary() -> None:
     evaluate_boundary(actual)
 
     assert actual.dtype == mx.bfloat16
-    np.testing.assert_array_equal(
-        to_numpy(actual.astype(mx.float32)).reshape(-1),
-        np.array([50.5, 51.5, 52.5, 0.0], dtype=np.float32),
+    rois = np.column_stack((np.zeros(1, dtype=np.float32), to_numpy(boxes.astype(mx.float32))))
+    expected = _roi_align_scalar_reference(
+        to_numpy(image.astype(mx.float32)), rois, pooled_height=1, pooled_width=4,
     )
+    rounded = mx.array(expected).astype(mx.bfloat16).astype(mx.float32)
+    np.testing.assert_array_equal(to_numpy(actual.astype(mx.float32)), to_numpy(rounded))
+    assert np.all(to_numpy(rounded).reshape(-1)[:3] != 0)
+    assert to_numpy(rounded).reshape(-1)[-1] == 0
 
 
 def test_roi_align_accepts_per_image_box_lists_including_empty_entries() -> None:
@@ -257,14 +271,14 @@ def test_roi_align_accepts_per_image_box_lists_including_empty_entries() -> None
 @pytest.mark.parametrize(
     ("image", "boxes", "height", "error"),
     [
-        (mx.zeros((1, 2, 2)), [mx.zeros((0, 4))], 1, ValueError),  # input rank
-        (mx.zeros((1, 1, 2, 2)), [mx.zeros((1, 5))], 1, ValueError),  # box shape
-        (mx.zeros((1, 1, 2, 2)), [], 1, ValueError),  # empty outer sequence
-        (mx.zeros((1, 1, 2, 2)), [mx.zeros((0, 4))] * 2, 1, ValueError),  # longer than batch
-        (mx.zeros((1, 1, 2, 2), dtype=mx.int32), [mx.zeros((0, 4))], 1, TypeError),
-        (mx.zeros((1, 1, 2, 2)), [mx.zeros((0, 4), dtype=mx.int32)], 1, TypeError),
-        (mx.zeros((1, 1, 2, 2)), [mx.zeros((0, 4))], 0, ValueError),  # output size
-        (mx.ones((1, 1, 2, 2)), [mx.array([[float("nan"), 0.0, 1.0, 1.0]])], 1, ValueError),
+        (mx.array(_fixture_image(2, 2)[0, :1]), [mx.zeros((0, 4))], 1, ValueError),  # input rank
+        (mx.array(_fixture_image(2, 2)[:1, :1]), [mx.zeros((1, 5))], 1, ValueError),  # box shape
+        (mx.array(_fixture_image(2, 2)[:1, :1]), [], 1, ValueError),  # empty outer sequence
+        (mx.array(_fixture_image(2, 2)[:1, :1]), [mx.zeros((0, 4))] * 2, 1, ValueError),  # longer than batch
+        (mx.array(_fixture_image(2, 2)[:1, :1]).astype(mx.int32), [mx.zeros((0, 4))], 1, TypeError),
+        (mx.array(_fixture_image(2, 2)[:1, :1]), [mx.zeros((0, 4), dtype=mx.int32)], 1, TypeError),
+        (mx.array(_fixture_image(2, 2)[:1, :1]), [mx.zeros((0, 4))], 0, ValueError),  # output size
+        (mx.array(_fixture_image(2, 2)[:1, :1]), [mx.array([[float("nan"), 0.0, 1.0, 1.0]])], 1, ValueError),
     ],
     ids=(
         "input-rank",

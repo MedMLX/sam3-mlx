@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from tests._images import chest_frame
+
 import numpy as np
 from PIL import Image
 
@@ -8,7 +10,7 @@ from tests.api._stubs import FRAME_SIZE, FakeImageProcessor
 
 
 def _frames(count: int) -> list[Image.Image]:
-    return [Image.new("RGB", FRAME_SIZE, (index, 0, 0)) for index in range(count)]
+    return [chest_frame(FRAME_SIZE, marker=index) for index in range(count)]
 
 
 def test_video_predictor_session_api_uses_official_output_schema() -> None:

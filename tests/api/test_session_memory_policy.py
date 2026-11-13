@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+from tests._images import chest_frame
+
 import mlx.core as mx
 import pytest
 from medmlx_core.runtime import require_mlx_runtime
-from PIL import Image
 
 import sam3_mlx.model.sam3_video_predictor as predictor_module
 from sam3_mlx.mlx_runtime import evaluate_boundary
@@ -16,12 +17,12 @@ from tests.api._stubs import FRAME_SIZE, FakeImageProcessor
 
 
 def _predictor() -> Sam3VideoPredictor:
-    """Create two synthetic sessions so closing one leaves a live peer."""
+    """Create two radiograph sessions so closing one leaves a live peer."""
     predictor = Sam3VideoPredictor(
         Sam3VideoInference(image_model=object(), processor_factory=FakeImageProcessor)
     )
     for session_id in ("closed", "retained"):
-        predictor.start_session([Image.new("RGB", FRAME_SIZE)], session_id=session_id)
+        predictor.start_session([chest_frame(FRAME_SIZE)], session_id=session_id)
     return predictor
 
 

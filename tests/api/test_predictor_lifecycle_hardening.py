@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from tests._images import chest_frame
+
 import os
 from collections.abc import Sequence
 from pathlib import Path
@@ -18,7 +20,7 @@ type Resource = str | os.PathLike[str] | Sequence[Image.Image]
 
 
 def _frames(count: int = 1) -> list[Image.Image]:
-    return [Image.new("RGB", FRAME_SIZE) for _ in range(count)]
+    return [chest_frame(FRAME_SIZE) for _ in range(count)]
 
 
 def _predictor(model: Sam3VideoInference | None = None) -> Sam3VideoPredictor:
@@ -57,7 +59,7 @@ class _FailingClose:
         return 1
 
     def __getitem__(self, index: int) -> Image.Image:
-        return Image.new("RGB", FRAME_SIZE)
+        return chest_frame(FRAME_SIZE)
 
     def close(self) -> None:
         self.closed = True
@@ -66,7 +68,7 @@ class _FailingClose:
 
 def test_close_session_prevents_inflight_session_publication(tmp_path: Path) -> None:
     """Closing a loading session disposes it while allowing the ID to be reused later."""
-    Image.new("RGB", FRAME_SIZE).save(tmp_path / "0.png")
+    chest_frame(FRAME_SIZE).save(tmp_path / "0.png")
     model = _BlockingInit()
     predictor = _predictor(model)
     errors: list[str] = []

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from tests._images import chest_frame
+
 import inspect
 import json
 import subprocess
@@ -23,6 +25,7 @@ from medmlx_core.errors import (
 from PIL import Image
 
 from sam3_mlx import medmlx
+from tests._paths import MEDICAL_FIXTURE_ROOT
 
 if TYPE_CHECKING:
     from sam3_mlx.model.sam3_image import Sam3Image
@@ -53,19 +56,22 @@ def local_weights(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 @pytest.fixture
 def image_path(tmp_path: Path) -> str:
-    """Create a synthetic RGB input image."""
+    """Create an RGB input from the sourced chest X-ray."""
     path = tmp_path / "scan.png"
-    Image.new("RGB", (30, 40), (10, 20, 30)).save(path)
+    with Image.open(MEDICAL_FIXTURE_ROOT / "chest_xray.jpg") as image:
+        image.convert("RGB").resize((30, 40)).save(path)
     return str(path)
 
 
 @pytest.fixture
 def video_path(tmp_path: Path) -> str:
-    """Create a short synthetic image-frame sequence."""
+    """Create a short frame sequence from a sourced chest X-ray."""
     folder = tmp_path / "frames"
     folder.mkdir()
-    for index in range(2):
-        Image.new("RGB", (40, 50), (index, index, index)).save(folder / f"{index:05d}.jpg")
+    with Image.open(MEDICAL_FIXTURE_ROOT / "chest_xray.jpg") as image:
+        frame = image.convert("RGB").resize((40, 50))
+        for index in range(2):
+            frame.save(folder / f"{index:05d}.jpg")
     return str(folder)
 
 
@@ -268,7 +274,7 @@ def test_symlinked_checkpoint_keeps_its_safetensors_name(
 def test_output_collision_with_input_is_rejected(tmp_path: Path) -> None:
     """Reject output paths that would replace the input image."""
     colliding_image = tmp_path / medmlx.MASKS_NAME
-    Image.new("RGB", (3, 5), (1, 2, 3)).save(colliding_image, format="PNG")
+    chest_frame((3, 5)).save(colliding_image, format="PNG")
     with pytest.raises(InvalidInputError):
         medmlx.run(
             image_path=str(colliding_image),
@@ -571,8 +577,8 @@ def test_video_frame_matches_the_same_image_on_the_seeded_model(
         return model
 
     monkeypatch.setattr(medmlx, "_build_image_model", fake_build_image_model)
-    pixels = np.random.default_rng(7).integers(0, 256, size=(44, 36, 3), dtype=np.uint8)
-    image = Image.fromarray(pixels)
+    with Image.open(MEDICAL_FIXTURE_ROOT / "chest_xray.jpg") as source:
+        image = source.convert("RGB").resize((36, 44))
     image.save(tmp_path / "scan.png")
     frames = tmp_path / "frames"
     frames.mkdir()
@@ -616,7 +622,9 @@ def _forbid_model_build(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def _high_bit_depth_png(path: Path) -> None:
-    Image.fromarray(np.full((5, 4), 4000, dtype=np.uint16)).save(path)
+    with Image.open(MEDICAL_FIXTURE_ROOT / "chest_xray.jpg") as source:
+        pixels = np.asarray(source.convert("L").resize((4, 5)), dtype=np.uint16) * 257
+    Image.fromarray(pixels).save(path)
     with Image.open(path) as image:
         assert image.mode.startswith("I")
 
@@ -634,8 +642,10 @@ def test_bad_inputs_are_input_errors_before_the_model_loads(
     folder.mkdir()
     request: dict[str, object] = {"video_path": str(folder), "text_prompt": "lesion"}
     if case == "frame-out-of-range":
-        for index in range(2):
-            Image.new("RGB", (6, 4)).save(folder / f"{index}.png")
+        with Image.open(MEDICAL_FIXTURE_ROOT / "chest_xray.jpg") as source:
+            frame = source.convert("RGB").resize((6, 4))
+            for index in range(2):
+                frame.save(folder / f"{index}.png")
         request["frame_index"] = 2
     elif case == "unreadable-frame":
         (folder / "0.png").write_bytes(b"not a png")
@@ -682,7 +692,7 @@ def test_video_frames_take_the_image_prompts(
     folder = tmp_path / "frames"
     folder.mkdir()
     for index in range(2):
-        Image.new("RGB", (6, 4), (index, 0, 0)).save(folder / f"{index:04d}.tif")
+        chest_frame((6, 4), marker=index).save(folder / f"{index:04d}.tif")
     (folder / "._0000.tif").write_bytes(b"macOS sidecar")
     result = medmlx.run(
         video_path=str(folder),
