@@ -200,7 +200,7 @@ wheels = [
 
 [[package]]
 name = "medmlx-core"
-version = "0.2.6"
+version = "0.3.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "httpx" },
@@ -208,9 +208,9 @@ dependencies = [
     { name = "mlx" },
     { name = "numpy" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/87/0f/5ce796655a94edf13a6d57002516ff63d463b95de20956b187d4d1000063/medmlx_core-0.2.6.tar.gz", hash = "sha256:c058894d50b4b47a6de0afcf598be1eb7924708d0b0491c53193d3f98f4c9f24", size = 68092, upload-time = "2026-11-01T03:46:05.575Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/4e/29/4c02d66a8858925c73503243c96d65a2947c9c296f1cd42d7e334e85382c/medmlx_core-0.3.0.tar.gz", hash = "sha256:e59141ec52ad029df863440d6271332179c84559b530008315521937809a4ada", size = 73773, upload-time = "2026-11-14T20:05:23.083Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/36/0f/409812a0e3cd7cadac25de84f97d845569f7a3c141ef8eaeab3771e9b7eb/medmlx_core-0.2.6-py3-none-any.whl", hash = "sha256:7e9ef73684ddcb4f1d601782029546f804e05435e16beefa24bba6a04bb5ec7d", size = 85007, upload-time = "2026-11-01T03:46:04.572Z" },
+    { url = "https://files.pythonhosted.org/packages/5f/0f/d1cdd31b9c35c03b7b417fc23b6e74eac82b33972d9f854d1cb1dae06707/medmlx_core-0.3.0-py3-none-any.whl", hash = "sha256:4d971634ead3b53a39222cf64b8e019148dfd48bc2f99422640f35d9a875a2a5", size = 90976, upload-time = "2026-11-14T20:05:22.039Z" },
 ]
 
 [[package]]
@@ -448,7 +448,7 @@ dev = [
 requires-dist = [
     { name = "ftfy", specifier = ">=6.3.1" },
     { name = "huggingface-hub", specifier = ">=1.1.6" },
-    { name = "medmlx-core", specifier = ">=0.2.6,<0.3" },
+    { name = "medmlx-core", specifier = ">=0.3,<0.4" },
     { name = "mlx", marker = "platform_machine == 'arm64' and sys_platform == 'darwin'", specifier = "==0.32.4" },
     { name = "numpy", specifier = ">=2.3.5" },
     { name = "opencv-python-headless", marker = "extra == 'video'", specifier = ">=4.10.0" },

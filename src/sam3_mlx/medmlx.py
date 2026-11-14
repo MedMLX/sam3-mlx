@@ -12,7 +12,7 @@ import json
 import math
 from collections.abc import Sequence
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal, TypedDict, cast
+from typing import TYPE_CHECKING, Literal, cast
 
 import numpy as np
 from medmlx_core.errors import (
@@ -22,7 +22,8 @@ from medmlx_core.errors import (
     ModelExecutionError,
 )
 from medmlx_core.files import PathLike, output_targets, publish
-from medmlx_core.outputs import Artifact, artifact
+from medmlx_core.outputs import artifact
+from medmlx_core.outputs import RunResult as _RunResult
 from medmlx_core.weights import model_folder, weights_revision
 
 from sam3_mlx.resolutions import DEFAULT_IMAGE_RESOLUTION, PATCH_SIZE
@@ -39,12 +40,8 @@ type UnitPoint = tuple[float, float]
 type PrecisionName = Literal["fp32", "tf32", "bf16"]
 
 
-class RunResult(TypedDict):
-    """Return value of ``run``: output paths and artifact metadata by role, and the prediction record."""
-
-    outputs: dict[str, str]
-    artifacts: dict[str, Artifact]
-    details: dict[str, JsonValue]
+# Return value of ``run``: output paths and artifact metadata by role, and the prediction record.
+type RunResult = _RunResult[dict[str, JsonValue]]
 
 
 # Descriptor exposed through the ``medmlx.models`` entry point
