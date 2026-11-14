@@ -8,12 +8,8 @@ tracking across frames.
 
 from __future__ import annotations
 
-import fcntl
 import json
 import math
-import os
-import shutil
-import tempfile
 from collections.abc import Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, TypedDict, cast
@@ -25,8 +21,9 @@ from medmlx_core.errors import (
     MissingDependencyError,
     ModelExecutionError,
 )
+from medmlx_core.files import PathLike, output_targets, publish
 from medmlx_core.outputs import Artifact, artifact
-from medmlx_core.weights import weights_dir, weights_revision
+from medmlx_core.weights import model_folder, weights_revision
 
 from sam3_mlx.resolutions import DEFAULT_IMAGE_RESOLUTION, PATCH_SIZE
 
@@ -57,7 +54,7 @@ MODEL = {
     "id": "sam3",
     "label": "SAM 3 image segmentation",
     "task": "segmentation",
-    "run": "sam3_mlx.medmlx:run",
+    "run": "sam3_mlx.medmlx:segment",
     "summary": (
         "Segments one 2D image from a text prompt and/or one box and/or one "
         "point, using the SAM 3 image model. Can instead segment one chosen "
@@ -169,78 +166,6 @@ def _validate_unit_point(point: object, name: str) -> UnitPoint:
     return x, y
 
 
-def _output_paths(output_dir: str | Path, overwrite: bool) -> tuple[Path, dict[str, Path]]:
-    """Resolve output paths and reject collisions unless overwriting is allowed."""
-    output = Path(output_dir).expanduser().resolve()
-    if any(path.exists() and not path.is_dir() for path in (output, *output.parents)):
-        raise InvalidInputError(f"output_dir is not a directory: {output}")
-    paths = {"masks": output / MASKS_NAME, "prediction": output / PREDICTION_NAME}
-    for path in paths.values():
-        if path.is_dir():
-            raise InvalidInputError(f"Output path is a directory: {path}")
-        if (path.exists() or path.is_symlink()) and not overwrite:
-            raise InvalidInputError(f"Output exists: {path}; pass overwrite=True to replace it")
-    return output, paths
-
-
-def _write_outputs(
-    output: Path,
-    paths: dict[str, Path],
-    masks: np.ndarray,
-    record: dict[str, JsonValue],
-    *,
-    overwrite: bool,
-) -> None:
-    """Publish masks and JSON under a lock, restoring earlier files on failure."""
-    try:
-        output.mkdir(parents=True, exist_ok=True)
-        # Keep the lock file: unlinking it lets concurrent writers lock different
-        # inodes. Recheck destinations under the lock before taking backups.
-        with (output / ".sam3-mlx.lock").open("a+b") as lock_file:
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
-            _output_paths(str(output), overwrite)
-            staging = Path(tempfile.mkdtemp(prefix=".sam3-mlx-", dir=output))
-            cleanup = True
-            try:
-                np.save(staging / MASKS_NAME, masks, allow_pickle=False)
-                (staging / PREDICTION_NAME).write_text(
-                    json.dumps(record, indent=2, sort_keys=True, allow_nan=False) + "\n",
-                    encoding="utf-8",
-                )
-                backups: dict[str, Path] = {}
-                for role, destination in paths.items():
-                    if overwrite and (destination.exists() or destination.is_symlink()):
-                        backup = staging / f"{destination.name}.previous"
-                        os.link(destination, backup, follow_symlinks=False)
-                        backups[role] = backup
-                published: list[str] = []
-                complete = False
-                try:
-                    for role, destination in paths.items():
-                        staged = staging / destination.name
-                        if overwrite:
-                            os.replace(staged, destination)
-                        else:
-                            os.link(staged, destination)
-                        published.append(role)
-                    complete = True
-                finally:
-                    if not complete:
-                        # Preserve recovery files if restoration itself fails.
-                        cleanup = False
-                        for role in reversed(published):
-                            if role in backups:
-                                os.replace(backups[role], paths[role])
-                            else:
-                                paths[role].unlink()
-                        cleanup = True
-            finally:
-                if cleanup:
-                    shutil.rmtree(staging)
-    except OSError as error:
-        raise InvalidInputError(f"Cannot write sam3-mlx outputs to {output}: {error}") from error
-
-
 def _flatten_masks(masks: np.ndarray) -> np.ndarray:
     """Collapse the image processor's ``(N, 1, H, W)`` masks to ``(N, H, W)``."""
     return masks.reshape(masks.shape[0], masks.shape[-2], masks.shape[-1])
@@ -295,7 +220,7 @@ def _segment_image(
     image: Image.Image,
     resolution: int,
     confidence_threshold: float,
-    text_prompt: str | None,
+    prompt: str | None,
     box_cxcywh_normalized: UnitBox | None,
     box_label: bool,
     point_xy_normalized: UnitPoint | None,
@@ -311,8 +236,8 @@ def _segment_image(
 
     processor = Sam3Processor(model, resolution=resolution, confidence_threshold=confidence_threshold)
     state = processor.set_image(image)
-    if text_prompt is not None:
-        state = processor.set_text_prompt(text_prompt, state, run_grounding=False)
+    if prompt is not None:
+        state = processor.set_text_prompt(prompt, state, run_grounding=False)
     if box_cxcywh_normalized is not None:
         state = processor.add_geometric_prompt(
             list(box_cxcywh_normalized), box_label, state, run_grounding=False
@@ -329,13 +254,13 @@ def _segment_image(
     )
 
 
-def run(
+def segment(
     *,
-    image_path: str | Path | None = None,
-    video_path: str | Path | None = None,
-    output_dir: str | Path,
+    image_path: PathLike | None = None,
+    video_path: PathLike | None = None,
+    output_dir: PathLike,
     overwrite: bool = False,
-    text_prompt: str | None = None,
+    prompt: str | None = None,
     box_cxcywh_normalized: Sequence[float] | None = None,
     box_label: bool = True,
     point_xy_normalized: Sequence[float] | None = None,
@@ -343,7 +268,7 @@ def run(
     confidence_threshold: float = 0.5,
     resolution: int = DEFAULT_IMAGE_RESOLUTION,
     frame_index: int = 0,
-    weights_path: str | Path | None = None,
+    weights_path: PathLike | None = None,
     precision: PrecisionName = "fp32",
 ) -> RunResult:
     """Segment one image, or one chosen frame of a video/image folder, with SAM 3.
@@ -351,7 +276,7 @@ def run(
     Exactly one of ``image_path`` (any Pillow-readable 8-bit image) or
     ``video_path`` (an image file, an image folder, or an OpenCV-decodable video
     file) must be given. Video files require the ``sam3-mlx[video]`` extra. At
-    least one of ``text_prompt``, ``box_cxcywh_normalized``, or
+    least one of ``prompt``, ``box_cxcywh_normalized``, or
     ``point_xy_normalized`` must be given; the ones that are given are combined
     in one request, matching ``Sam3Processor``'s single-image API.
     ``box_cxcywh_normalized`` is ``[center_x, center_y, width, height]`` in
@@ -362,7 +287,7 @@ def run(
 
     For ``video_path``, frame ``frame_index`` is read and segmented exactly like
     an image, with the same prompts and outputs plus frame-local object IDs; there
-    is no tracking across frames. Call ``run`` again with a different
+    is no tracking across frames. Call ``segment`` again with a different
     ``frame_index`` for other frames. Image folders use the files with an image
     extension, skipping dot-files, in numeric (or else name) order.
 
@@ -375,20 +300,20 @@ def run(
     is not required. The input is read before the weights are downloaded or the
     model is built.
 
-    Returns ``outputs["masks"]`` (``masks.npy``: boolean ``(num_masks, height,
+    Returns ``outputs["mask"]`` (``masks.npy``: boolean ``(num_masks, height,
     width)``, one mask per detection at the input image or frame resolution) and
-    ``outputs["prediction"]`` (``prediction.json``: boxes as pixel
+    ``outputs["detections"]`` (``prediction.json``: boxes as pixel
     ``[x0, y0, x1, y1]`` in that same frame, detection scores, frame-local
     ``object_ids`` for video input (``None`` for images), and the request
     metadata). ``details`` repeats the prediction metadata. Detections are
     those above ``confidence_threshold``. Existing output files are refused unless
     ``overwrite=True``.
 
-    ``artifacts`` describes both files. ``masks`` is a ``binary_mask`` in
+    ``artifacts`` describes both files. ``mask`` is a ``binary_mask`` in
     ``pixel`` space (a plain array with no affine); each slice is one detected
     object and slices may overlap, so it is not a label map, and its label list
     is empty because detections carry scores rather than class names.
-    ``prediction`` is a ``detection_set`` in ``pixel`` space.
+    ``detections`` is a ``detection_set`` in ``pixel`` space.
 
     Args:
         output_dir: Directory for ``masks.npy`` and ``prediction.json``.
@@ -420,11 +345,11 @@ def run(
         input_path, video = video_path, True
     else:
         raise InvalidInputError("Pass exactly one of image_path or video_path")
-    if text_prompt is None and box_cxcywh_normalized is None and point_xy_normalized is None:
+    if prompt is None and box_cxcywh_normalized is None and point_xy_normalized is None:
         raise InvalidInputError(
-            "Pass at least one of text_prompt, box_cxcywh_normalized, or point_xy_normalized"
+            "Pass at least one of prompt, box_cxcywh_normalized, or point_xy_normalized"
         )
-    text_prompt = _require_optional_text("text_prompt", text_prompt)
+    prompt = _require_optional_text("prompt", prompt)
     box = (
         None if box_cxcywh_normalized is None
         else _validate_unit_box(box_cxcywh_normalized, "box_cxcywh_normalized")
@@ -454,22 +379,16 @@ def run(
     resolved_input = Path(input_path).expanduser().resolve()
     if not (resolved_input.exists() if video else resolved_input.is_file()):
         kind = "video_path" if video else "image_path"
-        raise InvalidInputError(f"Missing {kind}: {resolved_input}")
+        raise InvalidInputError(f"{kind} not found: {resolved_input}")
 
-    output, paths = _output_paths(output_dir, overwrite)
-    if output == resolved_input or any(path == resolved_input for path in paths.values()):
-        raise InvalidInputError("Output files must differ from the input path")
-
-    if weights_path is None:
-        directory = None
-    else:
-        directory = Path(weights_path).expanduser()
-        if not directory.is_dir():
-            raise AssetNotReadyError(
-                f"Missing SAM 3 weights folder: {directory}",
-                reason="missing SAM 3 weights folder",
-                hint="Pass an existing weights_path folder or omit it to download the default.",
-            )
+    paths = output_targets(
+        output_dir, {"mask": MASKS_NAME, "detections": PREDICTION_NAME},
+        overwrite=overwrite, inputs=[resolved_input],
+    )
+    if paths["mask"].parent.resolve() == resolved_input:
+        raise InvalidInputError("output_dir must differ from the input path")
+    # An explicit folder is checked now; the default downloads after the input loads.
+    directory = None if weights_path is None else model_folder("sam3", weights_path)
 
     image = _load_input_image(resolved_input, video=video, frame_index=frame_index)
 
@@ -483,7 +402,7 @@ def run(
         raise InvalidInputError(str(error)) from error
 
     if directory is None:
-        directory = weights_dir("sam3")
+        directory = model_folder("sam3", None)
     checkpoint = directory / "model.safetensors"
     if not checkpoint.is_file():
         raise AssetNotReadyError(
@@ -505,7 +424,7 @@ def run(
             image=image,
             resolution=resolution,
             confidence_threshold=confidence_threshold,
-            text_prompt=text_prompt,
+            prompt=prompt,
             box_cxcywh_normalized=box,
             box_label=box_label,
             point_xy_normalized=point,
@@ -525,7 +444,7 @@ def run(
         "input_kind": "video" if video else "image",
         "input_path": resolved_input.as_posix(),
         "frame_index": frame_index if video else None,
-        "text_prompt": text_prompt,
+        "prompt": prompt,
         "box_cxcywh_normalized": None if box is None else list(box),
         "box_label": box_label if box is not None else None,
         "point_xy_normalized": None if point is None else list(point),
@@ -542,15 +461,19 @@ def run(
         "scores": scores.tolist(),
         "object_ids": list(range(num_detections)) if video else None,
     }
-    _write_outputs(output, paths, masks, details, overwrite=overwrite)
+    record = json.dumps(details, indent=2, sort_keys=True, allow_nan=False) + "\n"
+    publish({
+        paths["mask"]: lambda path: np.save(path, masks, allow_pickle=False),
+        paths["detections"]: lambda path: path.write_text(record, encoding="utf-8"),
+    })
     return {
         "outputs": {role: path.as_posix() for role, path in paths.items()},
         "artifacts": {
-            "masks": artifact(kind="binary_mask", coordinate_space="pixel", labels=[]),
-            "prediction": artifact(kind="detection_set", coordinate_space="pixel"),
+            "mask": artifact(kind="binary_mask", coordinate_space="pixel", labels=[]),
+            "detections": artifact(kind="detection_set", coordinate_space="pixel"),
         },
         "details": details,
     }
 
 
-__all__ = ["MODEL", "run"]
+__all__ = ["MODEL", "segment"]

@@ -50,9 +50,9 @@ Segment a sample photograph:
 ```sh
 curl -LO https://raw.githubusercontent.com/scikit-image/scikit-image/v0.25.2/skimage/data/astronaut.png
 python - <<'PY'
-from sam3_mlx.medmlx import run
+from sam3_mlx import segment
 
-result = run(image_path="astronaut.png", text_prompt="helmet", output_dir="out")
+result = segment(image_path="astronaut.png", prompt="helmet", output_dir="out")
 print(result["outputs"])
 PY
 ```
@@ -62,19 +62,19 @@ the 3.4 GB weights.
 
 ### Python API
 
-| Runner | Use | Key arguments |
+| Function | Use | Key arguments |
 | :--- | :--- | :--- |
-| `run` | Segment one image, or one frame of an image folder or video | `image_path` or `video_path`, `output_dir`, `text_prompt`, `box_cxcywh_normalized`, `point_xy_normalized`, `confidence_threshold`, `resolution`, `frame_index`, `weights_path` (optional), `precision` |
+| `segment` | Segment one image, or one frame of an image folder or video | `image_path` or `video_path`, `output_dir`, `prompt`, `box_cxcywh_normalized`, `point_xy_normalized`, `confidence_threshold`, `resolution`, `frame_index`, `weights_path` (optional), `precision` |
 
 | Prompt | Format |
 | :--- | :--- |
-| `text_prompt` | Free text, such as `"helmet"` |
+| `prompt` | Free text, such as `"helmet"` |
 | `box_cxcywh_normalized` | `[center_x, center_y, width, height]` as fractions of the image size, between 0 and 1; width and height above 0 |
 | `point_xy_normalized` | `[x, y]` as fractions of the image size, between 0 and 1 |
 | `box_label`, `point_label` | Mark a prompt as positive (`True`) or negative |
 
-Prompts given together are combined in one request. The result has `outputs["masks"]`,
-`outputs["prediction"]`, `artifacts` (which says both files are in pixel coordinates of the
+Prompts given together are combined in one request. The result has `outputs["mask"]`
+(`masks.npy`), `outputs["detections"]` (`prediction.json`), `artifacts` (which says both files are in pixel coordinates of the
 input image or frame) and `details`, which repeats the prediction metadata.
 
 | `precision` | What runs | Largest difference from upstream SAM 3 (FP32) on the six medical fixtures |
@@ -213,7 +213,7 @@ medmlx run sam3 --arguments arguments.json --root ~/medmlx-work
 ```json
 {
   "image_path": "inputs/astronaut.png",
-  "text_prompt": "helmet",
+  "prompt": "helmet",
   "output_dir": "results/sam3"
 }
 ```
