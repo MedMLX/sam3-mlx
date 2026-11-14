@@ -64,17 +64,18 @@ the 3.4 GB weights.
 
 | Runner | Use | Key arguments |
 | :--- | :--- | :--- |
-| `run` | Segment one image, or one frame of an image folder or video | `image_path` or `video_path`, `output_dir`, `text_prompt`, `box_prompt`, `point_prompt`, `confidence_threshold`, `resolution`, `frame_index`, `weights_path` (optional), `precision` |
+| `run` | Segment one image, or one frame of an image folder or video | `image_path` or `video_path`, `output_dir`, `text_prompt`, `box_cxcywh_normalized`, `point_xy_normalized`, `confidence_threshold`, `resolution`, `frame_index`, `weights_path` (optional), `precision` |
 
 | Prompt | Format |
 | :--- | :--- |
 | `text_prompt` | Free text, such as `"helmet"` |
-| `box_prompt` | `[center_x, center_y, width, height]` as fractions of the image size, between 0 and 1; width and height above 0 |
-| `point_prompt` | `[x, y]` as fractions of the image size, between 0 and 1 |
+| `box_cxcywh_normalized` | `[center_x, center_y, width, height]` as fractions of the image size, between 0 and 1; width and height above 0 |
+| `point_xy_normalized` | `[x, y]` as fractions of the image size, between 0 and 1 |
 | `box_label`, `point_label` | Mark a prompt as positive (`True`) or negative |
 
 Prompts given together are combined in one request. The result has `outputs["masks"]`,
-`outputs["prediction"]` and `details`, which repeats the prediction metadata.
+`outputs["prediction"]`, `artifacts` (which says both files are in pixel coordinates of the
+input image or frame) and `details`, which repeats the prediction metadata.
 
 | `precision` | What runs | Largest difference from upstream SAM 3 (FP32) on the six medical fixtures |
 | :--- | :--- | :--- |

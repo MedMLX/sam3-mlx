@@ -22,6 +22,7 @@ from medmlx_core.errors import (
     MissingDependencyError,
     ModelExecutionError,
 )
+from medmlx_core.outputs import validate_outputs
 from PIL import Image
 
 from sam3_mlx import medmlx
@@ -98,9 +99,9 @@ def test_entry_point_declaration_signature_and_lazy_public_api() -> None:
         "output_dir",
         "overwrite",
         "text_prompt",
-        "box_prompt",
+        "box_cxcywh_normalized",
         "box_label",
-        "point_prompt",
+        "point_xy_normalized",
         "point_label",
         "confidence_threshold",
         "resolution",
@@ -139,7 +140,7 @@ class _RunInputs(TypedDict):
     image_path: str
     output_dir: str
     text_prompt: str
-    box_prompt: list[float]
+    box_cxcywh_normalized: list[float]
 
 
 @pytest.fixture
@@ -149,7 +150,7 @@ def arguments(image_path: str, output_dir: str) -> _RunInputs:
         "image_path": image_path,
         "output_dir": output_dir,
         "text_prompt": "lesion",
-        "box_prompt": [0.3, 0.3, 0.2, 0.2],
+        "box_cxcywh_normalized": [0.3, 0.3, 0.2, 0.2],
     }
 
 
@@ -179,11 +180,11 @@ def test_conflicting_or_incomplete_requests_are_rejected(
     [
         ("text_prompt", ""),  # empty
         ("overwrite", "no"),  # wrong type
-        ("box_prompt", [0.1, 0.1, 0.1]),  # wrong length
-        ("box_prompt", [1.5, 0.1, 0.1, 0.1]),  # outside the normalized range
-        ("box_prompt", [0.1, 0.1, 0.0, 0.1]),  # degenerate box
-        ("box_prompt", [0.5, 0.5, 1.5, 0.2]),  # width outside the normalized range
-        ("box_prompt", [0.5, 0.5, 0.2, float("nan")]),  # not finite
+        ("box_cxcywh_normalized", [0.1, 0.1, 0.1]),  # wrong length
+        ("box_cxcywh_normalized", [1.5, 0.1, 0.1, 0.1]),  # outside the normalized range
+        ("box_cxcywh_normalized", [0.1, 0.1, 0.0, 0.1]),  # degenerate box
+        ("box_cxcywh_normalized", [0.5, 0.5, 1.5, 0.2]),  # width outside the normalized range
+        ("box_cxcywh_normalized", [0.5, 0.5, 0.2, float("nan")]),  # not finite
         ("confidence_threshold", True),  # bool is not a number
         ("resolution", 10),  # not a multiple of the patch size
         ("frame_index", -1),  # negative index
@@ -397,6 +398,13 @@ def test_existing_outputs_are_preserved_then_replaced_with_overwrite(
     for path_str in result["outputs"].values():
         path = Path(path_str)
         assert path.is_absolute() and path.parent == output
+    _, artifacts = validate_outputs(cast("dict[str, object]", result))
+    assert artifacts["masks"]["kind"] == "binary_mask"
+    assert artifacts["masks"]["coordinate_space"] == "pixel"
+    assert artifacts["masks"].get("labels") == []
+    assert artifacts["masks"].get("grid_of") is None
+    assert artifacts["prediction"]["kind"] == "detection_set"
+    assert artifacts["prediction"]["coordinate_space"] == "pixel"
     masks = np.load(result["outputs"]["masks"], allow_pickle=False)
     assert masks.shape == (2, 4, 6) and masks.dtype == np.bool_
     assert masks[0, 0, 0] and masks[1, 1, 1]
@@ -515,8 +523,8 @@ def test_seeded_small_model_runs_a_real_image_forward_pass(
         image_path=image_path,
         output_dir=output_dir,
         text_prompt="lesion",
-        box_prompt=[0.5, 0.5, 0.4, 0.4],
-        point_prompt=[0.3, 0.3],
+        box_cxcywh_normalized=[0.5, 0.5, 0.4, 0.4],
+        point_xy_normalized=[0.3, 0.3],
         confidence_threshold=0.0,
         resolution=336,
     )
@@ -526,8 +534,8 @@ def test_seeded_small_model_runs_a_real_image_forward_pass(
     prediction = json.loads(Path(result["outputs"]["prediction"]).read_text(encoding="utf-8"))
     assert prediction["input_kind"] == "image"
     assert prediction["text_prompt"] == "lesion"
-    assert prediction["box_prompt"] == [0.5, 0.5, 0.4, 0.4]
-    assert prediction["point_prompt"] == [0.3, 0.3]
+    assert prediction["box_cxcywh_normalized"] == [0.5, 0.5, 0.4, 0.4]
+    assert prediction["point_xy_normalized"] == [0.3, 0.3]
     assert prediction["num_detections"] == masks.shape[0]
     assert len(prediction["boxes_xyxy"]) == masks.shape[0]
     assert len(prediction["scores"]) == masks.shape[0]
@@ -551,7 +559,7 @@ def test_seeded_small_model_runs_a_real_video_frame_forward_pass(
         video_path=video_path,
         output_dir=output_dir,
         text_prompt="lesion",
-        point_prompt=[0.3, 0.3],
+        point_xy_normalized=[0.3, 0.3],
         confidence_threshold=0.0,
         resolution=336,
         frame_index=1,
@@ -585,7 +593,7 @@ def test_video_frame_matches_the_same_image_on_the_seeded_model(
     image.save(frames / "00000.png")
     prompts: dict[str, object] = {
         "text_prompt": "lesion",
-        "box_prompt": [0.5, 0.5, 0.6, 0.5],
+        "box_cxcywh_normalized": [0.5, 0.5, 0.6, 0.5],
         "confidence_threshold": 0.0,
         "resolution": 336,
     }
@@ -698,8 +706,8 @@ def test_video_frames_take_the_image_prompts(
         video_path=str(folder),
         output_dir=output_dir,
         text_prompt="lesion",
-        box_prompt=[0.9, 0.5, 0.4, 0.2],  # extends past the right edge, as images allow
-        point_prompt=[0.2, 0.3],
+        box_cxcywh_normalized=[0.9, 0.5, 0.4, 0.2],  # extends past the right edge, as images allow
+        point_xy_normalized=[0.2, 0.3],
         frame_index=1,
     )
     (request,) = received
@@ -707,7 +715,7 @@ def test_video_frames_take_the_image_prompts(
     assert isinstance(frame, Image.Image)
     assert frame.size == (6, 4) and frame.getpixel((0, 0)) == (1, 0, 0)
     assert request["text_prompt"] == "lesion"
-    assert request["box_prompt"] == (0.9, 0.5, 0.4, 0.2)
-    assert request["point_prompt"] == (0.2, 0.3)
+    assert request["box_cxcywh_normalized"] == (0.9, 0.5, 0.4, 0.2)
+    assert request["point_xy_normalized"] == (0.2, 0.3)
     assert result["details"]["object_ids"] == [0, 1]
     assert result["details"]["boxes_xyxy"] == [[1.0, 2.0, 3.0, 4.0], [0.0, 0.0, 5.0, 3.0]]

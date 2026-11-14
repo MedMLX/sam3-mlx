@@ -16,7 +16,7 @@ import shutil
 import tempfile
 from collections.abc import Sequence
 from pathlib import Path
-from typing import TYPE_CHECKING, TypedDict, cast
+from typing import TYPE_CHECKING, Literal, TypedDict, cast
 
 import numpy as np
 from medmlx_core.errors import (
@@ -25,6 +25,7 @@ from medmlx_core.errors import (
     MissingDependencyError,
     ModelExecutionError,
 )
+from medmlx_core.outputs import Artifact, artifact
 from medmlx_core.weights import weights_dir, weights_revision
 
 from sam3_mlx.resolutions import DEFAULT_IMAGE_RESOLUTION, PATCH_SIZE
@@ -38,12 +39,14 @@ if TYPE_CHECKING:
 type JsonValue = str | int | float | bool | None | list[JsonValue] | dict[str, JsonValue]
 type UnitBox = tuple[float, float, float, float]
 type UnitPoint = tuple[float, float]
+type PrecisionName = Literal["fp32", "tf32", "bf16"]
 
 
 class RunResult(TypedDict):
-    """Return value of ``run``: output file paths by role and the prediction record."""
+    """Return value of ``run``: output paths and artifact metadata by role, and the prediction record."""
 
     outputs: dict[str, str]
+    artifacts: dict[str, Artifact]
     details: dict[str, JsonValue]
 
 
@@ -87,10 +90,10 @@ def _require_optional_text(name: str, value: object) -> str | None:
     return value
 
 
-def _require_optional_str(name: str, value: object) -> str | None:
-    """Require a string when the optional value is provided."""
-    if value is not None and not isinstance(value, str):
-        raise InvalidInputError(f"{name} must be a string")
+def _require_optional_path(name: str, value: object) -> str | Path | None:
+    """Require a string or path when the optional value is provided."""
+    if value is not None and not isinstance(value, str | Path):
+        raise InvalidInputError(f"{name} must be a string or path")
     return value
 
 
@@ -166,7 +169,7 @@ def _validate_unit_point(point: object, name: str) -> UnitPoint:
     return x, y
 
 
-def _output_paths(output_dir: str, overwrite: bool) -> tuple[Path, dict[str, Path]]:
+def _output_paths(output_dir: str | Path, overwrite: bool) -> tuple[Path, dict[str, Path]]:
     """Resolve output paths and reject collisions unless overwriting is allowed."""
     output = Path(output_dir).expanduser().resolve()
     if any(path.exists() and not path.is_dir() for path in (output, *output.parents)):
@@ -293,9 +296,9 @@ def _segment_image(
     resolution: int,
     confidence_threshold: float,
     text_prompt: str | None,
-    box_prompt: UnitBox | None,
+    box_cxcywh_normalized: UnitBox | None,
     box_label: bool,
-    point_prompt: UnitPoint | None,
+    point_xy_normalized: UnitPoint | None,
     point_label: bool,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Run one RGB image through the processor; return ``(masks, boxes, scores)`` from its state.
@@ -310,13 +313,13 @@ def _segment_image(
     state = processor.set_image(image)
     if text_prompt is not None:
         state = processor.set_text_prompt(text_prompt, state, run_grounding=False)
-    if box_prompt is not None:
+    if box_cxcywh_normalized is not None:
         state = processor.add_geometric_prompt(
-            list(box_prompt), box_label, state, run_grounding=False
+            list(box_cxcywh_normalized), box_label, state, run_grounding=False
         )
-    if point_prompt is not None:
+    if point_xy_normalized is not None:
         state = processor.add_point_prompt(
-            list(point_prompt), point_label, state, run_grounding=False
+            list(point_xy_normalized), point_label, state, run_grounding=False
         )
     state = processor.predict(state)
     return (
@@ -328,33 +331,34 @@ def _segment_image(
 
 def run(
     *,
-    image_path: str | None = None,
-    video_path: str | None = None,
-    output_dir: str,
+    image_path: str | Path | None = None,
+    video_path: str | Path | None = None,
+    output_dir: str | Path,
     overwrite: bool = False,
     text_prompt: str | None = None,
-    box_prompt: Sequence[float] | None = None,
+    box_cxcywh_normalized: Sequence[float] | None = None,
     box_label: bool = True,
-    point_prompt: Sequence[float] | None = None,
+    point_xy_normalized: Sequence[float] | None = None,
     point_label: bool = True,
     confidence_threshold: float = 0.5,
     resolution: int = DEFAULT_IMAGE_RESOLUTION,
     frame_index: int = 0,
-    weights_path: str | None = None,
-    precision: str = "fp32",
+    weights_path: str | Path | None = None,
+    precision: PrecisionName = "fp32",
 ) -> RunResult:
     """Segment one image, or one chosen frame of a video/image folder, with SAM 3.
 
     Exactly one of ``image_path`` (any Pillow-readable 8-bit image) or
     ``video_path`` (an image file, an image folder, or an OpenCV-decodable video
     file) must be given. Video files require the ``sam3-mlx[video]`` extra. At
-    least one of ``text_prompt``, ``box_prompt``, or ``point_prompt`` must be
-    given; the ones that are given are combined in one request, matching
-    ``Sam3Processor``'s single-image API. ``box_prompt`` is
-    ``[center_x, center_y, width, height]`` in image fractions: every value must
-    be in [0, 1] and width and height must be positive. ``point_prompt`` is
-    ``[x, y]`` normalized to [0, 1]. ``box_label``/``point_label`` are ``True``
-    for a positive prompt and ``False`` for a negative one.
+    least one of ``text_prompt``, ``box_cxcywh_normalized``, or
+    ``point_xy_normalized`` must be given; the ones that are given are combined
+    in one request, matching ``Sam3Processor``'s single-image API.
+    ``box_cxcywh_normalized`` is ``[center_x, center_y, width, height]`` in
+    image fractions: every value must be in [0, 1] and width and height must be
+    positive. ``point_xy_normalized`` is ``[x, y]`` normalized to [0, 1].
+    ``box_label``/``point_label`` are ``True`` for a positive prompt and
+    ``False`` for a negative one.
 
     For ``video_path``, frame ``frame_index`` is read and segmented exactly like
     an image, with the same prompts and outputs plus frame-local object IDs; there
@@ -379,6 +383,12 @@ def run(
     metadata). ``details`` repeats the prediction metadata. Detections are
     those above ``confidence_threshold``. Existing output files are refused unless
     ``overwrite=True``.
+
+    ``artifacts`` describes both files. ``masks`` is a ``binary_mask`` in
+    ``pixel`` space (a plain array with no affine); each slice is one detected
+    object and slices may overlap, so it is not a label map, and its label list
+    is empty because detections carry scores rather than class names.
+    ``prediction`` is a ``detection_set`` in ``pixel`` space.
 
     Args:
         output_dir: Directory for ``masks.npy`` and ``prediction.json``.
@@ -410,11 +420,19 @@ def run(
         input_path, video = video_path, True
     else:
         raise InvalidInputError("Pass exactly one of image_path or video_path")
-    if text_prompt is None and box_prompt is None and point_prompt is None:
-        raise InvalidInputError("Pass at least one of text_prompt, box_prompt, or point_prompt")
+    if text_prompt is None and box_cxcywh_normalized is None and point_xy_normalized is None:
+        raise InvalidInputError(
+            "Pass at least one of text_prompt, box_cxcywh_normalized, or point_xy_normalized"
+        )
     text_prompt = _require_optional_text("text_prompt", text_prompt)
-    box = None if box_prompt is None else _validate_unit_box(box_prompt, "box_prompt")
-    point = None if point_prompt is None else _validate_unit_point(point_prompt, "point_prompt")
+    box = (
+        None if box_cxcywh_normalized is None
+        else _validate_unit_box(box_cxcywh_normalized, "box_cxcywh_normalized")
+    )
+    point = (
+        None if point_xy_normalized is None
+        else _validate_unit_point(point_xy_normalized, "point_xy_normalized")
+    )
     box_label = _require_bool("box_label", box_label)
     point_label = _require_bool("point_label", point_label)
     overwrite = _require_bool("overwrite", overwrite)
@@ -423,7 +441,7 @@ def run(
     frame_index = _require_non_negative_int("frame_index", frame_index)
     if not video and frame_index != 0:
         raise InvalidInputError("frame_index only applies to video_path inputs")
-    weights_path = _require_optional_str("weights_path", weights_path)
+    weights_path = _require_optional_path("weights_path", weights_path)
     from sam3_mlx.precision import (
         check_matmul_precision, parse_precision, request_matmul_precision,
     )
@@ -488,9 +506,9 @@ def run(
             resolution=resolution,
             confidence_threshold=confidence_threshold,
             text_prompt=text_prompt,
-            box_prompt=box,
+            box_cxcywh_normalized=box,
             box_label=box_label,
-            point_prompt=point,
+            point_xy_normalized=point,
             point_label=point_label,
         )
     except (ValueError, RuntimeError, KeyError) as error:
@@ -508,9 +526,9 @@ def run(
         "input_path": resolved_input.as_posix(),
         "frame_index": frame_index if video else None,
         "text_prompt": text_prompt,
-        "box_prompt": None if box is None else list(box),
+        "box_cxcywh_normalized": None if box is None else list(box),
         "box_label": box_label if box is not None else None,
-        "point_prompt": None if point is None else list(point),
+        "point_xy_normalized": None if point is None else list(point),
         "point_label": point_label if point is not None else None,
         "confidence_threshold": confidence_threshold,
         "resolution": resolution,
@@ -527,6 +545,10 @@ def run(
     _write_outputs(output, paths, masks, details, overwrite=overwrite)
     return {
         "outputs": {role: path.as_posix() for role, path in paths.items()},
+        "artifacts": {
+            "masks": artifact(kind="binary_mask", coordinate_space="pixel", labels=[]),
+            "prediction": artifact(kind="detection_set", coordinate_space="pixel"),
+        },
         "details": details,
     }
 
