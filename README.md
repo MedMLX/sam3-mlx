@@ -199,7 +199,7 @@ Only detections scoring above `confidence_threshold` (default 0.5) are kept.
 ## Use with MedMLX
 
 [MedMLX](https://medmlx.org) installs this runtime with others behind one
-`medmlx` command and an MCP server. The `run` extra also installs 11 other
+`medmlx` command and an MCP server. The `segment` extra also installs 11 other
 segmentation runtimes, including MedSAM2, nnU-Net and TotalSegmentator.
 
 ```sh
