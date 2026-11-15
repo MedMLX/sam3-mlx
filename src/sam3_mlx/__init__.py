@@ -7,7 +7,7 @@ from importlib.metadata import PackageNotFoundError, version as _package_version
 from typing import TYPE_CHECKING
 
 from sam3_mlx._unsupported import Sam3MlxUnsupportedError
-from sam3_mlx.medmlx import segment
+from sam3_mlx.medmlx import run
 
 if TYPE_CHECKING:
     from sam3_mlx.model_builder import (
@@ -36,7 +36,7 @@ __all__ = [
     "build_sam3_predictor",
     "build_sam3_video_model",
     "build_sam3_video_predictor",
-    "segment",
+    "run",
 ]
 
 

@@ -51,7 +51,7 @@ MODEL = {
     "id": "sam3",
     "label": "SAM 3 image segmentation",
     "task": "segmentation",
-    "run": "sam3_mlx.medmlx:segment",
+    "run": "sam3_mlx.medmlx:run",
     "summary": (
         "Segments one 2D image from a text prompt and/or one box and/or one "
         "point, using the SAM 3 image model. Can instead segment one chosen "
@@ -251,7 +251,7 @@ def _segment_image(
     )
 
 
-def segment(
+def run(
     *,
     image_path: PathLike | None = None,
     video_path: PathLike | None = None,
@@ -284,7 +284,7 @@ def segment(
 
     For ``video_path``, frame ``frame_index`` is read and segmented exactly like
     an image, with the same prompts and outputs plus frame-local object IDs; there
-    is no tracking across frames. Call ``segment`` again with a different
+    is no tracking across frames. Call ``run`` again with a different
     ``frame_index`` for other frames. Image folders use the files with an image
     extension, skipping dot-files, in numeric (or else name) order.
 
@@ -473,4 +473,4 @@ def segment(
     }
 
 
-__all__ = ["MODEL", "segment"]
+__all__ = ["MODEL", "run"]

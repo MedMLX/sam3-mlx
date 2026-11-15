@@ -91,9 +91,9 @@ def test_entry_point_declaration_signature_and_lazy_public_api() -> None:
     assert set(medmlx.MODEL) == {"id", "label", "task", "run", "summary", "peak_memory_gb"}
     assert medmlx.MODEL["id"] == "sam3"
     assert medmlx.MODEL["task"] == "segmentation"
-    assert medmlx.MODEL["run"] == "sam3_mlx.medmlx:segment"
+    assert medmlx.MODEL["run"] == "sam3_mlx.medmlx:run"
 
-    parameters = inspect.signature(medmlx.segment).parameters
+    parameters = inspect.signature(medmlx.run).parameters
     assert list(parameters) == [
         "image_path",
         "video_path",
@@ -127,7 +127,7 @@ sys.meta_path.insert(0, BlockModels())
 import sam3_mlx
 from sam3_mlx import medmlx
 assert medmlx.MODEL['id'] == 'sam3'
-assert sam3_mlx.segment is medmlx.segment
+assert sam3_mlx.run is medmlx.run
 assert not {'mlx', 'torch', 'monai'} & {n.split('.')[0] for n in sys.modules}
 """,
         ],
@@ -163,7 +163,7 @@ def test_conflicting_or_incomplete_requests_are_rejected(
     image_path: str, video_path: str, output_dir: str, request_kind: str
 ) -> None:
     """Reject input and prompt combinations before touching the output folder."""
-    run = cast("Callable[..., object]", medmlx.segment)
+    run = cast("Callable[..., object]", medmlx.run)
     cases: dict[str, dict[str, object]] = {
         "image-and-video": {"image_path": image_path, "video_path": video_path, "prompt": "lesion"},
         "neither": {"prompt": "lesion"},
@@ -199,7 +199,7 @@ def test_bad_controls_are_rejected_before_touching_the_filesystem_or_mlx(
     """Reject invalid controls before file or native runtime access."""
     cast("dict[str, object]", arguments)[name] = value
     with pytest.raises(InvalidInputError):
-        medmlx.segment(**arguments)
+        medmlx.run(**arguments)
     assert not Path(arguments["output_dir"]).exists()
 
 
@@ -207,11 +207,11 @@ def test_missing_image_or_video_path_raises_invalid_input(output_dir: str, tmp_p
     """Report missing image and video inputs as input errors."""
     missing = tmp_path / "missing.png"
     with pytest.raises(InvalidInputError):
-        medmlx.segment(image_path=str(missing), output_dir=output_dir, prompt="lesion")
+        medmlx.run(image_path=str(missing), output_dir=output_dir, prompt="lesion")
     assert not Path(output_dir).exists()
     missing_dir = tmp_path / "missing_frames"
     with pytest.raises(InvalidInputError):
-        medmlx.segment(video_path=str(missing_dir), output_dir=output_dir, prompt="lesion")
+        medmlx.run(video_path=str(missing_dir), output_dir=output_dir, prompt="lesion")
     assert not Path(output_dir).exists()
 
 
@@ -221,7 +221,7 @@ def test_missing_weights_folder_raises_asset_not_ready_before_mlx(
     """Report a missing explicit weights folder before loading MLX."""
     missing_checkpoint = tmp_path / "missing.safetensors"
     with pytest.raises(AssetNotReadyError) as error:
-        medmlx.segment(
+        medmlx.run(
             image_path=image_path,
             output_dir=output_dir,
             prompt="lesion",
@@ -241,7 +241,7 @@ def test_default_download_failure_is_asset_not_ready(
 
     monkeypatch.setattr(core_weights, "weights_dir", unavailable)
     with pytest.raises(AssetNotReadyError) as error:
-        medmlx.segment(image_path=image_path, output_dir=output_dir, prompt="lesion")
+        medmlx.run(image_path=image_path, output_dir=output_dir, prompt="lesion")
     assert error.value.hint
     assert not Path(output_dir).exists()
 
@@ -264,7 +264,7 @@ def test_symlinked_checkpoint_keeps_its_safetensors_name(
 
     monkeypatch.setattr(medmlx, "_build_image_model", fake_build_image_model)
     with pytest.raises(AssetNotReadyError):
-        medmlx.segment(
+        medmlx.run(
             image_path=image_path,
             output_dir=output_dir,
             prompt="lesion",
@@ -278,7 +278,7 @@ def test_output_collision_with_input_is_rejected(tmp_path: Path) -> None:
     colliding_image = tmp_path / medmlx.MASKS_NAME
     chest_frame((3, 5)).save(colliding_image, format="PNG")
     with pytest.raises(InvalidInputError):
-        medmlx.segment(
+        medmlx.run(
             image_path=str(colliding_image),
             output_dir=str(tmp_path),
             prompt="lesion",
@@ -298,7 +298,7 @@ def test_missing_mlx_raises_the_shared_dependency_error(
 
     monkeypatch.setattr(runtime, "import_mlx", unavailable)
     with pytest.raises(MissingDependencyError):
-        medmlx.segment(image_path=image_path, output_dir=output_dir, prompt="lesion")
+        medmlx.run(image_path=image_path, output_dir=output_dir, prompt="lesion")
     assert not Path(output_dir).exists()
 
 
@@ -318,9 +318,9 @@ def test_checkpoint_load_failures_become_asset_not_ready(
     monkeypatch.setattr(medmlx, "_build_image_model", broken_image)
     with pytest.raises(AssetNotReadyError):
         if video:
-            medmlx.segment(video_path=video_path, output_dir=output_dir, prompt="lesion")
+            medmlx.run(video_path=video_path, output_dir=output_dir, prompt="lesion")
         else:
-            medmlx.segment(image_path=image_path, output_dir=output_dir, prompt="lesion")
+            medmlx.run(image_path=image_path, output_dir=output_dir, prompt="lesion")
     assert not Path(output_dir).exists()
 
 
@@ -350,7 +350,7 @@ def test_inference_failures_become_model_execution_errors(
 
     monkeypatch.setattr(medmlx, "_segment_image", broken_segment)
     with pytest.raises(ModelExecutionError):
-        medmlx.segment(image_path=image_path, output_dir=output_dir, prompt="lesion")
+        medmlx.run(image_path=image_path, output_dir=output_dir, prompt="lesion")
     assert not Path(output_dir).exists()
 
 
@@ -388,10 +388,10 @@ def test_existing_outputs_are_preserved_then_replaced_with_overwrite(
     sentinel = output / medmlx.MASKS_NAME
     sentinel.write_bytes(b"preserve me")
     with pytest.raises(InvalidInputError):
-        medmlx.segment(image_path=image_path, output_dir=output_dir, prompt="lesion")
+        medmlx.run(image_path=image_path, output_dir=output_dir, prompt="lesion")
     assert sentinel.read_bytes() == b"preserve me"
 
-    result = medmlx.segment(
+    result = medmlx.run(
         image_path=image_path, output_dir=output_dir, prompt="lesion", overwrite=True,
         weights_path=None if automatic else str(local_weights),
     )
@@ -470,7 +470,7 @@ def test_seeded_small_model_runs_a_real_image_forward_pass(
 
     monkeypatch.setattr(medmlx, "_build_image_model", fake_build_image_model)
 
-    result = medmlx.segment(
+    result = medmlx.run(
         image_path=image_path,
         output_dir=output_dir,
         prompt="lesion",
@@ -506,7 +506,7 @@ def test_seeded_small_model_runs_a_real_video_frame_forward_pass(
 
     monkeypatch.setattr(medmlx, "_build_image_model", fake_build_image_model)
 
-    result = medmlx.segment(
+    result = medmlx.run(
         video_path=video_path,
         output_dir=output_dir,
         prompt="lesion",
@@ -548,7 +548,7 @@ def test_video_frame_matches_the_same_image_on_the_seeded_model(
         "confidence_threshold": 0.0,
         "resolution": 336,
     }
-    run = cast("Callable[..., medmlx.RunResult]", medmlx.segment)
+    run = cast("Callable[..., medmlx.RunResult]", medmlx.run)
     image_result = run(image_path=str(tmp_path / "scan.png"), output_dir=str(tmp_path / "a"), **prompts)
     video_result = run(video_path=str(frames), output_dir=str(tmp_path / "b"), **prompts)
 
@@ -615,7 +615,7 @@ def test_bad_inputs_are_input_errors_before_the_model_loads(
         request = {"image_path": str(tmp_path / "scan.png"), "prompt": "lesion"}
     else:
         (folder / "._0.png").write_bytes(b"macOS sidecar")
-    run = cast("Callable[..., object]", medmlx.segment)
+    run = cast("Callable[..., object]", medmlx.run)
     with pytest.raises(InvalidInputError):
         run(output_dir=output_dir, **request)
     assert not Path(output_dir).exists()
@@ -630,7 +630,7 @@ def test_video_file_without_opencv_is_a_missing_dependency(
     clip.write_bytes(b"not decoded")
     monkeypatch.setitem(sys.modules, "cv2", None)
     with pytest.raises(MissingDependencyError) as error:
-        medmlx.segment(video_path=str(clip), output_dir=output_dir, prompt="lesion")
+        medmlx.run(video_path=str(clip), output_dir=output_dir, prompt="lesion")
     assert error.value.extra == "video"
     assert not Path(output_dir).exists()
 
@@ -653,7 +653,7 @@ def test_video_frames_take_the_image_prompts(
     for index in range(2):
         chest_frame((6, 4), marker=index).save(folder / f"{index:04d}.tif")
     (folder / "._0000.tif").write_bytes(b"macOS sidecar")
-    result = medmlx.segment(
+    result = medmlx.run(
         video_path=str(folder),
         output_dir=output_dir,
         prompt="lesion",

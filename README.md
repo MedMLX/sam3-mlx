@@ -50,9 +50,9 @@ Segment a sample photograph:
 ```sh
 curl -LO https://raw.githubusercontent.com/scikit-image/scikit-image/v0.25.2/skimage/data/astronaut.png
 python - <<'PY'
-from sam3_mlx import segment
+from sam3_mlx import run
 
-result = segment(image_path="astronaut.png", prompt="helmet", output_dir="out")
+result = run(image_path="astronaut.png", prompt="helmet", output_dir="out")
 print(result["outputs"])
 PY
 ```
@@ -64,7 +64,7 @@ the 3.4 GB weights.
 
 | Function | Use | Key arguments |
 | :--- | :--- | :--- |
-| `segment` | Segment one image, or one frame of an image folder or video | `image_path` or `video_path`, `output_dir`, `prompt`, `box_cxcywh_normalized`, `point_xy_normalized`, `confidence_threshold`, `resolution`, `frame_index`, `weights_path` (optional), `precision` |
+| `run` | Segment one image, or one frame of an image folder or video | `image_path` or `video_path`, `output_dir`, `prompt`, `box_cxcywh_normalized`, `point_xy_normalized`, `confidence_threshold`, `resolution`, `frame_index`, `weights_path` (optional), `precision` |
 
 | Prompt | Format |
 | :--- | :--- |
@@ -199,7 +199,7 @@ Only detections scoring above `confidence_threshold` (default 0.5) are kept.
 ## Use with MedMLX
 
 [MedMLX](https://medmlx.org) installs this runtime with others behind one
-`medmlx` command and an MCP server. The `segment` extra also installs 11 other
+`medmlx` command and an MCP server. The `run` extra also installs 11 other
 segmentation runtimes, including MedSAM2, nnU-Net and TotalSegmentator.
 
 ```sh
