@@ -426,12 +426,17 @@ class Sam3VideoInference:
 
         The top-level dictionary and its ``backbone_out`` mapping are copied, so
         prompts never change the cached encoding; nested values are shared. A failed
-        encoding does not insert a cache entry.
+        encoding does not insert a cache entry, though a full cache has already
+        dropped its least recently used one.
         """
         cache = inference_state["frame_feature_cache"]
         encoded = cache.get(frame_idx)
         if encoded is None:
             frame = inference_state["frames"][frame_idx]
+            # Drop the encoding this insertion would evict before encoding, so a
+            # full cache never holds one more encoding (~110 MB at 1008 px) than
+            # its size while the backbone runs.
+            cache.reserve()
             encoded = inference_state["processor"].set_image(frame)
             cache[frame_idx] = encoded
         frame_state = dict(encoded)
