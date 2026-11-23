@@ -6,7 +6,7 @@ Segment objects in images from text, box or point prompts with Meta's SAM 3 in n
 
 [![PyPI](https://img.shields.io/pypi/v/sam3-mlx)](https://pypi.org/project/sam3-mlx/)
 [![Python](https://img.shields.io/pypi/pyversions/sam3-mlx)](https://pypi.org/project/sam3-mlx/)
-[![License](https://img.shields.io/badge/License-SAM-lightgrey)](https://github.com/MedMLX/sam3-mlx/blob/v0.4.0/LICENSE)
+[![License](https://img.shields.io/badge/License-SAM-lightgrey)](https://github.com/MedMLX/sam3-mlx/blob/v0.4.1/LICENSE)
 [![Apple Silicon](https://img.shields.io/badge/Apple_Silicon-MLX-black?logo=apple)](https://github.com/ml-explore/mlx)
 [![Hugging Face](https://img.shields.io/badge/%F0%9F%A4%97_Hugging_Face-weights-yellow)](https://huggingface.co/mlx-community/sam3-image)
 [![MedMLX](https://img.shields.io/badge/MedMLX-runtime-A51C30)](https://github.com/MedMLX/medmlx)
@@ -33,7 +33,7 @@ Segment objects in images from text, box or point prompts with Meta's SAM 3 in n
 ```sh
 uv venv --python 3.13
 source .venv/bin/activate
-uv pip install "sam3-mlx>=0.4.0"
+uv pip install "sam3-mlx>=0.4.1"
 ```
 
 ## Run
@@ -81,7 +81,7 @@ curl -LO https://raw.githubusercontent.com/scikit-image/scikit-image/v0.25.2/ski
   read; export a slice to PNG first. 16- and 32-bit images are rejected rather than
   clipped.
 - **Video:** `run` segments one `frame_index` per call, exactly like an image, with
-  frame-local object IDs. Video files need `uv pip install "sam3-mlx[video]>=0.4.0"`;
+  frame-local object IDs. Video files need `uv pip install "sam3-mlx[video]>=0.4.1"`;
   image folders do not.
 - **Return value:** `{"outputs": {...}, "artifacts": {...}, "details": {...}}`. `artifacts`
   says both files are in pixel coordinates of the input image or frame; `details`
@@ -180,7 +180,7 @@ Only these converted MLX weights load; Meta's PyTorch `.pt` checkpoints do not. 
 original checkpoints on Hugging Face require an access request; this converted copy
 does not.
 
-Weight terms are the [SAM License](https://github.com/MedMLX/sam3-mlx/blob/v0.4.0/LICENSE):
+Weight terms are the [SAM License](https://github.com/MedMLX/sam3-mlx/blob/v0.4.1/LICENSE):
 
 - royalty-free, including commercial use;
 - not for military, weapons or other uses barred by trade controls;
@@ -209,7 +209,7 @@ For Codex, use `codex mcp add medmlx -- "$MEDMLX" serve --root "$HOME/medmlx-wor
 
 ## License
 
-Code: [SAM License](https://github.com/MedMLX/sam3-mlx/blob/v0.4.0/LICENSE), with
+Code: [SAM License](https://github.com/MedMLX/sam3-mlx/blob/v0.4.1/LICENSE), with
 MIT-licensed tokenizer code from OpenAI CLIP and open_clip.
-Weights: SAM License. See [third-party notices](https://github.com/MedMLX/sam3-mlx/blob/v0.4.0/THIRD_PARTY_NOTICES.md).
+Weights: SAM License. See [third-party notices](https://github.com/MedMLX/sam3-mlx/blob/v0.4.1/THIRD_PARTY_NOTICES.md).
 Not affiliated with Meta.
