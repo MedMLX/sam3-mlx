@@ -19,6 +19,7 @@ from typing import Literal, Protocol, TypeAlias, cast
 import mlx.core as mx
 import numpy as np
 import numpy.typing as npt
+from medmlx_core.typing import ArrayLayer
 from PIL import Image
 
 from sam3_mlx.mlx_runtime import evaluate_boundary, scalar_int
@@ -407,15 +408,9 @@ def _validate_text_cache_size(value: object) -> int:
     return int(value)
 
 
-class _ArrayLayer(Protocol):
-    def __call__(self, value: mx.array) -> mx.array:
-        """Apply an MLX layer to one tensor."""
-        ...
-
-
 class _MaskDecoder(Protocol):
-    conv_s0: _ArrayLayer
-    conv_s1: _ArrayLayer
+    conv_s0: ArrayLayer
+    conv_s1: ArrayLayer
 
 
 class _InteractiveModel(Protocol):

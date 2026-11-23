@@ -36,7 +36,7 @@ keywords = [
 dependencies = [
     "ftfy>=6.3.1",
     "huggingface-hub>=1.1.6",
-    "medmlx-core>=0.3,<0.4",
+    "medmlx-core>=0.3.2,<0.4",
     "mlx==0.32.4; platform_system == 'Darwin' and platform_machine == 'arm64'",
     "numpy>=2.3.5",
     "pillow>=13,<14",

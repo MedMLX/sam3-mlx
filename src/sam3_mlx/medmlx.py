@@ -24,7 +24,7 @@ from medmlx_core.errors import (
 from medmlx_core.files import PathLike, output_targets, publish
 from medmlx_core.outputs import artifact
 from medmlx_core.outputs import RunResult as _RunResult
-from medmlx_core.weights import model_folder, weights_revision
+from medmlx_core.weights import model_folder, weights_file, weights_revision
 
 from sam3_mlx.resolutions import DEFAULT_IMAGE_RESOLUTION, PATCH_SIZE
 
@@ -398,15 +398,8 @@ def run(
     except ValueError as error:
         raise InvalidInputError(str(error)) from error
 
-    if directory is None:
-        directory = model_folder("sam3", None)
-    checkpoint = directory / "model.safetensors"
-    if not checkpoint.is_file():
-        raise AssetNotReadyError(
-            f"SAM 3 weights folder must contain model.safetensors: {directory}",
-            reason="missing SAM 3 image weights",
-            hint="Retry the download or pass a complete weights_path folder.",
-        )
+    checkpoint = weights_file("sam3", directory, "model.safetensors")
+    directory = checkpoint.parent
     try:
         model = _build_image_model(checkpoint_path=checkpoint, precision=policy)
     except (OSError, ValueError, RuntimeError, KeyError) as error:
