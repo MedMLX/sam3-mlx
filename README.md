@@ -22,7 +22,7 @@ Native MLX port of [SAM 3](https://github.com/facebookresearch/sam3) for Apple S
 
 | Input | Output |
 | :--- | :--- |
-| One 2D image (PNG, JPEG or any Pillow-readable format), or one chosen frame of an image folder or video; a text prompt, one box and/or one point | `out/masks.npy`, boolean `(N, height, width)` at the input resolution, and `out/prediction.json` with pixel boxes and scores |
+| One 2D image, or one frame of an image folder or video · text, box or point prompt | Masks, pixel boxes and scores at the input resolution |
 
 | Model | Weights download | Peak MLX memory | Measured on |
 | :--- | ---: | ---: | :--- |
@@ -169,7 +169,7 @@ Weight terms are the [SAM License](https://github.com/MedMLX/sam3-mlx/blob/v0.4.
   read. Export a slice to PNG first.
 - `run` segments one video `frame_index` per call, exactly like an image,
   with frame-local object IDs. Video files need
-  `uv pip install "sam3-mlx[video]>=0.2.3"`; image folders do not.
+  `uv pip install "sam3-mlx[video]>=0.4.0"`; image folders do not.
 - Tracked sessions (`track=True`) match each frame's detections to the
   previous frames by box overlap and motion (ByteTrack). Masks are not carried
   between frames: an object is shown only on frames where the prompt finds it.
@@ -180,8 +180,7 @@ Weight terms are the [SAM License](https://github.com/MedMLX/sam3-mlx/blob/v0.4.
 - `resolution` must be a positive multiple of 14. The default, 1008, is
   upstream's input size.
 - SAM 3 is a general-purpose model; its accuracy on medical images is not
-  established. Tests compare preprocessing and individual layers with PyTorch
-  and TorchVision.
+  established.
 - MLX fixes its float32 product precision for the whole process at its first
   float32 product. A `"fp32"` or `"bf16"` model in a process already running
   TF32, or a `"tf32"` model in one fixed to full FP32 or on a chip before M5,
