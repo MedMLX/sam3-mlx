@@ -2,8 +2,7 @@
 
 # sam3-mlx
 
-Segment objects in images from text, box or point prompts with Meta's SAM 3.
-Native MLX port of [SAM 3](https://github.com/facebookresearch/sam3) for Apple Silicon.
+Segment objects in images from text, box or point prompts with Meta's SAM 3 in native MLX.
 
 [![PyPI](https://img.shields.io/pypi/v/sam3-mlx)](https://pypi.org/project/sam3-mlx/)
 [![Python](https://img.shields.io/pypi/pyversions/sam3-mlx)](https://pypi.org/project/sam3-mlx/)
@@ -29,13 +28,7 @@ Native MLX port of [SAM 3](https://github.com/facebookresearch/sam3) for Apple S
 | `sam3` | 3.4 GB | 5.4 GB | One image at the default 1008-pixel resolution |
 | `sam3`, tracked video | 3.4 GB | 6.0 GB | A tracked video session |
 
-Weights: [mlx-community/sam3-image](https://huggingface.co/mlx-community/sam3-image), SAM
-License; they download on first use. Requires macOS 14 or later on Apple Silicon.
-
 ## Install
-
-Requires [uv](https://docs.astral.sh/uv/). If `uv --version` fails, run
-`curl -LsSf https://astral.sh/uv/install.sh | sh` first.
 
 ```sh
 uv venv --python 3.13
@@ -45,37 +38,56 @@ uv pip install "sam3-mlx>=0.4.0"
 
 ## Run
 
-Segment a sample photograph:
-
-```sh
-curl -LO https://raw.githubusercontent.com/scikit-image/scikit-image/v0.25.2/skimage/data/astronaut.png
-python - <<'PY'
+```python
 from sam3_mlx import run
 
 result = run(image_path="astronaut.png", prompt="helmet", output_dir="out")
-print(result["outputs"])
-PY
+print(result["outputs"]["mask"])
 ```
 
-This writes `out/masks.npy` and `out/prediction.json`. The first run downloads
-the 3.4 GB weights.
+Weights download from [`mlx-community/sam3-image`](https://huggingface.co/mlx-community/sam3-image)
+on first use (3.4 GB); `medmlx setup sam3` downloads them ahead of time. For local
+weights, pass the folder containing `model.safetensors` as `weights_path`.
 
-### Python API
+For a test image:
 
-| Function | Use | Key arguments |
-| :--- | :--- | :--- |
-| `run` | Segment one image, or one frame of an image folder or video | `image_path` or `video_path`, `output_dir`, `prompt`, `box_cxcywh_normalized`, `point_xy_normalized`, `confidence_threshold`, `resolution`, `frame_index`, `weights_path` (optional), `precision` |
+```sh
+curl -LO https://raw.githubusercontent.com/scikit-image/scikit-image/v0.25.2/skimage/data/astronaut.png
+```
 
-| Prompt | Format |
-| :--- | :--- |
+### Inputs and outputs
+
+| Argument | Meaning |
+| --- | --- |
+| `image_path` or `video_path` | One 2D image Pillow can read, or an image folder or video with `frame_index` |
+| `output_dir` | Directory for `masks.npy` and `prediction.json` |
 | `prompt` | Free text, such as `"helmet"` |
 | `box_cxcywh_normalized` | `[center_x, center_y, width, height]` as fractions of the image size, between 0 and 1; width and height above 0 |
 | `point_xy_normalized` | `[x, y]` as fractions of the image size, between 0 and 1 |
 | `box_label`, `point_label` | Mark a prompt as positive (`True`) or negative |
+| `confidence_threshold` | 0.5 by default; only detections scoring above it are kept |
+| `resolution` | 1008 by default, upstream's input size; a positive multiple of 14 |
+| `frame_index` | The folder or video frame to segment |
+| `weights_path` | Optional folder containing `model.safetensors` |
+| `precision` | `"fp32"` (default), `"tf32"` or `"bf16"`; see [Precision](#precision) |
 
-Prompts given together are combined in one request. The result has `outputs["mask"]`
-(`masks.npy`), `outputs["detections"]` (`prediction.json`), `artifacts` (which says both files are in pixel coordinates of the
-input image or frame) and `details`, which repeats the prediction metadata.
+| Output | File | Contents |
+| --- | --- | --- |
+| `mask` | `masks.npy` | Boolean `(N, height, width)`, one mask per detection, at the input image or frame resolution |
+| `detections` | `prediction.json` | Pixel boxes `[x0, y0, x1, y1]`, scores, frame-local `object_ids` (video only, otherwise `null`) and the request settings |
+
+- **Prompts:** prompts given together are combined in one request.
+- **Images:** 2D and 8-bit, decoded with Pillow. DICOM, NIfTI and 3D volumes are not
+  read; export a slice to PNG first. 16- and 32-bit images are rejected rather than
+  clipped.
+- **Video:** `run` segments one `frame_index` per call, exactly like an image, with
+  frame-local object IDs. Video files need `uv pip install "sam3-mlx[video]>=0.4.0"`;
+  image folders do not.
+- **Return value:** `{"outputs": {...}, "artifacts": {...}, "details": {...}}`. `artifacts`
+  says both files are in pixel coordinates of the input image or frame; `details`
+  repeats the prediction metadata.
+
+### Precision
 
 | `precision` | What runs | Largest difference from upstream SAM 3 (FP32) on the six medical fixtures |
 | :--- | :--- | :--- |
@@ -86,8 +98,15 @@ input image or frame) and `details`, which repeats the prediction metadata.
 Every level finds the same detections as upstream on those fixtures. Speed for
 each level is in the
 [technical notes](https://github.com/MedMLX/sam3-mlx/blob/main/docs/technical.md).
-`"tf32"` applies to every MLX model in the Python process, so build the model
-before other MLX work, or start Python with `MLX_ENABLE_TF32=1`.
+
+- `"tf32"` applies to every MLX model in the Python process, so build the model
+  before other MLX work, or start Python with `MLX_ENABLE_TF32=1`.
+- MLX fixes its float32 product precision for the whole process at its first
+  float32 product. A `"fp32"` or `"bf16"` model in a process already running
+  TF32, or a `"tf32"` model in one fixed to full FP32 or on a chip before M5,
+  stops with an error; start a new Python process.
+
+### Python API
 
 To keep arrays in memory instead of writing files, use the model directly:
 
@@ -142,17 +161,21 @@ for frame in predictor.propagate_in_video(session, propagation_direction="forwar
 predictor.close_session(session)
 ```
 
+Tracked sessions match each frame's detections to the previous frames by box
+overlap and motion (ByteTrack). Masks are not carried between frames: an object
+is shown only on frames where the prompt finds it. It keeps its ID through up to
+30 missed frames. Objects in the first frame get IDs at once; a later one gets an
+ID after it is found on 3 more frames.
+
 ### Weights
 
-Weights download on first use to `~/.cache/medmlx/sam3` (set
-`MEDMLX_ASSET_CACHE` to move it). Later runs work offline. To download ahead of
-time or pin a revision:
+Weights are cached in `~/.cache/medmlx/sam3` (set `MEDMLX_ASSET_CACHE` to move
+it), and later runs work offline. To pin a revision:
 
 ```sh
 hf download mlx-community/sam3-image model.safetensors --revision b72a14d8127e17e6f2a3d2e075bbbf4307ba146e --local-dir sam3-weights
 ```
 
-To use your own copy, pass the folder containing `model.safetensors` as `weights_path`.
 Only these converted MLX weights load; Meta's PyTorch `.pt` checkpoints do not. Meta's
 original checkpoints on Hugging Face require an access request; this converted copy
 does not.
@@ -163,74 +186,26 @@ Weight terms are the [SAM License](https://github.com/MedMLX/sam3-mlx/blob/v0.4.
 - not for military, weapons or other uses barred by trade controls;
 - publications must acknowledge SAM.
 
-### Inputs and limitations
+### Limits
 
-- Images are 2D and decoded with Pillow; DICOM, NIfTI and 3D volumes are not
-  read. Export a slice to PNG first.
-- `run` segments one video `frame_index` per call, exactly like an image,
-  with frame-local object IDs. Video files need
-  `uv pip install "sam3-mlx[video]>=0.4.0"`; image folders do not.
-- Tracked sessions (`track=True`) match each frame's detections to the
-  previous frames by box overlap and motion (ByteTrack). Masks are not carried
-  between frames: an object is shown only on frames where the prompt finds it.
-  It keeps its ID through up to 30 missed frames. Objects in the first frame
-  get IDs at once; a later one gets an ID after it is found on 3 more frames.
-- Image files and frames must be 8-bit. 16- and 32-bit images are rejected
-  rather than clipped; convert them to 8-bit first.
-- `resolution` must be a positive multiple of 14. The default, 1008, is
-  upstream's input size.
 - SAM 3 is a general-purpose model; its accuracy on medical images is not
   established.
-- MLX fixes its float32 product precision for the whole process at its first
-  float32 product. A `"fp32"` or `"bf16"` model in a process already running
-  TF32, or a `"tf32"` model in one fixed to full FP32 or on a chip before M5,
-  stops with an error; start a new Python process.
-
-### Outputs
-
-| File | Contents |
-| :--- | :--- |
-| `masks.npy` | Boolean NumPy array `(N, height, width)`, one mask per detection, at the input image or frame resolution |
-| `prediction.json` | Pixel boxes `[x0, y0, x1, y1]`, scores, frame-local `object_ids` (video only, otherwise `null`) and the request settings |
-
-Only detections scoring above `confidence_threshold` (default 0.5) are kept.
+- Requires macOS 14 or later.
 
 ## Use with MedMLX
 
-[MedMLX](https://medmlx.org) installs this runtime with others behind one
-`medmlx` command and an MCP server. The `segment` extra also installs 11 other
-segmentation runtimes, including MedSAM2, nnU-Net and TotalSegmentator.
+Use the [MedMLX MCP server](https://github.com/MedMLX/medmlx/blob/main/docs/mcp.md) to run `sam3` from an MCP client. Weights download on first use.
 
 ```sh
 uv tool install --python 3.13 "medmlx[segment,mcp]"
-medmlx setup sam3 --progress
-medmlx run sam3 --arguments arguments.json --root ~/medmlx-work
+MEDMLX="$(uv tool dir --bin --color never)/medmlx"
+mkdir -p "$HOME/medmlx-work"
+claude mcp add --scope user medmlx -- "$MEDMLX" serve --root "$HOME/medmlx-work"
 ```
 
-`arguments.json`, with paths relative to `--root`:
+For Codex, use `codex mcp add medmlx -- "$MEDMLX" serve --root "$HOME/medmlx-work"`. Other MCP clients take the same command and arguments. The same install provides the `medmlx` CLI, for example `medmlx describe sam3`.
 
-```json
-{
-  "image_path": "inputs/astronaut.png",
-  "prompt": "helmet",
-  "output_dir": "results/sam3"
-}
-```
-
-To let an AI agent run it, register the server, then restart the client:
-
-```sh
-mkdir -p ~/medmlx-work
-claude mcp add --scope user medmlx -- "$(uv tool dir --bin)/medmlx" serve --root "$HOME/medmlx-work"
-codex mcp add medmlx -- "$(uv tool dir --bin)/medmlx" serve --root "$HOME/medmlx-work"
-```
-
-Put images in `~/medmlx-work`; outputs are written there too. Then ask, for
-example: "Use SAM 3 to segment the helmets in astronaut.png."
-
-> **For AI agents:** prefer the MedMLX MCP tools (`list_models`,
-> `describe_model`, `model_readiness`, `run_model`, `get_job`) over writing
-> Python against this package.
+> **For AI agents:** prefer the MedMLX MCP tools (`list_models`, `describe_model`, `model_readiness`, `run_model`, `get_job`) over writing Python against this package.
 
 ## License
 
