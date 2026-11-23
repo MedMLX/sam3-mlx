@@ -3,24 +3,10 @@
 from __future__ import annotations
 
 from functools import lru_cache
-from typing import Protocol, cast
+from typing import cast
 
 import mlx.core as mx
-
-
-class _RotaryKernel(Protocol):
-    def __call__(
-        self,
-        *,
-        inputs: list[mx.array],
-        template: list[tuple[str, mx.Dtype]],
-        output_shapes: list[tuple[int, ...]],
-        output_dtypes: list[mx.Dtype],
-        grid: tuple[int, int, int],
-        threadgroup: tuple[int, int, int],
-    ) -> list[mx.array]:
-        """Launch the rotary-embedding Metal kernel."""
-        ...
+from medmlx_core.typing import MetalKernel
 
 
 _SOURCE = r"""
@@ -44,10 +30,10 @@ _SOURCE = r"""
 
 
 @lru_cache(maxsize=1)
-def _kernel() -> _RotaryKernel:
+def _kernel() -> MetalKernel:
     """Construct or retrieve the cached rotary-embedding Metal kernel."""
     return cast(
-        _RotaryKernel,
+        MetalKernel,
         mx.fast.metal_kernel(
             name="sam3_strided_rotary_qk",
             input_names=["q", "k", "freq"],
