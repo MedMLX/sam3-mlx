@@ -10,24 +10,10 @@ from __future__ import annotations
 
 from functools import lru_cache
 import math
-from typing import Protocol, cast
+from typing import cast
 
 import mlx.core as mx
-
-
-class _AttentionKernel(Protocol):
-    def __call__(
-        self,
-        *,
-        inputs: list[mx.array],
-        template: list[tuple[str, int]],
-        output_shapes: list[tuple[int, ...]],
-        output_dtypes: list[mx.Dtype],
-        grid: tuple[int, int, int],
-        threadgroup: tuple[int, int, int],
-    ) -> list[mx.array]:
-        """Launch the attention Metal kernel."""
-        ...
+from medmlx_core.typing import MetalKernel
 
 
 # Each threadgroup owns SIMDGROUPS * 8 query rows of one (batch, head) and walks
@@ -173,10 +159,10 @@ _BLOCK_KEYS = 32
 
 
 @lru_cache(maxsize=1)
-def _kernel() -> _AttentionKernel:
+def _kernel() -> MetalKernel:
     """Construct or retrieve the cached attention Metal kernel."""
     return cast(
-        _AttentionKernel,
+        MetalKernel,
         mx.fast.metal_kernel(
             name="sam3_attention_head_dim_32",
             input_names=["q", "k", "v", "scale"],

@@ -2,30 +2,11 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
 from functools import lru_cache
-from typing import Protocol, cast
+from typing import cast
 
 import mlx.core as mx
-
-
-LaunchShape = tuple[int, int, int]
-KernelTemplate = tuple[str, mx.Dtype]
-
-
-class _MetalKernel(Protocol):
-    def __call__(
-        self,
-        *,
-        inputs: Sequence[mx.array],
-        template: Sequence[KernelTemplate],
-        output_shapes: Sequence[Sequence[int]],
-        output_dtypes: Sequence[mx.Dtype],
-        grid: LaunchShape,
-        threadgroup: LaunchShape,
-    ) -> Sequence[mx.array]:
-        """Launch the compiled Metal kernel with specified inputs and output shapes."""
-        ...
+from medmlx_core.typing import MetalKernel
 
 
 _SOURCE = """
@@ -93,10 +74,10 @@ _SOURCE = """
 
 
 @lru_cache(maxsize=1)
-def _kernel() -> _MetalKernel:
+def _kernel() -> MetalKernel:
     """Construct or retrieve the cached grid-sampling Metal kernel."""
     return cast(
-        _MetalKernel,
+        MetalKernel,
         mx.fast.metal_kernel(
             name="grid_sample",
             input_names=("x", "grid"),

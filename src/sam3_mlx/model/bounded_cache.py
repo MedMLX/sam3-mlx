@@ -48,6 +48,16 @@ class BoundedLRUCache(Generic[K, V]):
             while len(self._data) > self.maxsize:
                 self._data.popitem(last=False)
 
+    def reserve(self) -> None:
+        """Evict least recently used entries until one more entry fits.
+
+        Call before computing a value that will be inserted, so the entry the
+        insertion would evict is released before the new value exists.
+        """
+        with self._lock:
+            while len(self._data) >= self.maxsize:
+                self._data.popitem(last=False)
+
     def clear(self) -> None:
         """Remove every entry."""
         with self._lock:

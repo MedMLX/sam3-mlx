@@ -72,3 +72,33 @@ per image (relative for mask area):
 
 Detection counts match upstream at every precision. Upstream's own examples run
 the model under BF16 autocast.
+
+## Tracked video frame cache (Apple M1 Max, MLX 0.32.4)
+
+The input was 24 consecutive 512 × 512 axial slices (indices 57–80) from the
+HCC-TACE-Seg HCC_063 CT. We clipped to −160 to 240 HU and scaled to 8-bit RGB.
+The session used `track=True`, prompted with `"liver"` at frame 10, and
+propagated in both directions. We used the pinned `mlx-community/sam3-image`
+weights at 1008 px in FP32 on an M1 Max (32-core GPU, 64 GB, macOS 27.2.1).
+
+Perfkit interleaved four variants over six counted rounds. Each worker loaded
+the model before timing two fresh sessions from open through close. Times are
+medians for the first and second sessions. Peak MLX allocator memory includes
+resident weights and is the maximum across both sessions in each worker.
+
+| Frame cache entries | Eviction | Peak MLX memory | First session | Warm session |
+| ---: | :--- | ---: | ---: | ---: |
+| 1 | After encoding | 5.648 GB | 22.207 s | 21.964 s |
+| 2 | After encoding | 5.759 GB | 22.207 s | 21.972 s |
+| 4 (default) | After encoding | 5.982 GB | 22.207 s | 21.967 s |
+| 4 (default) | Before encoding | 5.871 GB | 22.203 s | 21.971 s |
+
+Early eviction lowered the peak by 111.5 MB (1.86%) in all six pairs at the
+default capacity. The 97% paired wall-time ratio intervals were 0.9994–1.0049
+for the first session and 0.9999–1.0006 for the warm session.
+
+Each capacity encoded 24 frames on the first sweep. Re-prompting at frame 0
+and sweeping again in the same session required 23, 22, and 20 encodes with
+capacities 1, 2, and 4, respectively. At capacity 4, early eviction preserved
+the encoding counts, all 85 propagated masks bit for bit, and the track IDs
+across both sweeps.
