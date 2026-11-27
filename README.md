@@ -81,7 +81,7 @@ curl -LO https://raw.githubusercontent.com/scikit-image/scikit-image/v0.25.2/ski
   read; export a slice to PNG first. 16- and 32-bit images are rejected rather than
   clipped.
 - **Video:** `run` segments one `frame_index` per call, exactly like an image, with
-  frame-local object IDs. Video files need `uv pip install "sam3-mlx[video]>=0.4.1"`;
+  frame-local object IDs. Video files need `uv pip install "sam3-mlx[video]>=0.4.2"`;
   image folders do not.
 - **Return value:** `{"outputs": {...}, "artifacts": {...}, "details": {...}}`. `artifacts`
   says both files are in pixel coordinates of the input image or frame; `details`
