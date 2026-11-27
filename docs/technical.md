@@ -1,19 +1,17 @@
 # Technical notes
 
-## Speed and memory (Apple M5 Max, MLX 0.32.4)
+## Speed and memory (Apple M5 Max, MLX 0.32.5)
 
-Measured on an Apple M5 Max (40-core GPU, 128 GB) with MLX 0.32.4 on Metal and
+Measured on an Apple M5 Max (40-core GPU, 128 GB) with MLX 0.32.5 on Metal and
 the pinned `mlx-community/sam3-image` weights, at the default 1008-pixel
 resolution, on the chest X-ray fixture. Times are warm medians in fresh
 processes after the model is loaded, from 6 counted rounds alternating the three
-`precision` settings; ratios are against FP32 with their 97% intervals. Another
-workload shared the host during these rounds; on a quiet machine an FP32 image
-with one prompt took about 500 ms.
+`precision` settings; ratios are against FP32 with their 97% intervals.
 
 | Step | `"fp32"` (default) | `"tf32"` | `"bf16"` |
 | :--- | ---: | ---: | ---: |
-| One image with one text prompt (`set_image` + `set_text_prompt`) | 564 ms | 281 ms (×0.48-0.53) | 422 ms (×0.74-0.76) |
-| Another text prompt on the same image | 44 ms | 36 ms (×0.80-0.84) | 39 ms (×0.83-0.88) |
+| One image with one text prompt (`set_image` + `set_text_prompt`) | 513 ms | 243 ms (×0.46-0.49) | 394 ms (×0.74-0.82) |
+| Another text prompt on the same image | 46 ms | 39 ms (×0.81-0.87) | 40 ms (×0.85-0.95) |
 
 The process footprint for one image was within 1% across the three settings; a
 further BF16 prompt added 590 MB more than an FP32 one. In FP32, peak MLX memory
@@ -33,7 +31,7 @@ Its matrix multiplies dominate: per image, the MLP projections take about
 in full FP32. Attention itself (28 windowed and 4 global blocks) takes about
 22 ms, and RoPE, layer norms and the patch embedding under 10 ms together.
 
-In MLX 0.32.4, float32 matrix multiplies use the M5 neural-accelerator kernels
+In MLX 0.32.5, float32 matrix multiplies use the M5 neural-accelerator kernels
 only when TF32 is enabled. `medmlx-core` sets an unset `MLX_ENABLE_TF32` to `0`
 so results match the FP32 upstream reference, so with `"fp32"` these
 projections run on the regular GPU kernels at 11-15 TFLOP/s. `"tf32"` sets the
@@ -44,7 +42,7 @@ attention is unchanged. For the MLP's first projection (5184 × 1024 by 1024 ×
 The fusion encoder's attention heads are 32 wide, below the 64-wide minimum of
 MLX's fused attention kernel. Without a mask, `attention_metal.py` runs them
 on an FP32 flash-attention Metal kernel at their real width: each 5184-token
-self-attention takes 2.1 ms instead of 4.4 ms when zero-padded to 64. A
+self-attention takes 2.4 ms instead of 4.8 ms when zero-padded to 64. A
 further text prompt on the same image takes 27% less time (paired fresh-process
 rounds, 97% ratio interval 0.68-0.87) and its peak process footprint is
 230 MB lower. Against the padded path, masks

@@ -118,7 +118,7 @@ def attention(
     Unmasked 32-wide heads over more than ``_VECTOR_MAX_QUERY_LENGTH`` queries
     run ``attention_head_dim_32``, a fused FP32 kernel at the real head width;
     for the fusion encoder's 8 x 32-wide heads over 5184 tokens each
-    self-attention takes 2.1 ms instead of 4.4 ms zero-padded. Other head dims
+    self-attention takes 2.4 ms instead of 4.8 ms zero-padded. Other head dims
     below ``_FUSED_MIN_HEAD_DIM``, and masked 32-wide heads, are zero-padded to
     it for such queries; the output is sliced back. Zero lanes add nothing to
     ``q @ k.T`` and the caller's scale is kept, so this is the same attention
