@@ -1,6 +1,6 @@
 [project]
 name = "sam3-mlx"
-version = "0.4.1"
+version = "0.4.2"
 description = "Segment objects in images from text, box or point prompts with Meta's SAM 3"
 readme = "README.md"
 license = "LicenseRef-SAM AND MIT"
@@ -46,7 +46,7 @@ dependencies = [
 
 [project.urls]
 Homepage = "https://medmlx.org"
-Documentation = "https://github.com/MedMLX/sam3-mlx/blob/v0.4.1/README.md"
+Documentation = "https://github.com/MedMLX/sam3-mlx/blob/v0.4.2/README.md"
 Repository = "https://github.com/MedMLX/sam3-mlx"
 Issues = "https://github.com/MedMLX/sam3-mlx/issues"
 Weights = "https://huggingface.co/mlx-community/sam3-image"
