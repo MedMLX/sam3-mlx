@@ -1,6 +1,6 @@
 """Fused FP32 attention for 32-wide heads on Metal.
 
-MLX 0.32's fused attention kernel starts at head dim 64, so 32-wide heads would
+MLX 0.32.5's fused attention kernel starts at head dim 64, so 32-wide heads would
 otherwise be zero-padded to 64, doubling the score and value products. This
 kernel runs the same online-softmax (flash) attention at the real width with
 simdgroup 8x8 FP32 matrix products and FP32 accumulation throughout.

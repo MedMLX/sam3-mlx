@@ -157,7 +157,7 @@ def attention(
     ).astype(dtype)
 
 
-# MLX 0.32's fused full-attention kernel starts at head dim 64; its vector
+# MLX 0.32.5's fused full-attention kernel starts at head dim 64; its vector
 # kernel serves queries of at most 8 tokens.
 _FUSED_MIN_HEAD_DIM = 64
 _VECTOR_MAX_QUERY_LENGTH = 8
